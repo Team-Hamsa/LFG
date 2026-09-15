@@ -5017,6 +5017,43 @@ def _order_error_response(exc: closet_market_store.OrderError) -> web.Response:
     )
 
 
+async def _brix_line_check(wallet: str) -> tuple[web.Response | None, Decimal | None]:
+    """(refusal, balance): a refusal response when `wallet` has no BRIX trust
+    line (409 trustline_required) or it could not be read (503
+    balance_unavailable); otherwise (None, balance)."""
+    state, balance = await xrpl_ops.get_trustline_state(
+        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
+    )
+    if state == xrpl_ops.TrustlineState.ABSENT:
+        return (
+            web.json_response(
+                {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                status=409,
+            ),
+            None,
+        )
+    if state != xrpl_ops.TrustlineState.PRESENT:
+        return (
+            web.json_response(
+                {
+                    "error": "could not read your BRIX trustline — try again",
+                    "code": "balance_unavailable",
+                },
+                status=503,
+            ),
+            None,
+        )
+    return None, balance
+
+
+async def _require_brix_line(wallet: str) -> web.Response | None:
+    """#443 C1: every Closet Market counterparty must hold a BRIX trust line —
+    a seller receives the forward, and a buyer (even one paying XRP via
+    SendMax) may be owed a BRIX refund. Without one those payouts fail forever."""
+    refusal, _balance = await _brix_line_check(wallet)
+    return refusal
+
+
 def _parse_brix_price(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
@@ -5293,6 +5330,8 @@ async def handle_closet_ask_create(request):
             {"error": "slot, value and a valid price_brix are required", "code": "bad_request"},
             status=400,
         )
+    if (refusal := await _require_brix_line(wallet)) is not None:
+        return refusal
     try:
         async with owner_lock.owner_lock(wallet):
             order = await _closet_db(
@@ -5336,6 +5375,8 @@ async def handle_closet_ask_cancel(request):
 @require_wallet
 async def handle_closet_bid_fill(request):
     wallet, user = request["wallet"], request["user"]
+    if (refusal := await _require_brix_line(wallet)) is not None:
+        return refusal
     try:
         async with owner_lock.owner_lock(wallet):
             fill = await _closet_db(
@@ -5396,14 +5437,10 @@ async def handle_closet_bid_create(request):
             },
             status=409,
         )
-    state, balance = await xrpl_ops.get_trustline_state(
-        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
-    )
-    if state == xrpl_ops.TrustlineState.ABSENT:
-        return web.json_response(
-            {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
-        )
-    if state != xrpl_ops.TrustlineState.PRESENT or balance is None:
+    refusal, balance = await _brix_line_check(wallet)
+    if refusal is not None:
+        return refusal
+    if balance is None:
         return web.json_response(
             {
                 "error": "could not read your BRIX balance — try again",
@@ -5495,8 +5532,9 @@ async def handle_closet_bid_cancel(request):
 @require_wallet
 async def handle_closet_ask_buy(request):
     """POST /api/closet/ask/{id}/buy: one Xaman signature pays the ask to the
-    app wallet (InvoiceID = sha256(fill id)). Non-holders pay XRP via SendMax
-    on the same Payment — no trustline needed, the BRIX lands at the app."""
+    app wallet (InvoiceID = sha256(fill id)). A BRIX trust line is required
+    (a refund is paid in BRIX); buyers with a line but too little BRIX pay XRP
+    via SendMax on the same Payment."""
     wallet, user = request["wallet"], request["user"]
     order_id = request.match_info["order_id"]
     ask = await _closet_db(closet_market_store.get_order, order_id)
@@ -5510,6 +5548,8 @@ async def handle_closet_ask_buy(request):
         return web.json_response(
             {"error": "you can't buy your own listing", "code": "self_cross"}, status=400
         )
+    if (refusal := await _require_brix_line(wallet)) is not None:
+        return refusal
     try:
         pay_with, quote = await brix_payment.detect_payment_path(
             wallet, ask["price_brix"], currency=config.BRIX_CURRENCY_HEX, issuer=config.BRIX_ISSUER

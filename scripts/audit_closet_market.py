@@ -9,6 +9,7 @@ Offline checks (always):
     fills) than they hold
   * every live bid knows its escrow sequence
   * no fill has sat non-terminal for over an hour
+  * no non-terminal fill has failed a payout (or mirror) 10+ times
 With --onchain:
   * every live bid's escrow object exists with the recorded amount
   * the app wallet holds at least the BRIX it has received but not yet paid
@@ -39,6 +40,7 @@ from lfg_core import closet_market_flow, config, market_ops, xrpl_ops  # noqa: E
 from lfg_core import closet_market_store as cms  # noqa: E402
 
 STUCK_SECONDS = 3600
+PAYOUT_FAILING_ATTEMPTS = 10  # e.g. the counterparty removed their BRIX trust line
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -70,6 +72,10 @@ def audit_rows(conn: sqlite3.Connection, now: int | None = None) -> list[str]:
                 )
         if state == cms.REFUNDED and not f["refund_tx_hash"]:
             problems.append(f"fill {fid}: refunded without a refund payment")
+        if state not in cms.TERMINAL_FILL_STATES and int(f["attempts"]) >= PAYOUT_FAILING_ATTEMPTS:
+            problems.append(
+                f"fill {fid}: {state} payout failing after {f['attempts']} attempts ({f['error']})"
+            )
         if state not in cms.TERMINAL_FILL_STATES and now - int(f["updated_ts"]) > STUCK_SECONDS:
             problems.append(f"fill {fid}: stuck in {state} for {now - int(f['updated_ts'])}s")
     for o in _rows(

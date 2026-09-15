@@ -1,5 +1,6 @@
 import asyncio
 import json
+from decimal import Decimal
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
@@ -55,6 +56,11 @@ def closet_env(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(server, "_push_token", no_token)
+
+    async def brix_line(wallet, currency, issuer):
+        return server.xrpl_ops.TrustlineState.PRESENT, Decimal("100")
+
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_state", brix_line)
     server._CLOSET_BOOK_CACHE.clear()
     yield {"path": path, "scheduled": scheduled}
     server._CLOSET_BOOK_CACHE.clear()
@@ -221,3 +227,77 @@ def test_fill_view_state_mapping():
     )
     assert server._closet_fill_view({**base, "state": "asset_moved"}, "rB")["state"] == "done"
     assert server._closet_fill_view({**base, "state": "refunded"}, "rB")["state"] == "failed"
+
+
+def _no_brix_line(monkeypatch, state="ABSENT"):
+    seen = []
+
+    async def fake(wallet, currency, issuer):
+        seen.append((wallet, currency, issuer))
+        return getattr(server.xrpl_ops.TrustlineState, state), None
+
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_state", fake)
+    return seen
+
+
+def test_ask_create_requires_a_brix_trustline(closet_env, monkeypatch):
+    """(#443 final review C1) A seller without a BRIX line would get a forward
+    payment that fails forever — refuse the ask up front."""
+    body = {"slot": "Head", "value": "Crown", "price_brix": "3"}
+    seen = _no_brix_line(monkeypatch)
+    resp = _run(server.handle_closet_ask_create(_req("POST", "/", body)))
+    assert resp.status == 409 and _json(resp) == {
+        "error": "a BRIX trustline is required",
+        "code": "trustline_required",
+    }
+    assert seen == [(ME, server.config.BRIX_CURRENCY_HEX, server.config.BRIX_ISSUER)]
+    c = _db(closet_env)
+    assert c.execute("SELECT COUNT(*) FROM closet_orders").fetchone()[0] == 0
+    c.close()
+    _no_brix_line(monkeypatch, state="UNKNOWN")
+    resp = _run(server.handle_closet_ask_create(_req("POST", "/", body)))
+    assert resp.status == 503 and _json(resp)["code"] == "balance_unavailable"
+
+
+def test_bid_fill_requires_a_brix_trustline(closet_env, monkeypatch):
+    bid = _open_bid(closet_env)
+    _no_brix_line(monkeypatch)
+    resp = _run(
+        server.handle_closet_bid_fill(_req("POST", "/", match_info={"order_id": bid["id"]}))
+    )
+    assert resp.status == 409 and _json(resp)["code"] == "trustline_required"
+    c = _db(closet_env)
+    assert c.execute("SELECT COUNT(*) FROM closet_fills").fetchone()[0] == 0
+    c.close()
+    _no_brix_line(monkeypatch, state="UNKNOWN")
+    resp = _run(
+        server.handle_closet_bid_fill(_req("POST", "/", match_info={"order_id": bid["id"]}))
+    )
+    assert resp.status == 503 and _json(resp)["code"] == "balance_unavailable"
+    assert closet_env["scheduled"] == []
+
+
+def test_ask_buy_requires_a_brix_trustline(closet_env, monkeypatch):
+    """(#443 final review C1) An XRP (SendMax) buyer without a BRIX line could
+    never receive a refund if the ask is gone by the time the payment lands."""
+    c = _db(closet_env)
+    ask = cms.create_ask(c, owner=ME, slot="Head", value="Crown", price_brix="5", platform=None)
+    c.close()
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BIDDER)
+    detected = []
+
+    async def detect(wallet, amount, **kwargs):
+        detected.append(wallet)
+        return "XRP", "2.5"
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", detect)
+    _no_brix_line(monkeypatch)
+    resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
+    assert resp.status == 409 and _json(resp)["code"] == "trustline_required"
+    _no_brix_line(monkeypatch, state="UNKNOWN")
+    resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
+    assert resp.status == 503 and _json(resp)["code"] == "balance_unavailable"
+    assert detected == []
+    c = _db(closet_env)
+    assert c.execute("SELECT COUNT(*) FROM closet_fills").fetchone()[0] == 0
+    c.close()

@@ -85,6 +85,29 @@ def test_stuck_fill_is_reported():
     assert any("stuck" in p for p in audit.audit_rows(c, now=fill["created_ts"] + 7200))
 
 
+def test_failing_payout_is_reported_after_ten_attempts():
+    """(#443 final review C1) A payout that keeps failing (e.g. the counterparty
+    removed their BRIX trustline) must surface in the nightly audit."""
+    c = _conn()
+    fill = _settled_fill(c)
+    cms.update_fill(
+        c,
+        fill["id"],
+        state=cms.ASSET_MOVED,
+        forward_tx_hash=None,
+        attempts=9,
+        error="forward failed; will retry",
+    )
+    assert not any("payout failing" in p for p in audit.audit_rows(c, now=fill["created_ts"]))
+    cms.update_fill(c, fill["id"], attempts=10)
+    assert (
+        f"fill {fill['id']}: asset_moved payout failing after 10 attempts (forward failed; will retry)"
+        in audit.audit_rows(c, now=fill["created_ts"])
+    )
+    cms.update_fill(c, fill["id"], state=cms.MIRRORED, forward_tx_hash="FWD")
+    assert not any("payout failing" in p for p in audit.audit_rows(c))
+
+
 def test_onchain_missing_escrow_and_short_balance(monkeypatch):
     c = _conn()
     bid = cms.create_pending_bid(

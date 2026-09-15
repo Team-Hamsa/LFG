@@ -66,8 +66,8 @@ Journals: `$ECONOMY_RECORDS_DIR/closet-fill-<id>.json` and `closet-order-<id>.js
 | state | meaning | action |
 |---|---|---|
 | `indeterminate` | a backend tx outcome is unknown (or a crash left a write-ahead intent: `pending_phase` set) | none — resolves when the validated ledger passes `pending_lls` (memo `lfg:closet_<phase>:<id>` found = landed, absent = retried) |
-| `asset_moved` + attempts > 0 | forward payment failing | check app wallet BRIX balance (audit `owes` line) |
+| `asset_moved` + attempts > 0 | forward payment failing | check app wallet BRIX balance (audit `owes` line); or the counterparty removed their BRIX trustline (audit `payout failing` line) — the forward retries until they re-add it |
 | `paid` + attempts > 0 | Closet mirror failing | check CDN / NFTokenModify; the listener will not rebuild this owner until mirrored |
-| `refund_pending` + attempts > 0 | refund failing | app wallet balance |
+| `refund_pending` + attempts > 0 | refund failing | app wallet balance; or the counterparty removed their BRIX trustline (audit `payout failing` line) — the refund retries until they re-add it |
 
 Any fill or order with `pending_phase` set resolves itself: memo `lfg:closet_<phase>:<id>` found = landed, validated ledger past `pending_lls` with nothing found = retried; never edit these columns by hand.
