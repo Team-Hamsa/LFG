@@ -253,10 +253,17 @@ promise.
     returning its `ClaimPayment` tri-state.
 - **Outcomes:**
   - `confirmed` on validated `tesSUCCESS`.
-  - `failed` on a **definitive** failure: a validated non-success result, or a
-    presubmit `simulate` rejection. `_submit_and_confirm` logs the result code
-    but does not return it.
-  - `ClaimNotSubmitted` (refused before anything was built) → back to `owed`.
+  - `failed` (reason `payout_failed`) on a **definitive** failure: a validated
+    non-success result, or a presubmit `simulate` rejection.
+    `_submit_and_confirm` logs the result code but does not return it.
+  - `ClaimNotSubmitted` → back to `owed`, and the pay attempt reports
+    `deferred`. `send_fee_cover_refund` raises it for **every** pre-flight
+    step before `_submit_and_confirm` (drops check, signing wallet, the
+    validated-ledger read raising or returning nothing, `Payment`
+    construction), chaining the original error: nothing reached the ledger,
+    so it must never park a user-visible `failed`. An unreadable validated
+    ledger in `pay_refund` itself (None or raising) also defers without
+    claiming.
   - An unknown outcome stays `submitted` with the payment's own
     `last_ledger_seq`.
 - **An indeterminate outcome is never retried blind.** Recovery resolves it.
@@ -270,8 +277,10 @@ promise.
     `Account == SIGNING_ACCOUNT`, `Destination == bidder`, XRP
     `delivered_amount == refund_drops`.
   - Found → `confirmed`. Absent **and** validated ledger past
-    `last_ledger_seq` → `failed`. Anything else stays untouched.
-- **A `failed` row is parked, never retried automatically.** Typical causes:
+    `last_ledger_seq` → `failed` with reason **`payout_expired`**. Anything
+    else stays untouched.
+- **A `failed` row is parked, never retried automatically**, whether its
+  reason is `payout_failed` or `payout_expired`. Typical causes:
   - a destination property (`tecDST_TAG_NEEDED`, DepositAuth `tecNO_PERMISSION`)
   - an issuer short of spendable XRP (`tecUNFUNDED_PAYMENT`)
 
@@ -343,7 +352,10 @@ promise.
     typically), expired promises stay open, holding their budget, until it is
     certified.
 - **Retry of `owed` rows.** A row with retryable state is retried each sweep
-  with an in-memory attempt counter. After `_SWEEP_MAX_ATTEMPTS` it is
+  with an in-memory attempt counter. A `deferred` pay attempt (nothing reached
+  the ledger) does not count as an attempt. Each promise, each owed row and
+  the recovery call run in their own `try/except`, so one bad row never stops
+  the sweep — it is the only payer. After `_SWEEP_MAX_ATTEMPTS` it is
   journaled to `ECONOMY_RECORDS_DIR/fee-cover-giveup-<accept_tx_hash>.json`,
   following the `settle_pending_trait_sales` pattern. The row stays `owed` for
   a human.

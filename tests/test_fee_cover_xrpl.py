@@ -108,6 +108,36 @@ def test_send_fee_cover_refund_refuses_before_submitting(monkeypatch, capture):
     assert capture.tx is None
 
 
+def test_send_fee_cover_refund_preflight_ledger_error_is_not_submitted(monkeypatch, capture):
+    async def ledger_raises(client):
+        raise ConnectionError("rippled unreachable")
+
+    monkeypatch.setattr(xrpl_ops, "_current_validated_ledger_index", ledger_raises)
+    with pytest.raises(xrpl_ops.ClaimNotSubmitted) as excinfo:
+        _run(xrpl_ops.send_fee_cover_refund(BUYER, 1, ACCEPT, campaign_id=7))
+    assert isinstance(excinfo.value.__cause__, ConnectionError)
+    assert capture.tx is None
+
+
+def test_send_fee_cover_refund_bad_signing_seed_is_not_submitted(monkeypatch, capture):
+    monkeypatch.setattr(config, "SEED", "not-a-seed")
+    with pytest.raises(xrpl_ops.ClaimNotSubmitted) as excinfo:
+        _run(xrpl_ops.send_fee_cover_refund(BUYER, 1, ACCEPT, campaign_id=7))
+    assert excinfo.value.__cause__ is not None
+    assert capture.tx is None
+
+
+def test_send_fee_cover_refund_payment_construction_error_is_not_submitted(monkeypatch, capture):
+    def bad_payment(**kwargs):
+        raise ValueError("invalid destination")
+
+    monkeypatch.setattr(xrpl_ops, "Payment", bad_payment)
+    with pytest.raises(xrpl_ops.ClaimNotSubmitted) as excinfo:
+        _run(xrpl_ops.send_fee_cover_refund(BUYER, 1, ACCEPT, campaign_id=7))
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert capture.tx is None
+
+
 def _entry(
     *,
     account=None,

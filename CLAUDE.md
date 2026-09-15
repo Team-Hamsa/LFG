@@ -1211,8 +1211,12 @@ accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
 a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +
 `lfg:fee_cover:<accept hash>`. Stop blocks new promises and honors open ones.
 The settlement loop now always starts (it settles/pays/releases fee-cover rows
-on any stack). Indeterminate payouts resolve via startup recovery;
-definitive failures park `failed` — fix the cause, then
+on any stack). Indeterminate payouts resolve via startup recovery; a refund
+refused before submit (`ClaimNotSubmitted`, unreadable ledger) goes back to
+`owed` and retries next sweep. Two reasons park `failed`, neither ever retried
+automatically: `payout_failed` (a validated definitive failure) and
+`payout_expired` (recovery found no payout past its LastLedgerSequence). An
+operator fixes the cause, then requeues either with
 `scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`.
 Report/audit: `scripts/fee_cover_report.py --network <net> --audit` (pm2
 `lfg-fee-cover-audit` / `stg-fee-cover-audit`, 03:40 UTC — registering it is an

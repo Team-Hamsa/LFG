@@ -2689,36 +2689,46 @@ async def send_fee_cover_refund(
 
     Same tri-state contract as send_brix_claim. LastLedgerSequence is pinned
     before submission and clamped to the deadline the caller already recorded,
-    so the stored deadline is an upper bound at every instant."""
-    if int(drops) <= 0:
-        raise ClaimNotSubmitted("a fee-cover refund must be at least 1 drop")
-    wallet = Wallet.from_seed(config.SEED)
-    client = JsonRpcClient(config.JSON_RPC_URL)
-    current = await _current_validated_ledger_index(client)
-    if current is None:
-        raise ClaimNotSubmitted(
-            "could not read the validated ledger index; refusing to submit a refund"
-        )
-    last_ledger_seq = current + config.FEE_COVER_LEDGER_MARGIN
-    if max_last_ledger_seq is not None:
-        last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
+    so the stored deadline is an upper bound at every instant.
 
-    payment = Payment(
-        account=config.SIGNING_ACCOUNT,  # explicit: SEED is a regular key on mainnet
-        destination=destination,
-        amount=str(int(drops)),
-        source_tag=config.SOURCE_TAG,
-        last_ledger_sequence=last_ledger_seq,
-        memos=[
-            *memos.build_memo_models(
-                memos.INITIATOR_BACKEND,
-                memos.PLATFORM_BACKEND,
-                memos.ACTION_FEE_COVER,
-                campaign=f"fee-cover-{int(campaign_id)}",
-            ),
-            Memo(memo_data=fee_cover_memo_tag(accept_tx_hash).encode().hex().upper()),
-        ],
-    )
+    Every pre-flight step (drops check, signing wallet, ledger-index read,
+    Payment construction) raises ClaimNotSubmitted — chaining the original
+    error — because nothing has reached the ledger yet: the caller can safely
+    return the refund to `owed` instead of parking a user-visible failure."""
+    try:
+        if int(drops) <= 0:
+            raise ClaimNotSubmitted("a fee-cover refund must be at least 1 drop")
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        current = await _current_validated_ledger_index(client)
+        if current is None:
+            raise ClaimNotSubmitted(
+                "could not read the validated ledger index; refusing to submit a refund"
+            )
+        last_ledger_seq = current + config.FEE_COVER_LEDGER_MARGIN
+        if max_last_ledger_seq is not None:
+            last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
+
+        payment = Payment(
+            account=config.SIGNING_ACCOUNT,  # explicit: SEED is a regular key on mainnet
+            destination=destination,
+            amount=str(int(drops)),
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=last_ledger_seq,
+            memos=[
+                *memos.build_memo_models(
+                    memos.INITIATOR_BACKEND,
+                    memos.PLATFORM_BACKEND,
+                    memos.ACTION_FEE_COVER,
+                    campaign=f"fee-cover-{int(campaign_id)}",
+                ),
+                Memo(memo_data=fee_cover_memo_tag(accept_tx_hash).encode().hex().upper()),
+            ],
+        )
+    except ClaimNotSubmitted:
+        raise
+    except Exception as exc:
+        raise ClaimNotSubmitted(f"fee-cover refund pre-flight failed: {exc!r}") from exc
     try:
         result = await _submit_and_confirm(payment, wallet, client, "send_fee_cover_refund")
     except IndeterminateResultError:

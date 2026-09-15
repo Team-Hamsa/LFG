@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -352,11 +353,11 @@ def test_concurrent_pay_refund_submits_exactly_once(env):
     assert "confirmed" in states
 
 
-def test_pay_refund_not_submitted_returns_to_owed(env):
+def test_pay_refund_not_submitted_returns_to_owed_and_defers(env):
     deps, ledger, campaign = env
     _owed(deps, campaign)
     ledger.send_error = xrpl_ops.ClaimNotSubmitted("no ledger")
-    assert _run(settle.pay_refund(deps, ACCEPT)) == "owed"
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "deferred"
     assert _refund(deps)["state"] == "owed" and _refund(deps)["last_ledger_seq"] is None
 
 
@@ -381,8 +382,27 @@ def test_pay_refund_without_a_ledger_index_does_not_claim(env):
     deps, ledger, campaign = env
     _owed(deps, campaign)
     ledger.validated_index = None
-    assert _run(settle.pay_refund(deps, ACCEPT)) == "owed"
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "deferred"
     assert ledger.sent == []
+    assert _refund(deps)["state"] == "owed"
+
+
+def test_pay_refund_defers_when_the_ledger_read_raises_and_the_sweep_counts_no_attempt(env):
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+
+    async def ledger_down():
+        raise RuntimeError("rippled unreachable")
+
+    deps.current_ledger = ledger_down
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "deferred"
+    assert ledger.sent == [] and _refund(deps)["state"] == "owed"
+    attempts: dict[str, int] = {"OTHER": 1}
+    gave_up: list[dict] = []
+    for _ in range(3):
+        _run(settle.sweep_once(deps, attempts=attempts, max_attempts=1, on_giveup=gave_up.append))
+    assert attempts == {"OTHER": 1}
+    assert gave_up == [] and ledger.sent == []
 
 
 def test_pay_refund_missing_row(env):
@@ -414,7 +434,7 @@ def test_recover_absent_before_deadline_is_untouched_and_after_is_failed(env):
     assert _run(settle.recover_refunds(deps)) == {}
     ledger.validated_index = 7_041
     assert _run(settle.recover_refunds(deps)) == {ACCEPT: "failed"}
-    assert _refund(deps)["reason"] == "payout_failed"
+    assert _refund(deps)["reason"] == "payout_expired"
 
 
 def test_recover_lookup_error_is_untouched(env):
@@ -495,7 +515,9 @@ def test_open_promises_are_honored_after_stop(env):
     assert _refund(deps)["state"] == "confirmed"
 
 
-def test_sweep_gives_up_on_a_refund_after_max_attempts(env):
+def test_sweep_never_gives_up_on_a_deferred_refund(env):
+    """ClaimNotSubmitted refuses before anything reached the ledger: it is
+    retried every sweep and never counted towards the giveup."""
     deps, ledger, campaign = env
     _owed(deps, campaign)
     ledger.send_error = xrpl_ops.ClaimNotSubmitted("still no ledger")
@@ -503,8 +525,83 @@ def test_sweep_gives_up_on_a_refund_after_max_attempts(env):
     gave_up: list[dict] = []
     for _ in range(3):
         _run(settle.sweep_once(deps, attempts=attempts, max_attempts=2, on_giveup=gave_up.append))
-    assert len(ledger.sent) == 2
+    assert len(ledger.sent) == 3
+    assert attempts == {} and gave_up == []
+    assert _refund(deps)["state"] == "owed"
+
+
+def test_sweep_gives_up_on_a_refund_after_max_attempts(env, monkeypatch):
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+    calls: list[str] = []
+
+    async def still_owed(deps_, key):
+        calls.append(key)
+        return "owed"
+
+    monkeypatch.setattr(settle, "pay_refund", still_owed)
+    attempts: dict[str, int] = {}
+    gave_up: list[dict] = []
+    for _ in range(3):
+        _run(settle.sweep_once(deps, attempts=attempts, max_attempts=2, on_giveup=gave_up.append))
+    assert calls == [ACCEPT, ACCEPT]
     assert [row["accept_tx_hash"] for row in gave_up] == [ACCEPT]
+
+
+def _extra_owed(deps, campaign, offer_index, accept, bidder="rOtherBidder"):
+    _promise(deps, campaign, offer_index=offer_index, bidder=bidder)
+    conn = store.connect(deps.app_db_path)
+    try:
+        store.fill_promise(
+            conn,
+            offer_index,
+            store.RefundDecision(accept, SELLER, CAFE, 80_642, 349_605, 50_000, None),
+            now=ACCEPT_TS,
+        )
+    finally:
+        conn.close()
+
+
+def test_a_promise_whose_settle_raises_does_not_stop_an_owed_refund_being_paid(env, monkeypatch):
+    deps, ledger, campaign = env
+    _owed(deps, campaign)  # ACCEPT is owed
+    _promise(deps, campaign, offer_index="E" * 64, bidder="rOtherBidder")
+    real_settle = settle.settle_promise
+
+    async def flaky_settle(deps_, offer_index):
+        if offer_index == "E" * 64:
+            raise sqlite3.OperationalError("database is locked")
+        return await real_settle(deps_, offer_index)
+
+    monkeypatch.setattr(settle, "settle_promise", flaky_settle)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda r: None))
+    assert report.paid == 1
+    assert _refund(deps)["state"] == "confirmed"
+
+
+def test_one_owed_row_raising_does_not_stop_the_next_or_recovery(env, monkeypatch):
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+    _extra_owed(deps, campaign, "E" * 64, "ACCEPT2")
+    real_pay = settle.pay_refund
+    recovered: list[bool] = []
+
+    async def flaky_pay(deps_, key):
+        if key == ACCEPT:
+            raise RuntimeError("row read failed")
+        return await real_pay(deps_, key)
+
+    async def flaky_recover(deps_):
+        recovered.append(True)
+        raise RuntimeError("account_tx down")
+
+    monkeypatch.setattr(settle, "pay_refund", flaky_pay)
+    monkeypatch.setattr(settle, "recover_refunds", flaky_recover)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda r: None))
+    assert report.paid == 1 and report.recovered == 0
+    assert _refund(deps, "ACCEPT2")["state"] == "confirmed"
+    assert _refund(deps)["state"] == "owed"
+    assert recovered == [True]
 
 
 # --- expiry release margin tests ---

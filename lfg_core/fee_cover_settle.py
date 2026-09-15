@@ -203,12 +203,23 @@ def _claim(deps: FeeCoverDeps, key: str, last_ledger_seq: int) -> bool:
 
 
 def _record(
-    deps: FeeCoverDeps, key: str, state: str, tx_hash: str | None, last_ledger_seq: int | None
+    deps: FeeCoverDeps,
+    key: str,
+    state: str,
+    tx_hash: str | None,
+    last_ledger_seq: int | None,
+    reason: str | None = None,
 ) -> None:
     conn = fee_cover_store.connect(deps.app_db_path)
     try:
         fee_cover_store.record_payout(
-            conn, key, state=state, tx_hash=tx_hash, last_ledger_seq=last_ledger_seq, now=deps.now()
+            conn,
+            key,
+            state=state,
+            tx_hash=tx_hash,
+            last_ledger_seq=last_ledger_seq,
+            now=deps.now(),
+            reason=reason,
         )
     finally:
         conn.close()
@@ -299,14 +310,26 @@ async def settle_promise(deps: FeeCoverDeps, offer_index: str) -> dict[str, Any]
 
 
 async def pay_refund(deps: FeeCoverDeps, accept_tx_hash: str) -> str:
+    """Claim and pay one `owed` refund. Returns the row's resulting state, or
+    "deferred" when nothing reached the ledger for a transient pre-flight
+    reason (no validated ledger index, ClaimNotSubmitted) — the row stays
+    `owed` and the sweep retries it without counting an attempt."""
     row = await asyncio.to_thread(_refund_row, deps, accept_tx_hash)
     if row is None:
         return "missing"
     if row["state"] != "owed":
         return str(row["state"])
-    current = await deps.current_ledger()
+    try:
+        current = await deps.current_ledger()
+    except Exception:
+        logging.warning(
+            "fee cover refund %s deferred: validated ledger read failed",
+            accept_tx_hash,
+            exc_info=True,
+        )
+        return "deferred"
     if current is None:
-        return "owed"
+        return "deferred"
     provisional = current + deps.ledger_margin * 10
     if not await asyncio.to_thread(_claim, deps, accept_tx_hash, provisional):
         latest = await asyncio.to_thread(_refund_row, deps, accept_tx_hash)
@@ -322,7 +345,7 @@ async def pay_refund(deps: FeeCoverDeps, accept_tx_hash: str) -> str:
     except xrpl_ops.ClaimNotSubmitted as exc:
         logging.warning("fee cover refund %s not submitted: %s", accept_tx_hash, exc)
         await asyncio.to_thread(_unclaim, deps, accept_tx_hash)
-        return "owed"
+        return "deferred"
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -339,8 +362,9 @@ async def pay_refund(deps: FeeCoverDeps, accept_tx_hash: str) -> str:
 
 
 async def recover_refunds(deps: FeeCoverDeps) -> dict[str, str]:
-    """confirmed when the memo-tagged refund is on-ledger; failed only when it
-    is absent AND the validated ledger has passed the row's deadline."""
+    """confirmed when the memo-tagged refund is on-ledger; failed (reason
+    `payout_expired`) only when it is absent AND the validated ledger has
+    passed the row's deadline. Never requeued automatically."""
     rows = await asyncio.to_thread(_rows, deps, "submitted")
     if not rows:
         return {}
@@ -369,7 +393,7 @@ async def recover_refunds(deps: FeeCoverDeps) -> dict[str, str]:
             continue
         if last_ledger_seq is None or validated <= int(last_ledger_seq):
             continue
-        await asyncio.to_thread(_record, deps, key, "failed", None, None)
+        await asyncio.to_thread(_record, deps, key, "failed", None, None, "payout_expired")
         outcomes[key] = "failed"
     return outcomes
 
@@ -381,30 +405,54 @@ async def sweep_once(
     max_attempts: int,
     on_giveup: Callable[[dict[str, Any]], None],
 ) -> SweepReport:
+    """One pass: settle/release open promises, pay owed refunds, recover
+    submitted ones. The sweep is the only payer, so every unit of work is
+    isolated — one bad promise or row logs and the pass continues."""
     report = SweepReport()
-    for promise in await asyncio.to_thread(_open_promises, deps):
+    try:
+        promises = await asyncio.to_thread(_open_promises, deps)
+    except Exception:
+        logging.warning("fee cover sweep: listing open promises failed", exc_info=True)
+        promises = []
+    for promise in promises:
         offer_index = str(promise["offer_index"])
-        view = await settle_promise(deps, offer_index)
-        if view is not None and view["state"] != "open":
-            report.settled += 1
-            continue
-        reason = await asyncio.to_thread(_release_reason, deps, promise)
-        if reason is not None and await asyncio.to_thread(_release, deps, offer_index, reason):
-            report.released += 1
-    for row in await asyncio.to_thread(_rows, deps, "owed"):
+        try:
+            view = await settle_promise(deps, offer_index)
+            if view is not None and view["state"] != "open":
+                report.settled += 1
+                continue
+            reason = await asyncio.to_thread(_release_reason, deps, promise)
+            if reason is not None and await asyncio.to_thread(_release, deps, offer_index, reason):
+                report.released += 1
+        except Exception:
+            logging.warning("fee cover sweep: promise %s failed", offer_index, exc_info=True)
+    try:
+        owed_rows = await asyncio.to_thread(_rows, deps, "owed")
+    except Exception:
+        logging.warning("fee cover sweep: listing owed refunds failed", exc_info=True)
+        owed_rows = []
+    for row in owed_rows:
         key = str(row["accept_tx_hash"])
-        if attempts.get(key, 0) >= max_attempts:
-            continue
-        state = await pay_refund(deps, key)
-        if state == "owed":
-            attempts[key] = attempts.get(key, 0) + 1
-            if attempts[key] >= max_attempts:
-                on_giveup(row)
-        else:
-            attempts.pop(key, None)
-            if state in ("confirmed", "submitted", "failed"):
-                report.paid += 1
-    report.recovered = len(await recover_refunds(deps))
+        try:
+            if attempts.get(key, 0) >= max_attempts:
+                continue
+            state = await pay_refund(deps, key)
+            if state == "deferred":
+                continue  # nothing reached the ledger: retry next pass, no attempt
+            if state == "owed":
+                attempts[key] = attempts.get(key, 0) + 1
+                if attempts[key] >= max_attempts:
+                    on_giveup(row)
+            else:
+                attempts.pop(key, None)
+                if state in ("confirmed", "submitted", "failed"):
+                    report.paid += 1
+        except Exception:
+            logging.warning("fee cover sweep: refund %s failed", key, exc_info=True)
+    try:
+        report.recovered = len(await recover_refunds(deps))
+    except Exception:
+        logging.warning("fee cover sweep: recovery failed", exc_info=True)
     return report
 
 

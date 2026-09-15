@@ -668,15 +668,21 @@ def record_payout(
     tx_hash: str | None,
     last_ledger_seq: int | None,
     now: int | None = None,
+    reason: str | None = None,
 ) -> None:
+    """Record a payout outcome on a `submitted` row. A `failed` row carries a
+    reason: `payout_failed` (default — a validated definitive failure) or
+    `payout_expired` (recovery found no payout and the ledger passed the
+    deadline). Both are parked for an operator's --requeue."""
     if state not in ("confirmed", "failed", "submitted"):
         raise ValueError(f"not a payout outcome: {state}")
+    failed_reason = (reason or "payout_failed") if state == "failed" else None
     conn.execute(
         "UPDATE fee_cover_refunds SET state = ?, payout_tx_hash = COALESCE(?, payout_tx_hash),"
         " last_ledger_seq = COALESCE(?, last_ledger_seq),"
-        " reason = CASE WHEN ? = 'failed' THEN 'payout_failed' ELSE reason END, updated_at = ?"
+        " reason = CASE WHEN ? = 'failed' THEN ? ELSE reason END, updated_at = ?"
         " WHERE accept_tx_hash = ? AND state = 'submitted'",
-        (state, tx_hash, last_ledger_seq, state, _now(now), accept_tx_hash),
+        (state, tx_hash, last_ledger_seq, state, failed_reason, _now(now), accept_tx_hash),
     )
     conn.commit()
 

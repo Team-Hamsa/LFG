@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -701,3 +702,37 @@ def test_browse_estimate_is_hidden_without_budget_headroom(env):
     )
     conn.close()
     assert "fee_cover_drops" not in _browse()
+
+
+# --- linked-counterparty lookup is fail-open ---------------------------------
+
+
+def _funders(app_db, rows):
+    conn = sqlite3.connect(app_db)
+    try:
+        server.funding.ensure_schema(conn)
+        for wallet, funder in rows:
+            server.funding.record_funder(conn, wallet, funder, 1)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_linked_bucket_lookup_error_still_checks_the_funder(env, monkeypatch):
+    def bucket_boom(wallet):
+        raise RuntimeError("identity db locked")
+
+    monkeypatch.setattr(server.identity_store, "bucket_for_wallet", bucket_boom)
+    assert server._fee_cover_linked(BIDDER, OWNER) is False
+    _funders(env["app_db"], [(BIDDER, "rSharedFunder"), (OWNER, "rSharedFunder")])
+    assert server._fee_cover_linked(BIDDER, OWNER) is True
+
+
+def test_linked_funder_lookup_error_fails_open(env, monkeypatch):
+    monkeypatch.setattr(server.identity_store, "bucket_for_wallet", lambda wallet: None)
+
+    def funder_boom(conn, wallet):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(server.funding, "cached_funder", funder_boom)
+    assert server._fee_cover_linked(BIDDER, OWNER) is False

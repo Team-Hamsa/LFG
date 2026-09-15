@@ -4042,20 +4042,37 @@ def _fee_cover_system_wallets() -> frozenset[str]:
 def _fee_cover_linked(bidder: str, seller: str) -> bool:
     """Same logical user (identity bucket) or the same non-exchange activation
     funder (#461). Fail-open on lookup errors: the refund is capped below the
-    royalty, so a missed link can never make LFG a net payer."""
+    royalty, so a missed link can never make LFG a net payer.
+
+    Never raises: a failed bucket lookup counts as "no bucket link" (the
+    funder rule is still checked), a failed funder lookup as "not linked"."""
     try:
         bucket = identity_store.bucket_for_wallet(bidder)
-    except identity_store.BucketLookupError:
+    except Exception:
+        logging.warning(
+            "fee cover: identity bucket lookup for %s failed; treating as unlinked",
+            bidder,
+            exc_info=True,
+        )
         bucket = None
     if bucket is not None and seller in cast(list[str], bucket.get("wallets") or []):
         return True
-    conn = sqlite3.connect(_fee_cover_db())
     try:
-        funding.ensure_schema(conn)
-        funder_a = funding.cached_funder(conn, bidder)
-        funder_b = funding.cached_funder(conn, seller)
-    finally:
-        conn.close()
+        conn = sqlite3.connect(_fee_cover_db())
+        try:
+            funding.ensure_schema(conn)
+            funder_a = funding.cached_funder(conn, bidder)
+            funder_b = funding.cached_funder(conn, seller)
+        finally:
+            conn.close()
+    except Exception:
+        logging.warning(
+            "fee cover: funder lookup for %s/%s failed; treating as unlinked",
+            bidder,
+            seller,
+            exc_info=True,
+        )
+        return False
     return funder_a is not None and funder_a == funder_b and funder_a not in funding.EXCHANGES
 
 

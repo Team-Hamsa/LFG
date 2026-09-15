@@ -381,6 +381,51 @@ def test_requeue_failed_requires_budget_headroom(conn):
     assert store.requeue_failed(conn, "ACCEPT1", now=1107) == "not_failed"
 
 
+def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
+    c = _live(conn)
+    for bid, accept, reason, expected in (
+        ("BID1", "ACCEPT1", None, "payout_failed"),
+        ("BID2", "ACCEPT2", "payout_expired", "payout_expired"),
+    ):
+        store.record_promise(
+            conn,
+            c,
+            _inp(bid, bidder=f"r{bid}"),
+            promised_drops=80_642,
+            decline_reason=None,
+            now=1001,
+        )
+        store.fill_promise(conn, bid, _owed(accept), now=1100)
+        store.claim_for_payout(conn, accept, 5_000, now=1101)
+        store.record_payout(
+            conn,
+            accept,
+            state="failed",
+            tx_hash=None,
+            last_ledger_seq=None,
+            now=1102,
+            reason=reason,
+        )
+        row = store.get_refund(conn, accept)
+        assert (row["state"], row["reason"]) == ("failed", expected)
+    # a non-failed outcome never takes the reason
+    store.record_promise(
+        conn, c, _inp("BID3", bidder="rBID3"), promised_drops=80_642, decline_reason=None, now=1001
+    )
+    store.fill_promise(conn, "BID3", _owed("ACCEPT3"), now=1100)
+    store.claim_for_payout(conn, "ACCEPT3", 5_000, now=1101)
+    store.record_payout(
+        conn,
+        "ACCEPT3",
+        state="confirmed",
+        tx_hash="P3",
+        last_ledger_seq=None,
+        now=1102,
+        reason="payout_expired",
+    )
+    assert store.get_refund(conn, "ACCEPT3")["reason"] is None
+
+
 def test_view_folds_refund_over_promise(conn):
     c = _live(conn)
     assert store.view_for_offer(conn, "BID1") is None
