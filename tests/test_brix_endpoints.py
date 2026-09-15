@@ -733,3 +733,91 @@ def test_trustline_status_survives_a_failed_push_token_write(drip, monkeypatch):
     resp = _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid})))
     assert resp.status == 200 and _body(resp)["state"] == "validating"
     assert not server.brix_trustline_payloads[uuid].get("token_saved")
+
+
+def _stale_claims(conn):
+    """Two claims a crash left open (one open claim per wallet): rPaid's
+    payout is on-ledger; rLost's never landed and its LastLedgerSequence has
+    passed."""
+    for claim_id, wallet in ((1, "rPaid"), (2, "rLost")):
+        _accrue(conn, wallet=wallet, count=2)
+        conn.execute(
+            "INSERT INTO brix_claims (claim_id, wallet, amount, state, last_ledger_seq)"
+            " VALUES (?, ?, 2, 'submitted', 500)",
+            (claim_id, wallet),
+        )
+        conn.execute("UPDATE brix_accruals SET claim_id = ? WHERE owner = ?", (claim_id, wallet))
+    conn.commit()
+
+
+def test_startup_claim_recovery_resolves_open_claims(drip, monkeypatch, caplog):
+    """Regression: the startup hook opened the drip store inside
+    asyncio.to_thread and then used it on the event-loop thread, so every boot
+    since 2026-08-20 died with sqlite3.ProgrammingError ("SQLite objects created
+    in a thread can only be used in that same thread") and no open claim was
+    ever recovered. Drives the real on_startup hook end to end."""
+    _stale_claims(drip)
+
+    async def validated():
+        return 600
+
+    async def find(claim_id, wallet, amount, min_ledger=None):
+        return "PAIDHASH" if claim_id == 1 else None
+
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", validated)
+    monkeypatch.setattr(xrpl_ops, "find_claim_payment", find)
+
+    async def boot():
+        app: dict = {}
+        await server._start_brix_claim_recovery(app)
+        await app["brix_recovery_task"]
+
+    with caplog.at_level("WARNING"):
+        _run(boot())
+
+    assert "brix claim recovery failed at startup" not in caplog.text
+    rows = dict(drip.execute("SELECT claim_id, state FROM brix_claims").fetchall())
+    assert rows == {1: "confirmed", 2: "failed"}
+    assert drip.execute("SELECT tx_hash FROM brix_claims WHERE claim_id = 1").fetchone()[0] == (
+        "PAIDHASH"
+    )
+    # The definitively failed claim's accruals are unbound — claimable again.
+    unbound = drip.execute(
+        "SELECT COUNT(*) FROM brix_accruals WHERE claim_id IS NULL AND owner = 'rLost'"
+    ).fetchone()[0]
+    assert unbound == 2
+
+
+def test_threaded_recovery_never_decides_a_claim_it_did_not_look_up(drip, monkeypatch):
+    """The threaded recovery reads open claims and settles them on separate
+    connections, so a claim can appear in between. It was never looked up on
+    chain, so its absence proves nothing — it must stay open, not be failed."""
+    _stale_claims(drip)
+
+    async def validated():
+        return 600
+
+    def open_conn():
+        return history_store.init_history_db(history_store.history_db_path())
+
+    async def find(claim_id, wallet, amount, min_ledger=None):
+        # A claim lands after the open-claims read, before recover() runs.
+        conn = open_conn()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO brix_claims (claim_id, wallet, amount, state,"
+                " last_ledger_seq) VALUES (3, 'rLate', 1, 'submitted', 500)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return "PAIDHASH" if claim_id == 1 else None
+
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", validated)
+    monkeypatch.setattr(xrpl_ops, "find_claim_payment", find)
+
+    outcomes = _run(brix_drip.recover_from_chain_threaded(open_conn))
+
+    assert outcomes == {1: "confirmed", 2: "failed"}
+    state = drip.execute("SELECT state FROM brix_claims WHERE claim_id = 3").fetchone()[0]
+    assert state == "submitted"
