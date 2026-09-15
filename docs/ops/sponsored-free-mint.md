@@ -118,10 +118,12 @@ box-local DBs:
 `start` also runs the Step 0b archive re-verification synchronously and
 reports the result in its exit code (`0` usable, `3` campaign active but
 admission still fail-closed — fix the archive and `start` again; `4` started
-with `--skip-reverify`, usability unknown; `2` the `--network` flag does not
-match the box's `XRPL_NETWORK`; `1` refused by the library). Audit rows are
-written with actor `cli:<os-login>` (the shell account, not a flag; `--note`
-appends a label) so they are distinguishable from Discord-driven flips. The script exposes nothing over
+with `--skip-reverify`, usability unknown; `5` archive usable but the audit
+row could not be written — record the run by hand; `2` the `--network` flag
+does not match the box's `XRPL_NETWORK`; `1` refused by the library). Audit
+rows are written with actor `cli:<os-login>` (the process owner resolved from
+the real UID, not `$USER` or a flag; `--note` appends a label) so they are
+distinguishable from Discord-driven flips. The script exposes nothing over
 the network and needs the box's `.env` and DB files, so a checkout of the
 public repo alone cannot operate the campaign.
 

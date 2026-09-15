@@ -28,7 +28,7 @@ def dbs(monkeypatch, tmp_path):
     app_db = str(tmp_path / "app_testnet.db")
     hist_db = str(tmp_path / "history_testnet.db")
     monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
-    monkeypatch.setattr(cli.getpass, "getuser", lambda: "josh")
+    monkeypatch.setattr(cli, "_os_login", lambda: "josh")
     monkeypatch.setattr(db_path, "app_db_path", lambda net: app_db)
     monkeypatch.setattr(history_store, "history_db_path", lambda net: hist_db)
     history_store.init_history_db(hist_db).close()
@@ -137,6 +137,26 @@ def test_actor_is_os_login_not_flag(dbs, fake_reverify):
     app_db, _ = dbs
     assert run("stop", "--network", "testnet", "--note", "outage drill") == 0
     assert [a for a, _, _ in audit_rows(app_db)] == ["cli:josh:outage drill"]
+
+
+def test_os_login_ignores_env_overrides(monkeypatch):
+    import os
+    import pwd
+
+    monkeypatch.setenv("USER", "someone-else")
+    monkeypatch.setenv("LOGNAME", "someone-else")
+    assert cli._os_login() == pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_audit_write_failure_after_usable_archive_exits_5(dbs, fake_reverify, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sponsored_mint, "audit_archive_reverify", boom)
+    assert run("start", "--network", "testnet") == 5
+    out = capsys.readouterr().out
+    assert "reverify: ok" in out  # archive verdict is NOT misreported as closed
+    assert "audit row not written: OSError: disk full" in out
 
 
 def test_start_reverify_crash_exits_3_and_audits(dbs, monkeypatch, capsys):

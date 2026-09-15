@@ -27,11 +27,14 @@ Exit codes: 0 ok · 1 refused by the library (e.g. mainnet self-issuer topology)
 archive re-verify failed or crashed (admission stays fail-closed; fix the
 archive, then `start` again or wait for the listener's auto catch-up) · 4
 campaign started with `--skip-reverify`, so archive usability is UNKNOWN —
-never treat 4 as "admission is open".
+never treat 4 as "admission is open" · 5 archive verified usable (admission
+can open) but the `archive_reverify` audit row could not be written — record
+the run by hand.
 
 Every state change (`start` / `stop`; `status` is a read and writes nothing)
 lands in `free_mint_audit` with actor `cli:<os-login>` — the
-identity is the shell account that ran the script (not a free-text flag), so
+identity is the account owning the process (resolved from the real UID via
+`pwd`, so `$USER`/`$LOGNAME` cannot forge it; not a free-text flag), so
 a reviewer can tell a shell-driven switch from a Discord one and who ran it.
 `--note` appends a free-text label after it (`cli:<os-login>:<note>`).
 """
@@ -41,9 +44,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
-import getpass
 import json
 import os
+import pwd
 import sys
 from typing import Any
 
@@ -57,6 +60,7 @@ EXIT_REFUSED = 1
 EXIT_NETWORK_MISMATCH = 2
 EXIT_REVERIFY_FAILED = 3
 EXIT_REVERIFY_SKIPPED = 4
+EXIT_AUDIT_WRITE_FAILED = 5
 
 
 def _clio_client() -> Any:
@@ -91,13 +95,16 @@ async def _reverify(history_db: str, network: str) -> archive_reverify.ReverifyR
 
 async def run_reverify(
     campaign_db: str, history_db: str, *, network: str, actor: str
-) -> str | None:
-    """Re-certify the archive and wait for the listener heartbeat; None = ok.
+) -> tuple[str | None, str | None]:
+    """Re-certify the archive and wait for the listener heartbeat.
 
-    Never raises: a crash anywhere in the sweep (clio unreachable, DB open
-    failure, …) is reported as `internal_error: <exc>` so the caller still
-    gets exit 3 and an audit row, the same way the service's
-    run_archive_reverify logs-and-records instead of propagating.
+    Returns `(verify_error, audit_error)`: the archive verdict (None = usable)
+    and, separately, whether the `archive_reverify` audit row was persisted
+    (None = written) — an audit failure must not be misreported as "admission
+    stays closed". Never raises: a crash anywhere in the sweep (clio
+    unreachable, DB open failure, …) is reported as `internal_error: <exc>`
+    so the caller still gets exit 3 and an audit row, the same way the
+    service's run_archive_reverify logs-and-records instead of propagating.
     """
     error: str | None = None
     try:
@@ -119,14 +126,18 @@ async def run_reverify(
             campaign_db, network=network, actor=actor, result=f"failed: {error}" if error else "ok"
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"WARNING: archive_reverify audit row not written: {exc}")
-        error = error or f"audit_write_failed: {exc}"
-    return error
+        return error, f"{type(exc).__name__}: {exc}"
+    return error, None
+
+
+def _os_login() -> str:
+    """Account owning this process, from the real UID — not $USER/$LOGNAME."""
+    return pwd.getpwuid(os.getuid()).pw_name
 
 
 def audit_actor(note: str = "") -> str:
-    """`cli:<os-login>[:<note>]` — bound to the shell account, not a flag."""
-    login = getpass.getuser()
+    """`cli:<os-login>[:<note>]` — bound to the process owner, not a flag."""
+    login = _os_login()
     note = note.strip()
     return f"cli:{login}:{note}" if note else f"cli:{login}"
 
@@ -188,12 +199,19 @@ def main() -> int:
             "opens only once the archive is usable (check `status`)."
         )
         return EXIT_REVERIFY_SKIPPED
-    error = asyncio.run(run_reverify(campaign_db, history_db, network=args.network, actor=actor))
+    error, audit_error = asyncio.run(
+        run_reverify(campaign_db, history_db, network=args.network, actor=actor)
+    )
+    if audit_error:
+        print(f"WARNING: archive_reverify audit row not written: {audit_error}")
     if error:
         print(f"reverify: failed: {error}")
         print("campaign is ACTIVE but admission stays fail-closed until the archive is usable.")
         return EXIT_REVERIFY_FAILED
     print("reverify: ok — archive certified and heartbeat live; admission can open.")
+    if audit_error:
+        print("record this run in free_mint_audit by hand (archive is usable regardless).")
+        return EXIT_AUDIT_WRITE_FAILED
     return EXIT_OK
 
 
