@@ -29,7 +29,8 @@ archive, then `start` again or wait for the listener's auto catch-up) · 4
 campaign started with `--skip-reverify`, so archive usability is UNKNOWN —
 never treat 4 as "admission is open".
 
-Every action lands in `free_mint_audit` with actor `cli:<os-login>` — the
+Every state change (`start` / `stop`; `status` is a read and writes nothing)
+lands in `free_mint_audit` with actor `cli:<os-login>` — the
 identity is the shell account that ran the script (not a free-text flag), so
 a reviewer can tell a shell-driven switch from a Discord one and who ran it.
 `--note` appends a free-text label after it (`cli:<os-login>:<note>`).
