@@ -305,6 +305,20 @@ def live_listing_for_nft(conn: sqlite3.Connection, nft_id: str) -> dict[str, Any
     return dict(row) if row is not None else None
 
 
+def live_listings_for_nft(conn: sqlite3.Connection, nft_id: str) -> list[dict[str, Any]]:
+    """EVERY live listing row for `nft_id` — plain and destination-locked
+    (the fee cover needs the external broker row that live_listing_for_nft's
+    single-row answer may not return)."""
+    conn.row_factory = sqlite3.Row
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM market_listings WHERE nft_id = ? AND is_live = 1 ORDER BY offer_index",
+            (nft_id,),
+        )
+    ]
+
+
 def get_listing(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
     """A listing row by its offer_index (primary key), live or not — Task 8's
     cancel/buy lookup. Returns None only when no such offer_index was ever

@@ -419,12 +419,21 @@ def test_sweep_loop_starts_with_economy_off_and_wc_on(monkeypatch):
     assert started["task"] is not None
 
 
-def test_sweep_loop_stays_off_with_both_disabled(monkeypatch):
+def test_sweep_loop_starts_even_with_both_disabled(monkeypatch):
+    # Fee cover (spec 2026-09-14) needs the loop on every stack.
     monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
     monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "")
-    holder: dict = {}
-    _run(app._start_settlement_sweep(holder))
-    assert "settlement_sweep_task" not in holder
+    started = {}
+
+    async def _go():
+        holder: dict = {}
+        await app._start_settlement_sweep(holder)
+        started["task"] = holder.get("settlement_sweep_task")
+        if started["task"] is not None:
+            started["task"].cancel()
+
+    _run(_go())
+    assert started["task"] is not None
 
 
 # --- rippled's own encoding is not tampering (#447 review) ------------------

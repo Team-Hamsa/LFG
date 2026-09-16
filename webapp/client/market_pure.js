@@ -254,6 +254,12 @@ export function mapListingRow(row) {
     // has a MEASURED fee rate (null otherwise -> no Buy-now button).
     clearingXrp: row.clearing_xrp ?? null,
     brokerRate: row.broker_rate ?? null,
+    // Fee cover (spec 2026-09-14): what LFG refunds of the marketplace fee on a
+    // Buy-now through LFG — null when no live campaign covers this row.
+    feeCoverXrp: row.fee_cover_xrp ?? null,
+    // The live campaign's coverage in basis points (10000 = 100%) — only a
+    // full cover lets the copy promise "you pay the ask".
+    feeCoverCoverageBps: row.fee_cover_coverage_bps ?? null,
     // #203: collection-wide statistical rarity (characters only; null for
     // traits and for Mine rows, which never pass through the browse cache).
     rarityRank: row.rarity_rank ?? null,
@@ -328,14 +334,69 @@ export function externalFeeNote(vm) {
 }
 
 /**
- * #426: flow-panel copy for an external Buy-now bid once it is on-ledger,
- * keyed on the bid row's fill state from GET /api/market/bid/{id}
- * ('live' | 'accepted' | 'cancelled' | 'stale' | null) — plus the
- * client-side 'waiting' pseudo-state once the watch has run ~5 minutes.
- * Settlement is the broker's bot, not us: we never say "yours" until the
- * ledger shows the offer consumed. `done` = stop watching.
+ * Fee cover: replaces externalFeeNote when a live campaign refunds the
+ * marketplace fee on this Buy-now. Empty string when not covered. Only a
+ * 100% cover (feeCoverCoverageBps === 10000) promises "you pay the ask";
+ * below that — or with coverage unknown — it names the partial refund.
  */
-export function externalFillCopy(marketplace, fill) {
+export function feeCoverNote(vm) {
+  if (!vm.external || vm.clearingXrp == null || vm.feeCoverXrp == null) return '';
+  const who = vm.marketplace ? `${vm.marketplace}'s` : "the marketplace's";
+  if (vm.feeCoverCoverageBps !== 10000) {
+    return `LFG refunds ${vm.feeCoverXrp} XRP of ${who} fee after it settles (campaign limits apply).`;
+  }
+  const ask = vm.amountXrp != null ? `, so you pay the ${vm.amountXrp} XRP ask` : '';
+  return `LFG refunds ${who} ${vm.feeCoverXrp} XRP fee after it settles${ask} (campaign limits apply).`;
+}
+
+/** Fee cover: why a purchase is not covered (keys = server decline reasons). */
+export const FEE_COVER_DECLINE_COPY = {
+  campaign_inactive: 'the fee-cover campaign has ended',
+  below_clearing: 'the offer was below the instant-fill price',
+  below_min_bid: "the purchase is below the campaign's minimum",
+  system_wallet: 'project wallets are excluded',
+  budget_exhausted: "the campaign's budget is used up",
+  wallet_cap: "you've reached this campaign's per-wallet limit",
+  not_broker_settled: 'the sale was not settled by the marketplace',
+  fee_unobserved: 'no marketplace fee was charged',
+  issuer_party: 'the collection wallet was a party to the sale',
+  royalty_unobserved: "the sale's royalty could not be verified",
+  linked_counterparty: 'the buyer and seller wallets are linked',
+  zero_refund: 'there was no fee to refund',
+};
+
+/**
+ * Fee cover: one sentence for the bid's fee_cover state (from
+ * GET /api/market/bid/{id}); empty when there is nothing to say.
+ */
+export function feeCoverLine(feeCover) {
+  if (!feeCover) return '';
+  const xrp = feeCover.xrp;
+  switch (feeCover.state) {
+    case 'quoted':
+      return 'LFG covers the marketplace fee on this purchase (campaign limits apply).';
+    case 'open':
+      return `Fee refund of ${xrp} XRP reserved.`;
+    case 'owed':
+    case 'submitted':
+      return `Your ${xrp} XRP fee refund is on its way.`;
+    case 'confirmed':
+      return `Refunded ${xrp} XRP.`;
+    case 'declined':
+      return `This purchase isn't covered: ${FEE_COVER_DECLINE_COPY[feeCover.reason] || 'not eligible'}.`;
+    case 'failed':
+      return "We couldn't send your fee refund. Contact support.";
+    default:
+      return '';
+  }
+}
+
+/** Fee cover: a refund is still on its way (keep polling after the fill). */
+export function feeCoverPending(feeCover) {
+  return !!feeCover && ['open', 'owed', 'submitted'].includes(feeCover.state);
+}
+
+function externalFillBase(marketplace, fill) {
   const mp = marketplace || 'the marketplace';
   if (fill === 'accepted') {
     return { title: "🎉 It's yours!", text: `${mp} settled your offer — the NFT is now in your wallet.`, done: true };
@@ -359,6 +420,21 @@ export function externalFillCopy(marketplace, fill) {
     text: `Your offer is no longer live on-ledger (${fill}) and was not filled — nothing was charged.`,
     done: true,
   };
+}
+
+/**
+ * #426: flow-panel copy for an external Buy-now bid once it is on-ledger,
+ * keyed on the bid row's fill state from GET /api/market/bid/{id}
+ * ('live' | 'accepted' | 'cancelled' | 'stale' | null) — plus the
+ * client-side 'waiting' pseudo-state once the watch has run ~5 minutes.
+ * Settlement is the broker's bot, not us: we never say "yours" until the
+ * ledger shows the offer consumed. `done` = stop watching. A non-null
+ * `feeCover` (spec 2026-09-14) appends its state as a trailing sentence.
+ */
+export function externalFillCopy(marketplace, fill, feeCover = null) {
+  const base = externalFillBase(marketplace, fill);
+  const line = feeCoverLine(feeCover);
+  return line ? { ...base, text: `${base.text} ${line}` } : base;
 }
 
 /**

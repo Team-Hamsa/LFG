@@ -127,7 +127,7 @@ buyer an **automatic XRP refund** from the issuer.
 POST /api/market/bid ──► quote (read-only: campaign active? budget + wallet cap headroom?)
         │                      returned as session.fee_cover = {state:"quoted", drops}
         ▼
-bid validates on-ledger (advance_bid_session → _write_bid_row)
+bid validates on-ledger (advance_bid_session → _write_bid_row; status poll or sweep)
         │
         ▼
 promise: INSERT fee_cover_promises (PK offer_index), reserve drops   ── or declined(reason)
@@ -149,9 +149,23 @@ refund row: INSERT fee_cover_refunds (PK accept_tx_hash, UNIQUE offer_index)
 A promise is made only when **all** of these hold:
 
 1. **A campaign is active.** Status is `active` and `now < ends_at` when set.
-2. **The NFT has a live `market_listings` row whose `destination` resolves
-   via `brokers.resolve`** to an allowlisted broker with `broker_rate is not
-   None`, and whose `seller` is the NFT's current owner-of-record.
+2. **At quote time, the NFT has a live `market_listings` row whose
+   `destination` resolves via `brokers.resolve`** to an allowlisted broker
+   with `broker_rate is not None`, and whose `seller` is the NFT's current
+   owner-of-record.
+   - The quote saves that listing on the session
+     (`BidSession.fee_cover_listing`, server-side only).
+   - **At promise time the same row must still be live, or closed `sold`
+     with `buyer == bidder`.** The broker's bot can fill a clearing bid within
+     seconds, and the listener can close the listing `sold` before the
+     session's first `done` poll; re-reading only live listings would erase
+     the promise the buyer was just shown. The listing is rebuilt from that
+     row, so its broker must still resolve with a measured rate and its seller
+     must still be the bid-time owner.
+   - Sold to anyone else, cancelled, stale or missing → no promise (an
+     ordinary bid).
+   - A bid with no saved listing (no quote, e.g. no campaign at quote time)
+     falls back to the live lookup.
 3. **`bid_drops >= brokers.clearing_drops(ask_drops, rate)`.** This is the bid
    the broker's bot will fill now. A below-clearing bid is an ordinary bid: if
    it fills later, the buyer paid only what they bid, so there is no "extra" to
@@ -170,6 +184,14 @@ A promise is made only when **all** of these hold:
 `promised_drops = floor(ceil(bid_drops × rate) × coverage_bps / 10000)`.
 `coverage_bps` and `rate` are **snapshotted into the promise**, so a later
 admin edit never changes a promise already made.
+
+Which campaign a promise is "made" against is decided **inside the store's
+write lock**, not by the caller's earlier read. `record_promise` re-reads the
+campaign under the lock and sizes the promise, applies `min_bid_drops`, and
+takes budget/wallet headroom from THAT row. An Update that commits between the
+quote and the write therefore applies to this promise — a promise is only new
+until it is written. Without that, lowering coverage would still admit a
+promise at the previous, higher rate.
 
 **Quote vs promise.** The quote at `POST /api/market/bid` is advisory and
 reserves nothing. The promise is written only once the bid is on-ledger, when
@@ -202,8 +224,17 @@ Given an accept tx `T` resolved for promise `P`:
    - `identity.bucket_for_wallet(seller)` contains the bidder.
    - Both wallets have the same non-exchange funder in `wallet_funders`
      (#461 rule; `funding.EXCHANGES`-funded wallets never match).
-   - A missing funder row counts as **not linked** (fail-open). The payout
-     ceiling below makes a missed link cost at most a sub-royalty refund.
+   - A missing funder row counts as **not linked**: an empty lookup is a real
+     answer, and the payout ceiling below makes a missed link cost at most a
+     sub-royalty refund.
+   - A lookup that **cannot answer** (a DB error on either side) is not an
+     answer, and must never resolve to "not linked" — a self-dealing pair
+     reached during an error would be settled as unrelated and paid. It raises
+     `fee_cover.LinkageUnavailable`, which propagates out of `compute_refund`
+     and **defers** the settlement: nothing is written, the promise stays
+     `open`, and the next sweep retries it. A lookup that stays broken holds
+     the promise (and its budget) rather than paying, which an operator sees
+     as a stuck `open_promises` count.
 5. **Amount.**
    `refund = min(P.promised_drops, floor(fee × P.coverage_bps / 10000),
    floor(royalty × ROYALTY_CEILING_BPS / 10000))`.
@@ -229,20 +260,30 @@ promise.
 - **Order: record `owed` → claim → submit → record outcome.** The claim path
   is the template (`app.py::_claim_one_wallet`):
   - **The claim is one conditional write.** `UPDATE … SET
-    state='submitted', last_ledger_seq=<provisional> WHERE accept_tx_hash=?
-    AND state='owed'`. Only the caller whose update changes a row submits, so
-    the poll path and the sweep can race without paying twice.
-  - The provisional deadline (`current + FEE_COVER_LEDGER_MARGIN × 10`) is
-    recorded in that same write, so no `submitted` row ever lacks a deadline.
+    state='submitted', last_ledger_seq=<provisional>, claim_ledger=<current>
+    WHERE accept_tx_hash=? AND state='owed'`. Only the caller whose update
+    changes a row submits, so the poll path and the sweep can race without
+    paying twice.
+  - The provisional deadline (`current + FEE_COVER_LEDGER_MARGIN × 10`) and
+    the claim ledger (`current`, the validated index read just before the
+    claim) are recorded in that same write, so no `submitted` row ever lacks
+    either.
   - Submission goes through `xrpl_ops.send_fee_cover_refund(dest, drops,
     refund_key, max_last_ledger_seq)`, modelled on `send_brix_claim` and
     returning its `ClaimPayment` tri-state.
 - **Outcomes:**
   - `confirmed` on validated `tesSUCCESS`.
-  - `failed` on a **definitive** failure: a validated non-success result, or a
-    presubmit `simulate` rejection. `_submit_and_confirm` logs the result code
-    but does not return it.
-  - `ClaimNotSubmitted` (refused before anything was built) → back to `owed`.
+  - `failed` (reason `payout_failed`) on a **definitive** failure: a validated
+    non-success result, or a presubmit `simulate` rejection.
+    `_submit_and_confirm` logs the result code but does not return it.
+  - `ClaimNotSubmitted` → back to `owed`, and the pay attempt reports
+    `deferred`. `send_fee_cover_refund` raises it for **every** pre-flight
+    step before `_submit_and_confirm` (drops check, signing wallet, the
+    validated-ledger read raising or returning nothing, `Payment`
+    construction), chaining the original error: nothing reached the ledger,
+    so it must never park a user-visible `failed`. An unreadable validated
+    ledger in `pay_refund` itself (None or raising) also defers without
+    claiming.
   - An unknown outcome stays `submitted` with the payment's own
     `last_ledger_seq`.
 - **An indeterminate outcome is never retried blind.** Recovery resolves it.
@@ -250,14 +291,22 @@ promise.
   (like `_start_brix_claim_recovery`) and by
   `scripts/recover_fee_cover_refunds.py`.
   - It pages `config.SIGNING_ACCOUNT`'s `account_tx` from
-    `last_ledger_seq - 5000`.
+    `claim_ledger - 5000`. The floor comes from the **claim ledger**, never
+    from the deadline minus a margin: no refund can validate before its own
+    claim, whereas the deadline was set with the margin in force at claim
+    time. A floor re-derived from today's `FEE_COVER_LEDGER_MARGIN` would
+    start after a refund that landed once the margin had been lowered.
   - It matches the refund memo tag `lfg:fee_cover:<accept_tx_hash>` and
     requires a genuine payout: validated, `tesSUCCESS`, `Payment`,
     `Account == SIGNING_ACCOUNT`, `Destination == bidder`, XRP
     `delivered_amount == refund_drops`.
   - Found → `confirmed`. Absent **and** validated ledger past
-    `last_ledger_seq` → `failed`. Anything else stays untouched.
-- **A `failed` row is parked, never retried automatically.** Typical causes:
+    `last_ledger_seq` → `failed` with reason **`payout_expired`**. Anything
+    else stays untouched — including an `account_tx` error response, which
+    raises rather than reading as "absent" (absence past the deadline would
+    otherwise park a payout that landed, and a requeue would pay it twice).
+- **A `failed` row is parked, never retried automatically**, whether its
+  reason is `payout_failed` or `payout_expired`. Typical causes:
   - a destination property (`tecDST_TAG_NEEDED`, DepositAuth `tecNO_PERMISSION`)
   - an issuer short of spendable XRP (`tecUNFUNDED_PAYMENT`)
 
@@ -267,6 +316,11 @@ promise.
   <accept_tx_hash>`. That moves `failed → owed` only while the campaign budget
   still has headroom for it. The result code is in the service log line from
   `_submit_and_confirm`.
+  - Before requeueing, `--requeue` re-checks the chain with
+    `find_fee_cover_payment(accept, destination=bidder, drops=refund_drops,
+    min_ledger=claim_ledger)`. A hash found → it prints `<hash> found
+    on-ledger; not requeued` and exits 1; a lookup error → it prints the error
+    and exits 1. Only a clean "absent" requeues.
 
 ### Payout transaction
 
@@ -287,6 +341,42 @@ promise.
 
 ### Fill detection and promise release
 
+- **Promise write.** The promise is written when the bid session finalizes:
+  on the client's status poll, or — when the client stopped polling before
+  the bid validated — by `sweep_fee_cover()`, which first advances every
+  in-memory bid session that is not terminal and whose `fee_cover.state` is
+  `quoted`.
+- **A shown cover is durable.** Sessions live only in memory, and
+  `advance_bid_session` hands the validated bid over exactly once. So the
+  promise the buyer was shown would otherwise be lost to a failed promise
+  write, a failed bid-row index write, or a restart between validation and
+  observation. Three rules close that:
+  - **Quote row.** At `POST /api/market/bid` a `quoted` cover is written to
+    `fee_cover_quotes`: session id, payload uuid, bidder, NFT, owner, bid
+    drops, the bid's signed expiry, saved listing. If that write fails the cover is **not offered**:
+    `fee_cover` is null.
+  - **Poll path.** The signed tx hash is saved on the quote once the session
+    learns it, after its signer check. The promise write runs in a `finally`
+    around the bid-row index write. A failed promise write logs and leaves
+    the session's `quoted` view in place, never null.
+  - **Reconciler.** `_reconcile_fee_cover_quotes` runs each sweep for pending
+    quotes older than 60 s whose live session is absent or terminal:
+    - It rebuilds the `BidSession`. It uses the saved tx hash, or else asks
+      the wallet provider for the payload status with the same fail-closed
+      signer check.
+    - It runs `advance_bid_session`, indexes the bid best-effort, and writes
+      the promise via the same `_fee_cover_record_promise`. That call is
+      idempotent on `offer_index`, so racing the poll path is safe.
+    - It closes the quote `promised` / `uncovered` / `expired` / `failed`, or
+      `abandoned`. Anything unresolved retries next sweep. Every pass tries the
+      ledger first. A quote is abandoned only while still unresolved and
+      past `bid_expires_at` + 1 day. `bid_expires_at` is the `Expiration`
+      its bid was signed with, stored on the quote, so lowering
+      `MARKET_BID_TTL_SECONDS` later can't cut short a bid that can still
+      fill.
+    - Selection orders by `last_attempt_at` (then `created_at`), and every
+      quote considered is touched, so a batch of stuck quotes can't
+      starve newer ones.
 - **Primary trigger.** The bid status poll. In `_advance_market_session`'s
   `bid` branch, after computing `session.fill`: when `fill == "accepted"` and a
   promise exists, call `fee_cover.settle_promise(network, offer_index)`. This
@@ -323,7 +413,10 @@ promise.
     typically), expired promises stay open, holding their budget, until it is
     certified.
 - **Retry of `owed` rows.** A row with retryable state is retried each sweep
-  with an in-memory attempt counter. After `_SWEEP_MAX_ATTEMPTS` it is
+  with an in-memory attempt counter. A `deferred` pay attempt (nothing reached
+  the ledger) does not count as an attempt. Each promise, each owed row and
+  the recovery call run in their own `try/except`, so one bad row never stops
+  the sweep — it is the only payer. After `_SWEEP_MAX_ATTEMPTS` it is
   journaled to `ECONOMY_RECORDS_DIR/fee-cover-giveup-<accept_tx_hash>.json`,
   following the `settle_pending_trait_sales` pattern. The row stays `owed` for
   a human.
@@ -378,6 +471,7 @@ CREATE TABLE IF NOT EXISTS fee_cover_refunds (
   state TEXT NOT NULL CHECK (state IN ('owed','submitted','confirmed','failed','declined')),
   reason TEXT,
   payout_tx_hash TEXT, last_ledger_seq INTEGER,
+  claim_ledger INTEGER,                 -- validated index at claim: the recovery scan floor
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 
@@ -419,8 +513,12 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
   `sponsored_mint.start_campaign` does.
 - **`surfaces/_client/client.py`** gains `fee_cover_status/start/stop/update`.
 - **`AdminView`** gains **Fee cover: Start / Update / Stop / Refresh**.
-  - Start and Update open a modal. Defaults: coverage 100%, budget 50 XRP,
-    wallet cap 5 XRP per 30 days, min bid 1 XRP, duration blank (no end).
+  - Start and Update open a modal. Start's defaults: coverage 100%, budget 50
+    XRP, wallet cap 5 XRP per 30 days, min bid 1 XRP, duration blank (no end).
+  - **Update prefills from the live campaign**, because it replaces every
+    knob: opened on Start's defaults, changing only the coverage would
+    silently reset the budget, cap and minimum bid. If the campaign cannot be
+    read, Update reports that instead of opening a form it cannot prefill.
   - A status embed shows active/stopped, knobs, budget
     committed/paid/remaining, open promises, refunds by state, the top 5
     wallets by refunded drops, and declines by reason.
@@ -433,8 +531,9 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
 ### Client (vanilla-JS Activity)
 
 - **`/api/market/listings` serialization.** External rows that already carry
-  `clearing_*` gain `fee_cover_drops` / `fee_cover_xrp` when a campaign is
-  active and the campaign has budget headroom for that estimate. This is a
+  `clearing_*` gain `fee_cover_drops` / `fee_cover_xrp` /
+  `fee_cover_coverage_bps` when a campaign is active and the campaign has
+  budget headroom for that estimate. This is a
   public, unauthenticated estimate: it ignores wallet caps, so the copy says
   "limits apply".
   - **The campaign read happens post-cache.** It is not folded into the 60 s
@@ -443,7 +542,10 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
   - `buyNowLabel` is unchanged.
   - New `feeCoverNote(vm)` renders "LFG refunds xrp.cafe's 0.08 XRP fee after
     it settles, so you pay the 5.08 XRP ask." It replaces `externalFeeNote`
-    when `vm.feeCoverXrp` is set.
+    when `vm.feeCoverXrp` is set. Only at 100% coverage
+    (`vm.feeCoverCoverageBps === 10000`) does it promise the ask; below that,
+    or with coverage unknown, it reads "LFG refunds 0.04 XRP of xrp.cafe's fee
+    after it settles (campaign limits apply)."
   - `externalFillCopy` gains refund lines, keyed on the status response's
     `fee_cover.state`. That state is one field folding promise and refund:
     the refund's state once a refund row exists, the promise's state before
