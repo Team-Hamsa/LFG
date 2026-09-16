@@ -315,3 +315,57 @@ def test_admin_panel_button_opens_the_sub_panel(mods, monkeypatch):
     sent = record["followups"][-1]
     assert isinstance(sent["view"], fca.FeeCoverView)
     assert sent["embed"] is not None
+
+
+def test_update_modal_is_prefilled_from_the_live_campaign(mods, monkeypatch):
+    """Update replaces every knob, so opening the form against the START
+    defaults turns "change the coverage" into "reset the budget, cap and
+    minimum bid" — a 25 XRP budget would silently become 50."""
+    admin, fca = mods
+
+    class _Svc25(_Svc):
+        async def fee_cover_status(self):
+            self.calls.append(("status",))
+            campaign = dict(_status()["campaign"])
+            campaign.update(coverage_bps=7_500, budget_drops=25_000_000, min_bid_drops=2_500_000)
+            return _status(campaign=campaign)
+
+    svc = _Svc25()
+    monkeypatch.setattr(fca, "svc", svc)
+    view = fca.FeeCoverView(admin._admin_interaction_check, AsyncMock())
+    inter, record = _interaction()
+    _run(view.update_button.callback(inter))
+    modal = record["modals"][0]
+    assert modal.mode == "update"
+    assert (modal.coverage.default, modal.budget.default) == ("75", "25")
+    assert (modal.wallet_cap.default, modal.min_bid.default) == ("5", "2.5")
+    # ...and the Start form still opens on the shipped defaults.
+    inter, record = _interaction()
+    _run(view.start_button.callback(inter))
+    assert record["modals"][0].budget.default == "50"
+
+
+def test_update_button_refuses_rather_than_opening_a_form_it_cannot_prefill(mods, monkeypatch):
+    admin, fca = mods
+
+    class _NoCampaign(_Svc):
+        async def fee_cover_status(self):
+            return _status(state="never_started", campaign=None)
+
+    class _Broken(_Svc):
+        async def fee_cover_status(self):
+            raise ServiceError("service unavailable", status=503)
+
+    for svc, expected in ((_NoCampaign(), "❌ No campaign"), (_Broken(), "❌ Fee cover status")):
+        monkeypatch.setattr(fca, "svc", svc)
+        view = fca.FeeCoverView(admin._admin_interaction_check, AsyncMock())
+        inter, record = _interaction()
+        _run(view.update_button.callback(inter))
+        assert record["modals"] == []
+        assert record["sent"][-1][0].startswith(expected)
+
+
+def test_modal_defaults_is_empty_without_a_campaign(mods):
+    _admin, fca = mods
+    assert fca.modal_defaults(None) == {}
+    assert fca.modal_defaults({}) == {}

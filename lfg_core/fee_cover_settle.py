@@ -212,7 +212,7 @@ def _record(
 ) -> None:
     conn = fee_cover_store.connect(deps.app_db_path)
     try:
-        fee_cover_store.record_payout(
+        applied = fee_cover_store.record_payout(
             conn,
             key,
             state=state,
@@ -223,6 +223,17 @@ def _record(
         )
     finally:
         conn.close()
+    if not applied:
+        # The row moved under us (the only mover is a concurrent recovery or an
+        # operator requeue). A `confirmed` outcome is never dropped — the store
+        # accepts it over a parked failure too — so this can only be a losing
+        # `failed`/`submitted` write, which recovery re-decides from the chain.
+        logging.warning(
+            "fee cover refund %s: '%s' did not apply; the row is no longer in an "
+            "expected state (concurrent recovery or requeue)",
+            key,
+            state,
+        )
 
 
 def _unclaim(deps: FeeCoverDeps, key: str) -> None:
@@ -306,7 +317,19 @@ async def settle_promise(deps: FeeCoverDeps, offer_index: str) -> dict[str, Any]
         return view
     validated = normalize_tx(result)
     validated["hash"] = validated.get("hash") or tx_hash
-    return await asyncio.to_thread(_decide_and_fill, deps, promise, validated)
+    try:
+        return await asyncio.to_thread(_decide_and_fill, deps, promise, validated)
+    except fee_cover.LinkageUnavailable as exc:
+        # Self-dealing could not be ruled out. Nothing was written: the promise
+        # stays open and the next sweep retries. A lookup that stays broken
+        # holds the promise (and its budget) open rather than paying — visible
+        # to an operator as a stuck `open_promises` count.
+        logging.warning(
+            "fee cover: linkage lookup for promise %s unavailable (%s); staying open",
+            offer_index,
+            exc,
+        )
+        return view
 
 
 async def pay_refund(deps: FeeCoverDeps, accept_tx_hash: str) -> str:

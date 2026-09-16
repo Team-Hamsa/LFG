@@ -458,7 +458,6 @@ def test_poll_after_the_fill_settles_the_refund(env, monkeypatch):
             broker_rate=0.01589,
             bid_expiration=900_000_000,
         ),
-        promised_drops=80_642,
         decline_reason=None,
         now=ACCEPT_TS - 60,
     )
@@ -559,7 +558,6 @@ def test_bids_mine_rows_carry_fee_cover(env):
             broker_rate=0.01589,
             bid_expiration=None,
         ),
-        promised_drops=80_642,
         decline_reason=None,
     )
     conn.close()
@@ -662,6 +660,39 @@ def test_startup_recovery_resolves_submitted_refunds(monkeypatch):
     assert server._start_fee_cover_recovery in server.create_app().on_startup
 
 
+def test_startup_recovery_is_retired_on_cleanup(monkeypatch):
+    """A fire-and-forget recovery still inside an account_tx call or a DB write
+    must not outlive aiohttp's teardown (or be abandoned when the loop closes).
+    Cancelling is safe: it submits no payment, and a row left `submitted` is
+    re-resolved by the next startup recovery or sweep pass."""
+    started = asyncio.Event()
+
+    async def never_returns(deps):
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: object())
+    monkeypatch.setattr(server.fee_cover_settle, "recover_refunds", never_returns)
+
+    async def go():
+        app: dict = {}
+        await server._start_fee_cover_recovery(app)
+        await started.wait()
+        await asyncio.wait_for(server._stop_startup_recovery(app), timeout=5)
+        return app["fee_cover_recovery_task"]
+
+    task = _run(go())
+    assert task.done()
+    app = server.create_app()
+    assert server._stop_startup_recovery in app.on_cleanup
+    # The BRIX claim recovery task is retired by the same hook.
+    assert server._start_brix_claim_recovery in app.on_startup
+
+
+def test_stop_startup_recovery_tolerates_tasks_that_never_started(monkeypatch):
+    _run(asyncio.wait_for(server._stop_startup_recovery({}), timeout=5))
+
+
 # --- Task 10: browse estimate -------------------------------------------------
 
 
@@ -735,21 +766,31 @@ def _funders(app_db, rows):
         conn.close()
 
 
-def test_linked_bucket_lookup_error_still_checks_the_funder(env, monkeypatch):
-    def bucket_boom(wallet):
-        raise RuntimeError("identity db locked")
-
-    monkeypatch.setattr(server.identity_store, "bucket_for_wallet", bucket_boom)
+def test_linked_is_answered_by_a_shared_funder(env, monkeypatch):
+    monkeypatch.setattr(server.identity_store, "bucket_for_wallet", lambda wallet: None)
     assert server._fee_cover_linked(BIDDER, OWNER) is False
     _funders(env["app_db"], [(BIDDER, "rSharedFunder"), (OWNER, "rSharedFunder")])
     assert server._fee_cover_linked(BIDDER, OWNER) is True
 
 
-def test_linked_funder_lookup_error_fails_open(env, monkeypatch):
+def test_linked_bucket_lookup_error_defers_instead_of_answering(env, monkeypatch):
+    """A lookup that cannot answer must not resolve to "unrelated" — that would
+    pay a refund on a sale the self-dealing rule might forbid."""
+
+    def bucket_boom(wallet):
+        raise RuntimeError("identity db locked")
+
+    monkeypatch.setattr(server.identity_store, "bucket_for_wallet", bucket_boom)
+    with pytest.raises(server.fee_cover.LinkageUnavailable):
+        server._fee_cover_linked(BIDDER, OWNER)
+
+
+def test_linked_funder_lookup_error_defers_instead_of_answering(env, monkeypatch):
     monkeypatch.setattr(server.identity_store, "bucket_for_wallet", lambda wallet: None)
 
     def funder_boom(conn, wallet):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(server.funding, "cached_funder", funder_boom)
-    assert server._fee_cover_linked(BIDDER, OWNER) is False
+    with pytest.raises(server.fee_cover.LinkageUnavailable):
+        server._fee_cover_linked(BIDDER, OWNER)

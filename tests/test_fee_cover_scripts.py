@@ -43,7 +43,7 @@ def _refund(
         broker_rate=0.01589,
         bid_expiration=None,
     )
-    store.record_promise(conn, campaign, inp, promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, campaign, inp, decline_reason=None, now=1001)
     store.fill_promise(
         conn, "BID1", store.RefundDecision("ACC1", "rS", CAFE, fee, royalty, 80_642, None), now=1002
     )

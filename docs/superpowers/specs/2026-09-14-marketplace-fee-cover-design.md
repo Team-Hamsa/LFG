@@ -185,6 +185,14 @@ A promise is made only when **all** of these hold:
 `coverage_bps` and `rate` are **snapshotted into the promise**, so a later
 admin edit never changes a promise already made.
 
+Which campaign a promise is "made" against is decided **inside the store's
+write lock**, not by the caller's earlier read. `record_promise` re-reads the
+campaign under the lock and sizes the promise, applies `min_bid_drops`, and
+takes budget/wallet headroom from THAT row. An Update that commits between the
+quote and the write therefore applies to this promise — a promise is only new
+until it is written. Without that, lowering coverage would still admit a
+promise at the previous, higher rate.
+
 **Quote vs promise.** The quote at `POST /api/market/bid` is advisory and
 reserves nothing. The promise is written only once the bid is on-ledger, when
 `offer_index` exists. If headroom disappears between the two (a small window,
@@ -216,8 +224,17 @@ Given an accept tx `T` resolved for promise `P`:
    - `identity.bucket_for_wallet(seller)` contains the bidder.
    - Both wallets have the same non-exchange funder in `wallet_funders`
      (#461 rule; `funding.EXCHANGES`-funded wallets never match).
-   - A missing funder row counts as **not linked** (fail-open). The payout
-     ceiling below makes a missed link cost at most a sub-royalty refund.
+   - A missing funder row counts as **not linked**: an empty lookup is a real
+     answer, and the payout ceiling below makes a missed link cost at most a
+     sub-royalty refund.
+   - A lookup that **cannot answer** (a DB error on either side) is not an
+     answer, and must never resolve to "not linked" — a self-dealing pair
+     reached during an error would be settled as unrelated and paid. It raises
+     `fee_cover.LinkageUnavailable`, which propagates out of `compute_refund`
+     and **defers** the settlement: nothing is written, the promise stays
+     `open`, and the next sweep retries it. A lookup that stays broken holds
+     the promise (and its budget) rather than paying, which an operator sees
+     as a stuck `open_promises` count.
 5. **Amount.**
    `refund = min(P.promised_drops, floor(fee × P.coverage_bps / 10000),
    floor(royalty × ROYALTY_CEILING_BPS / 10000))`.
@@ -458,8 +475,12 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
   `sponsored_mint.start_campaign` does.
 - **`surfaces/_client/client.py`** gains `fee_cover_status/start/stop/update`.
 - **`AdminView`** gains **Fee cover: Start / Update / Stop / Refresh**.
-  - Start and Update open a modal. Defaults: coverage 100%, budget 50 XRP,
-    wallet cap 5 XRP per 30 days, min bid 1 XRP, duration blank (no end).
+  - Start and Update open a modal. Start's defaults: coverage 100%, budget 50
+    XRP, wallet cap 5 XRP per 30 days, min bid 1 XRP, duration blank (no end).
+  - **Update prefills from the live campaign**, because it replaces every
+    knob: opened on Start's defaults, changing only the coverage would
+    silently reset the budget, cap and minimum bid. If the campaign cannot be
+    read, Update reports that instead of opening a form it cannot prefill.
   - A status embed shows active/stopped, knobs, budget
     committed/paid/remaining, open promises, refunds by state, the top 5
     wallets by refunded drops, and declines by reason.

@@ -179,6 +179,10 @@ def _live(conn, *, budget=1_000_000, cap=500_000, now=1000):
     return campaign
 
 
+# What `_inp()`'s bid derives at 100% coverage: ceil(5_075_000 * 0.01589).
+PROMISE = 80_642
+
+
 def _inp(offer_index="BID1", bidder=BIDDER, bid=5_075_000):
     return store.PromiseInput(
         offer_index=offer_index,
@@ -199,60 +203,42 @@ def _owed(accept="ACCEPT1", refund=80_642):
 
 def test_record_promise_opens_and_reserves_budget(conn):
     c = _live(conn)
-    row = store.record_promise(
-        conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001
-    )
+    row = store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     assert row is not None and row["state"] == "open" and row["reason"] is None
-    assert row["coverage_bps"] == 10_000 and row["promised_drops"] == 80_642
-    assert store.committed_drops(conn, c.id) == 80_642
+    assert row["coverage_bps"] == 10_000 and row["promised_drops"] == PROMISE
+    assert store.committed_drops(conn, c.id) == PROMISE
 
 
 def test_record_promise_is_idempotent_on_offer_index(conn):
     c = _live(conn)
-    first = store.record_promise(
-        conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001
-    )
-    second = store.record_promise(
-        conn, c, _inp(), promised_drops=1, decline_reason="below_clearing", now=1002
-    )
+    first = store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
+    second = store.record_promise(conn, c, _inp(), decline_reason="below_clearing", now=1002)
     assert second == first
-    assert store.committed_drops(conn, c.id) == 80_642
+    assert store.committed_drops(conn, c.id) == PROMISE
 
 
 def test_record_promise_budget_boundary(conn):
-    c = _live(conn, budget=100_000, cap=1_000_000)
-    exact = store.record_promise(
-        conn, c, _inp("A"), promised_drops=100_000, decline_reason=None, now=1001
-    )
+    c = _live(conn, budget=PROMISE, cap=1_000_000)
+    exact = store.record_promise(conn, c, _inp("A"), decline_reason=None, now=1001)
     assert exact is not None and exact["state"] == "open"
-    over = store.record_promise(
-        conn, c, _inp("B", bidder="rOther"), promised_drops=1, decline_reason=None, now=1002
-    )
+    over = store.record_promise(conn, c, _inp("B", bidder="rOther"), decline_reason=None, now=1002)
     assert over is not None and over["state"] == "declined" and over["reason"] == "budget_exhausted"
-    assert store.committed_drops(conn, c.id) == 100_000
+    assert store.committed_drops(conn, c.id) == PROMISE
 
 
 def test_record_promise_wallet_cap_counts_only_the_window(conn):
-    c = _live(conn, budget=10_000_000, cap=100_000, now=1000)
-    store.record_promise(
-        conn, c, _inp("OLD"), promised_drops=100_000, decline_reason=None, now=1000
-    )
-    capped = store.record_promise(
-        conn, c, _inp("NOW"), promised_drops=1, decline_reason=None, now=1001
-    )
+    c = _live(conn, budget=10_000_000, cap=PROMISE, now=1000)
+    store.record_promise(conn, c, _inp("OLD"), decline_reason=None, now=1000)
+    capped = store.record_promise(conn, c, _inp("NOW"), decline_reason=None, now=1001)
     assert capped is not None and capped["reason"] == "wallet_cap"
     later = 1000 + c.wallet_window_seconds + 1
-    fresh = store.record_promise(
-        conn, c, _inp("LATER"), promised_drops=100_000, decline_reason=None, now=later
-    )
+    fresh = store.record_promise(conn, c, _inp("LATER"), decline_reason=None, now=later)
     assert fresh is not None and fresh["state"] == "open"
 
 
 def test_record_promise_pure_decline_is_recorded_without_reserving(conn):
     c = _live(conn)
-    row = store.record_promise(
-        conn, c, _inp(), promised_drops=80_000, decline_reason="below_clearing", now=1001
-    )
+    row = store.record_promise(conn, c, _inp(), decline_reason="below_clearing", now=1001)
     assert row is not None and row["state"] == "declined" and row["reason"] == "below_clearing"
     assert store.committed_drops(conn, c.id) == 0
 
@@ -261,22 +247,68 @@ def test_record_promise_rejects_unrecorded_reasons(conn):
     c = _live(conn)
     for reason in ("campaign_inactive", "not_external_listing"):
         with pytest.raises(ValueError):
-            store.record_promise(conn, c, _inp(), promised_drops=1, decline_reason=reason, now=1001)
+            store.record_promise(conn, c, _inp(), decline_reason=reason, now=1001)
 
 
 def test_record_promise_after_stop_writes_nothing(conn):
     c = _live(conn)
     store.stop_campaign(conn, network=NET, actor="discord:1", now=1001)
-    assert (
-        store.record_promise(conn, c, _inp(), promised_drops=1, decline_reason=None, now=1002)
-        is None
-    )
+    assert store.record_promise(conn, c, _inp(), decline_reason=None, now=1002) is None
     assert store.get_promise(conn, "BID1") is None
+
+
+def test_record_promise_sizes_on_the_campaign_read_under_the_lock(conn):
+    """An admin Update that commits between the caller's read and the write
+    lock applies to this promise: the promise is sized (and its coverage
+    snapshotted) from the campaign as it stands when the row is written, never
+    from the stale read the caller priced against. Halving coverage after the
+    read must not leave a promise owed at the old rate."""
+    stale = _live(conn)
+    store.update_campaign(
+        conn,
+        network=NET,
+        actor="discord:2",
+        knobs=store.Knobs(
+            coverage_bps=5_000,
+            budget_drops=50_000_000,
+            wallet_cap_drops=5_000_000,
+            min_bid_drops=1_000_000,
+        ),
+        now=1001,
+    )
+    row = store.record_promise(conn, stale, _inp(), decline_reason=None, now=1002)
+    assert row is not None and row["state"] == "open"
+    assert stale.coverage_bps == 10_000  # the caller's read really is stale
+    assert row["coverage_bps"] == 5_000
+    assert row["promised_drops"] == PROMISE // 2
+    assert store.committed_drops(conn, stale.id) == PROMISE // 2
+
+
+def test_record_promise_applies_a_raised_minimum_bid_under_the_lock(conn):
+    """Same rule for the minimum bid: the caller cleared the old floor, but the
+    promise that gets written is judged against the campaign it is written
+    into."""
+    stale = _live(conn)
+    store.update_campaign(
+        conn,
+        network=NET,
+        actor="discord:2",
+        knobs=store.Knobs(
+            coverage_bps=10_000,
+            budget_drops=50_000_000,
+            wallet_cap_drops=5_000_000,
+            min_bid_drops=9_000_000,
+        ),
+        now=1001,
+    )
+    row = store.record_promise(conn, stale, _inp(), decline_reason=None, now=1002)
+    assert row is not None and row["state"] == "declined" and row["reason"] == "below_min_bid"
+    assert store.committed_drops(conn, stale.id) == 0
 
 
 def test_release_frees_budget_and_only_releases_open(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     assert store.release_promise(conn, "BID1", "expired", now=2000) is True
     assert store.release_promise(conn, "BID1", "expired", now=2001) is False
     row = store.get_promise(conn, "BID1")
@@ -286,7 +318,7 @@ def test_release_frees_budget_and_only_releases_open(conn):
 
 def test_fill_promise_writes_one_owed_refund(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     refund = store.fill_promise(conn, "BID1", _owed(), now=1100)
     assert refund["state"] == "owed" and refund["refund_drops"] == 80_642
     assert (
@@ -302,7 +334,7 @@ def test_fill_promise_writes_one_owed_refund(conn):
 
 def test_fill_promise_declined_refund_frees_budget(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     decision = store.RefundDecision(
         "ACCEPT1", SELLER, CAFE, 80_642, 349_605, 0, "linked_counterparty"
     )
@@ -317,14 +349,14 @@ def test_fill_promise_declined_refund_frees_budget(conn):
 
 def test_fill_promise_on_a_released_promise_returns_none(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.release_promise(conn, "BID1", "cancelled", now=1002)
     assert store.fill_promise(conn, "BID1", _owed(), now=1100) is None
 
 
 def test_payout_claim_happens_exactly_once(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
     assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101) is True
     assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1102) is False
@@ -334,7 +366,7 @@ def test_payout_claim_happens_exactly_once(conn):
 
 def test_record_payout_and_return_to_owed(conn):
     c = _live(conn)
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
     store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
     assert store.return_to_owed(conn, "ACCEPT1", now=1102) is True
@@ -359,9 +391,7 @@ def test_record_payout_and_return_to_owed(conn):
 
 def test_requeue_failed_requires_budget_headroom(conn):
     c = _live(conn, budget=100_000, cap=1_000_000)
-    store.record_promise(
-        conn, c, _inp("BID1"), promised_drops=80_642, decline_reason=None, now=1001
-    )
+    store.record_promise(conn, c, _inp("BID1"), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed("ACCEPT1"), now=1100)
     store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
     store.record_payout(
@@ -370,9 +400,7 @@ def test_requeue_failed_requires_budget_headroom(conn):
     assert store.get_refund(conn, "ACCEPT1")["reason"] == "payout_failed"
     assert store.committed_drops(conn, c.id) == 0
     # someone else takes most of the budget meanwhile
-    store.record_promise(
-        conn, c, _inp("BID2", bidder="rOther"), promised_drops=50_000, decline_reason=None, now=1103
-    )
+    store.record_promise(conn, c, _inp("BID2", bidder="rOther"), decline_reason=None, now=1103)
     assert store.requeue_failed(conn, "ACCEPT1", now=1104) == "budget_exhausted"
     store.release_promise(conn, "BID2", "cancelled", now=1105)
     assert store.requeue_failed(conn, "ACCEPT1", now=1106) == "requeued"
@@ -391,7 +419,6 @@ def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
             conn,
             c,
             _inp(bid, bidder=f"r{bid}"),
-            promised_drops=80_642,
             decline_reason=None,
             now=1001,
         )
@@ -409,9 +436,7 @@ def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
         row = store.get_refund(conn, accept)
         assert (row["state"], row["reason"]) == ("failed", expected)
     # a non-failed outcome never takes the reason
-    store.record_promise(
-        conn, c, _inp("BID3", bidder="rBID3"), promised_drops=80_642, decline_reason=None, now=1001
-    )
+    store.record_promise(conn, c, _inp("BID3", bidder="rBID3"), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID3", _owed("ACCEPT3"), now=1100)
     store.claim_for_payout(conn, "ACCEPT3", 5_000, now=1101)
     store.record_payout(
@@ -429,7 +454,7 @@ def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
 def test_view_folds_refund_over_promise(conn):
     c = _live(conn)
     assert store.view_for_offer(conn, "BID1") is None
-    store.record_promise(conn, c, _inp(), promised_drops=80_642, decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     assert store.view_for_offer(conn, "BID1") == {
         "state": "open",
         "drops": 80_642,
@@ -454,17 +479,16 @@ def test_view_folds_refund_over_promise(conn):
 def test_status_summary(conn):
     assert store.status_summary(conn, NET, now=1000)["state"] == "never_started"
     c = _live(conn, budget=1_000_000, cap=1_000_000)
-    store.record_promise(conn, c, _inp("A"), promised_drops=80_000, decline_reason=None, now=1001)
-    store.record_promise(conn, c, _inp("B"), promised_drops=70_000, decline_reason=None, now=1002)
-    store.record_promise(
-        conn, c, _inp("C"), promised_drops=1, decline_reason="below_clearing", now=1003
-    )
+    store.record_promise(conn, c, _inp("A"), decline_reason=None, now=1001)
+    store.record_promise(conn, c, _inp("B"), decline_reason=None, now=1002)
+    store.record_promise(conn, c, _inp("C"), decline_reason="below_clearing", now=1003)
     store.fill_promise(conn, "B", _owed("ACC_B", refund=70_000), now=1100)
     summary = store.status_summary(conn, NET, now=1200)
     assert summary["state"] == "active"
     assert summary["campaign"]["id"] == c.id
-    assert summary["committed_drops"] == 150_000
-    assert summary["remaining_drops"] == 850_000
+    # the open promise A at its derived size, plus refund B's owed 70_000
+    assert summary["committed_drops"] == PROMISE + 70_000
+    assert summary["remaining_drops"] == 1_000_000 - (PROMISE + 70_000)
     assert summary["paid_drops"] == 0
     assert summary["open_promises"] == 1
     assert summary["refunds_by_state"] == {"owed": 1}
@@ -472,3 +496,65 @@ def test_status_summary(conn):
     assert summary["top_wallets"] == [{"wallet": BIDDER, "drops": 70_000}]
     store.stop_campaign(conn, network=NET, actor="discord:1", now=1300)
     assert store.status_summary(conn, NET, now=1400)["state"] == "stopped"
+
+
+def test_a_confirmed_payout_overrides_a_row_recovery_already_parked_failed(conn):
+    """Recovery can park a row `payout_expired` on the strength of an absence
+    while its payout is still in flight. If that payout then comes back
+    confirmed, the money moved: the hash must be persisted over the guess, or
+    the row stays requeueable and the refund is paid twice."""
+    c = _live(conn)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
+    store.fill_promise(conn, "BID1", _owed(), now=1100)
+    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101) is True
+    assert (
+        store.record_payout(
+            conn,
+            "ACCEPT1",
+            state="failed",
+            tx_hash=None,
+            last_ledger_seq=None,
+            now=1102,
+            reason="payout_expired",
+        )
+        is True
+    )
+    assert store.get_refund(conn, "ACCEPT1")["state"] == "failed"
+    assert (
+        store.record_payout(
+            conn, "ACCEPT1", state="confirmed", tx_hash="PAYOUT1", last_ledger_seq=None, now=1103
+        )
+        is True
+    )
+    row = store.get_refund(conn, "ACCEPT1")
+    assert row["state"] == "confirmed"
+    assert row["payout_tx_hash"] == "PAYOUT1"
+    assert row["reason"] is None
+    # ...and the row can no longer be requeued into a second payment.
+    assert store.requeue_failed(conn, "ACCEPT1", now=1104) == "not_failed"
+
+
+def test_a_failed_payout_never_overrides_a_confirmed_one(conn):
+    """The reverse is not symmetric: only the confirmed outcome is ground
+    truth, so a losing `failed` write must change nothing."""
+    c = _live(conn)
+    store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
+    store.fill_promise(conn, "BID1", _owed(), now=1100)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
+    store.record_payout(
+        conn, "ACCEPT1", state="confirmed", tx_hash="PAYOUT1", last_ledger_seq=None, now=1102
+    )
+    assert (
+        store.record_payout(
+            conn,
+            "ACCEPT1",
+            state="failed",
+            tx_hash=None,
+            last_ledger_seq=None,
+            now=1103,
+            reason="payout_expired",
+        )
+        is False
+    )
+    row = store.get_refund(conn, "ACCEPT1")
+    assert row["state"] == "confirmed" and row["payout_tx_hash"] == "PAYOUT1"

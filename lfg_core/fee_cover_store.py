@@ -12,6 +12,7 @@ KEY + offer_index UNIQUE).
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Iterator, Mapping
@@ -470,6 +471,14 @@ def wallet_usage_drops(conn: sqlite3.Connection, network: str, wallet: str, sinc
     return int(row[0])
 
 
+def promise_drops(bid_drops: int, broker_rate: float, coverage_bps: int) -> int:
+    """The most this bid can be refunded: the broker's fee on it (rounded UP,
+    exactly as cafe computes it) times coverage. Lives here, next to BPS, so
+    `record_promise` can re-derive it under its own write lock; re-exported by
+    `fee_cover.promise_drops` for the pure-rule callers."""
+    return math.ceil(bid_drops * broker_rate) * coverage_bps // BPS
+
+
 def headroom_reason(
     conn: sqlite3.Connection, campaign: Campaign, network: str, bidder: str, drops: int, now: int
 ) -> str | None:
@@ -504,17 +513,20 @@ def record_promise(
     campaign: Campaign,
     inp: PromiseInput,
     *,
-    promised_drops: int,
     decline_reason: str | None,
     now: int | None = None,
 ) -> dict[str, Any] | None:
     """Write the promise for one on-ledger bid (idempotent on offer_index).
 
     `decline_reason` is the pure-rule verdict (fee_cover.promise_decline_reason).
-    Budget and wallet-cap headroom are decided HERE, inside the write lock, so
-    two bids can never both take the last of the budget. Coverage is
-    snapshotted from `campaign` (the read the caller priced against). Returns
-    None — writing nothing — when the campaign stopped before the lock.
+    Everything the CAMPAIGN decides is decided HERE, inside the write lock,
+    against the campaign re-read under it: the size of the promise, the minimum
+    bid, and budget/wallet-cap headroom. Two bids can therefore never both take
+    the last of the budget, and an admin update that commits between the
+    caller's read and this lock applies to this promise — the documented rule
+    is that an update applies to new promises, and a promise is only new once
+    it is written. Returns None — writing nothing — when the campaign stopped
+    before the lock.
     """
     if decline_reason in _UNRECORDED_DECLINES:
         raise ValueError(f"{decline_reason} is never recorded")
@@ -528,7 +540,10 @@ def record_promise(
         fresh = get_campaign(conn, campaign.id)
         if fresh is None or not fresh.is_live(ts):
             return None
+        promised_drops = promise_drops(inp.bid_drops, inp.broker_rate, fresh.coverage_bps)
         reason = decline_reason
+        if reason is None and inp.bid_drops < fresh.min_bid_drops:
+            reason = "below_min_bid"
         if reason is None:
             reason = headroom_reason(conn, fresh, inp.network, inp.bidder, promised_drops, ts)
         state = "open" if reason is None else "declined"
@@ -546,7 +561,7 @@ def record_promise(
                 inp.ask_drops,
                 inp.broker,
                 inp.broker_rate,
-                campaign.coverage_bps,
+                fresh.coverage_bps,
                 promised_drops,
                 inp.bid_expiration,
                 state,
@@ -669,22 +684,45 @@ def record_payout(
     last_ledger_seq: int | None,
     now: int | None = None,
     reason: str | None = None,
-) -> None:
-    """Record a payout outcome on a `submitted` row. A `failed` row carries a
-    reason: `payout_failed` (default — a validated definitive failure) or
-    `payout_expired` (recovery found no payout and the ledger passed the
-    deadline). Both are parked for an operator's --requeue."""
+) -> bool:
+    """Record a payout outcome on a `submitted` row; True when a row moved.
+
+    A `failed` row carries a reason: `payout_failed` (default — a validated
+    definitive failure) or `payout_expired` (recovery found no payout and the
+    ledger passed the deadline). Both are parked for an operator's --requeue.
+
+    `confirmed` is the one outcome that may also land on an already-`failed`
+    row. Recovery runs concurrently with the sweep and can park a row
+    `payout_expired` on the strength of an absence while its payout is still
+    in flight; if that payout then comes back confirmed, it is ground truth —
+    the money moved — and must overwrite the guess. Refusing it would drop the
+    hash, leaving the row requeueable and the refund payable twice. A `failed`
+    verdict never overwrites anything for the same reason.
+    """
     if state not in ("confirmed", "failed", "submitted"):
         raise ValueError(f"not a payout outcome: {state}")
     failed_reason = (reason or "payout_failed") if state == "failed" else None
-    conn.execute(
+    states = ("submitted", "failed") if state == "confirmed" else ("submitted",)
+    cursor = conn.execute(
         "UPDATE fee_cover_refunds SET state = ?, payout_tx_hash = COALESCE(?, payout_tx_hash),"
         " last_ledger_seq = COALESCE(?, last_ledger_seq),"
-        " reason = CASE WHEN ? = 'failed' THEN ? ELSE reason END, updated_at = ?"
-        " WHERE accept_tx_hash = ? AND state = 'submitted'",
-        (state, tx_hash, last_ledger_seq, state, failed_reason, _now(now), accept_tx_hash),
+        " reason = CASE WHEN ? = 'failed' THEN ? WHEN ? = 'confirmed' THEN NULL ELSE reason END,"
+        " updated_at = ?"
+        f" WHERE accept_tx_hash = ? AND state IN ({','.join('?' * len(states))})",
+        (
+            state,
+            tx_hash,
+            last_ledger_seq,
+            state,
+            failed_reason,
+            state,
+            _now(now),
+            accept_tx_hash,
+            *states,
+        ),
     )
     conn.commit()
+    return cursor.rowcount == 1
 
 
 def return_to_owed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> bool:

@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from lfg_core import fee_cover, history_store, xrpl_ops
 from lfg_core import fee_cover_settle as settle
 from lfg_core import fee_cover_store as store
-from lfg_core import history_store, xrpl_ops
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fee_cover" / "cafe_brokered_accept.json"
 NET = "mainnet"
@@ -119,9 +119,7 @@ def _promise(deps, campaign, offer_index=BUY_OFFER, bidder=BUYER, expiration=900
             broker_rate=0.01589,
             bid_expiration=expiration,
         )
-        return store.record_promise(
-            conn, campaign, inp, promised_drops=80_642, decline_reason=None, now=ACCEPT_TS - 60
-        )
+        return store.record_promise(conn, campaign, inp, decline_reason=None, now=ACCEPT_TS - 60)
     finally:
         conn.close()
 
@@ -661,3 +659,43 @@ def test_pay_refund_with_failed_claim_payment(env):
     assert _run(settle.pay_refund(deps, ACCEPT)) == "failed"
     row = _refund(deps)
     assert row["state"] == "failed" and row["reason"] == "payout_failed"
+
+
+def test_settle_defers_when_the_linkage_lookup_cannot_answer(env):
+    """A linkage lookup that errors must not settle the sale as "unrelated" —
+    that pays a refund on a sale the self-dealing rule might forbid. Nothing is
+    written; the promise stays open and the next sweep retries it."""
+    deps, _ledger, campaign = env
+
+    def boom(bidder, seller):
+        raise fee_cover.LinkageUnavailable("identity db locked")
+
+    deps.linked = boom
+    _promise(deps, campaign)
+    _archive_accept(deps)
+    view = _run(settle.settle_promise(deps, BUY_OFFER))
+    assert view is not None and view["state"] == "open"
+    assert _refund(deps) is None
+    conn = store.connect(deps.app_db_path)
+    try:
+        assert store.get_promise(conn, BUY_OFFER)["state"] == "open"
+    finally:
+        conn.close()
+    # ...and once the lookup can answer again, the same promise settles.
+    deps.linked = lambda a, b: False
+    assert _run(settle.settle_promise(deps, BUY_OFFER))["state"] == "owed"
+
+
+def test_a_promise_whose_linkage_defers_does_not_stop_the_sweep(env):
+    """The deferral is per-promise: the sweep's other work still runs."""
+    deps, _ledger, campaign = env
+
+    def boom(bidder, seller):
+        raise fee_cover.LinkageUnavailable("identity db locked")
+
+    deps.linked = boom
+    _promise(deps, campaign)
+    _archive_accept(deps)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=3, on_giveup=lambda row: None))
+    assert report.settled == 0 and report.released == 0
+    assert _refund(deps) is None

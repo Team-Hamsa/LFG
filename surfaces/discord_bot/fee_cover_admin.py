@@ -85,6 +85,25 @@ def parse_form(
     return out
 
 
+def modal_defaults(campaign: dict[str, Any] | None) -> dict[str, str]:
+    """The Update modal's prefill, read off the live campaign.
+
+    Every field of the campaign is replaced on Update — the service takes a
+    complete set of knobs — so an operator who opens the form against the
+    START defaults and edits one field silently resets the other three (a 25
+    XRP budget becomes 50). Prefilling makes "change one field" mean what it
+    looks like. Returns {} when there is no campaign to read, and the caller
+    must then not open the form at all."""
+    if not campaign:
+        return {}
+    return {
+        "coverage": f"{int(campaign['coverage_bps']) / 100:g}",
+        "budget": _xrp(campaign["budget_drops"]),
+        "wallet_cap": _xrp(campaign["wallet_cap_drops"]),
+        "min_bid": _xrp(campaign["min_bid_drops"]),
+    }
+
+
 def fee_cover_status_embed(status: dict[str, Any]) -> Embed:
     embed = Embed(title="💸 Fee Cover Status", color=0x9C84EF)
     embed.add_field(
@@ -157,11 +176,23 @@ class FeeCoverModal(Modal, title="Fee cover campaign"):
         label="Duration hours (Start only; blank = no end)", required=False, max_length=6
     )
 
-    def __init__(self, mode: str, check: AdminCheck, log: AdminLog):
+    def __init__(
+        self,
+        mode: str,
+        check: AdminCheck,
+        log: AdminLog,
+        defaults: dict[str, str] | None = None,
+    ):
         super().__init__()
         self.mode = mode
         self._check = check
         self._log = log
+        # discord.py gives every Modal instance its own copy of the class-level
+        # TextInputs (verified on 2.7.1), so this never leaks into the Start
+        # form's defaults.
+        for name, value in (defaults or {}).items():
+            field = cast(TextInput[Any], getattr(self, name))
+            field.default = value
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await self._check(interaction):
@@ -212,7 +243,27 @@ class FeeCoverView(View):
 
     @discord.ui.button(label="✏️ Update", style=discord.ButtonStyle.primary)
     async def update_button(self, interaction: discord.Interaction, button: Button[Any]) -> None:
-        await interaction.response.send_modal(FeeCoverModal("update", self._check, self._log))
+        """Update replaces every knob, so the form is prefilled from the live
+        campaign. It is never opened against the Start defaults: that would
+        turn "change the coverage" into "reset the budget, cap and minimum
+        bid". If the campaign can't be read, say so instead."""
+        try:
+            status = await svc.fee_cover_status()
+        except ServiceError as e:
+            await interaction.response.send_message(
+                f"❌ Fee cover status failed, nothing to update against: {e.message}",
+                ephemeral=True,
+            )
+            return
+        defaults = modal_defaults(status.get("campaign"))
+        if not defaults:
+            await interaction.response.send_message(
+                "❌ No campaign to update — use ▶️ Start.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            FeeCoverModal("update", self._check, self._log, defaults)
+        )
 
     @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: Button[Any]) -> None:

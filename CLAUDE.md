@@ -1228,13 +1228,26 @@ stays uncovered. Refund = min(promise, observed
 `NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
 accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
 a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +
-`lfg:fee_cover:<accept hash>`. Stop blocks new promises and honors open ones.
+`lfg:fee_cover:<accept hash>`. Stop blocks new promises and honors open ones;
+an Update applies to promises written after it, which `record_promise` enforces
+by re-reading the campaign under its own write lock and sizing the promise
+there (a caller's stale read can never admit one at the old coverage). The
+buyer/seller linkage check is the one gate that DEFERS rather than answering
+when it cannot answer: a lookup error raises `fee_cover.LinkageUnavailable`,
+nothing is written, and the promise stays `open` for the next sweep — settling
+a self-dealing pair as "unrelated" would pay them.
 The settlement loop now always starts (it settles/pays/releases fee-cover rows
 on any stack). Indeterminate payouts resolve via startup recovery; a refund
 refused before submit (`ClaimNotSubmitted`, unreadable ledger) goes back to
 `owed` and retries next sweep. Two reasons park `failed`, neither ever retried
 automatically: `payout_failed` (a validated definitive failure) and
-`payout_expired` (recovery found no payout past its LastLedgerSequence). An
+`payout_expired` (recovery found no payout past its LastLedgerSequence). A
+`payout_expired` verdict rests on an absence, so a `confirmed` result that
+arrives afterwards overwrites it — the money moved, and dropping that hash
+would leave the row requeueable and the refund payable twice. For the same
+reason the recovery scan floor widens with `FEE_COVER_LEDGER_MARGIN`: the
+deadline it scans back from is the PROVISIONAL `current + margin * 10`, so a
+margin past ~500 would otherwise start the scan after the refund landed. An
 operator fixes the cause, then requeues either with
 `scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`
 (it re-checks the chain first and refuses, exit 1, if the payout is found or

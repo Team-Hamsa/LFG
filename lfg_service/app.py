@@ -4045,20 +4045,18 @@ def _fee_cover_system_wallets() -> frozenset[str]:
 
 def _fee_cover_linked(bidder: str, seller: str) -> bool:
     """Same logical user (identity bucket) or the same non-exchange activation
-    funder (#461). Fail-open on lookup errors: the refund is capped below the
-    royalty, so a missed link can never make LFG a net payer.
+    funder (#461).
 
-    Never raises: a failed bucket lookup counts as "no bucket link" (the
-    funder rule is still checked), a failed funder lookup as "not linked"."""
+    A lookup that cannot answer raises `fee_cover.LinkageUnavailable` rather
+    than reporting "unlinked": a self-dealing pair reached during a DB error
+    would otherwise be settled as unrelated and paid. The caller defers instead
+    — the promise stays open and the next sweep retries it — so a transient
+    error costs a delay, not a wrong payout. A lookup that is merely EMPTY (no
+    bucket, no cached funder) is a real answer and is not a deferral."""
     try:
         bucket = identity_store.bucket_for_wallet(bidder)
-    except Exception:
-        logging.warning(
-            "fee cover: identity bucket lookup for %s failed; treating as unlinked",
-            bidder,
-            exc_info=True,
-        )
-        bucket = None
+    except Exception as exc:
+        raise fee_cover.LinkageUnavailable(f"identity bucket lookup for {bidder} failed") from exc
     if bucket is not None and seller in cast(list[str], bucket.get("wallets") or []):
         return True
     try:
@@ -4069,14 +4067,8 @@ def _fee_cover_linked(bidder: str, seller: str) -> bool:
             funder_b = funding.cached_funder(conn, seller)
         finally:
             conn.close()
-    except Exception:
-        logging.warning(
-            "fee cover: funder lookup for %s/%s failed; treating as unlinked",
-            bidder,
-            seller,
-            exc_info=True,
-        )
-        return False
+    except Exception as exc:
+        raise fee_cover.LinkageUnavailable(f"funder lookup for {bidder}/{seller} failed") from exc
     return funder_a is not None and funder_a == funder_b and funder_a not in funding.EXCHANGES
 
 
@@ -4190,7 +4182,7 @@ def _fee_cover_record_promise(session: Any, bid_row: dict[str, Any]) -> dict[str
     view, or None for an ordinary bid."""
     bid_drops = int(bid_row["amount_drops"])
     bidder = str(bid_row["bidder"])
-    campaign, listing, reason, drops = _fee_cover_evaluate(
+    campaign, listing, reason, _drops = _fee_cover_evaluate(
         session.nft_id,
         session.owner,
         bidder,
@@ -4216,7 +4208,6 @@ def _fee_cover_record_promise(session: Any, bid_row: dict[str, Any]) -> dict[str
                 broker_rate=listing.broker_rate,
                 bid_expiration=bid_row.get("expiration"),
             ),
-            promised_drops=drops,
             decline_reason=reason,
         )
         return None if row is None else fee_cover_store.view_for_offer(conn, offer_index)
@@ -5499,6 +5490,22 @@ async def _start_fee_cover_recovery(app: web.Application) -> None:
             logging.warning("fee cover recovery failed at startup", exc_info=True)
 
     app["fee_cover_recovery_task"] = asyncio.get_event_loop().create_task(_run())
+
+
+async def _stop_startup_recovery(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: retire the fire-and-forget startup recovery
+    tasks. Without this a recovery still inside an account_tx call or a DB
+    write runs on after aiohttp has torn its session down, or is abandoned
+    when the loop closes. Cancelling is safe for both: neither submits a
+    payment, and a row left `submitted` is re-resolved by the next startup
+    recovery or sweep pass."""
+    for key in ("fee_cover_recovery_task", "brix_recovery_task"):
+        task = app.get(key)
+        if task is None:
+            continue
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def _start_settlement_sweep(app: web.Application) -> None:
@@ -10182,6 +10189,7 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_brix_claim_recovery)
     app.on_startup.append(_start_fee_cover_recovery)
     app.on_cleanup.append(_stop_settlement_sweep)
+    app.on_cleanup.append(_stop_startup_recovery)
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)
     app.on_cleanup.append(_stop_sponsored_burn_worker)

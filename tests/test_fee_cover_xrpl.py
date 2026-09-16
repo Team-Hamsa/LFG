@@ -176,6 +176,7 @@ def account_tx(monkeypatch):
             return self._ok
 
     def fake_request(self, request):
+        box["ledger_index_min"] = request.ledger_index_min
         if box["error"] is not None:
             return _Resp(box["error"], ok=False)
         return _Resp({"transactions": box["entries"], "marker": None})
@@ -184,9 +185,11 @@ def account_tx(monkeypatch):
     return box
 
 
-def _find():
+def _find(min_ledger=6000):
     return _run(
-        xrpl_ops.find_fee_cover_payment(ACCEPT, destination=BUYER, drops=80_642, min_ledger=6000)
+        xrpl_ops.find_fee_cover_payment(
+            ACCEPT, destination=BUYER, drops=80_642, min_ledger=min_ledger
+        )
     )
 
 
@@ -240,3 +243,41 @@ def test_get_xrp_balance_drops(monkeypatch):
     monkeypatch.setattr(xrpl_ops.AsyncJsonRpcClient, "request", fake_request, raising=False)
     assert _run(xrpl_ops.get_xrp_balance_drops("rIssuer")) == 215_611_627
     assert _run(xrpl_ops.get_xrp_balance_drops("rIssuer")) is None
+
+
+def test_find_fee_cover_payment_scans_from_before_the_provisional_deadline(account_tx, monkeypatch):
+    """`min_ledger` is the row's DEADLINE, and before the payout is recorded
+    that deadline is the provisional `current + FEE_COVER_LEDGER_MARGIN * 10`.
+    The scan floor has to clear that whole span: a margin raised past ~500
+    would otherwise start the scan after the refund actually validated and
+    report a payout that landed as absent — which past the deadline reads as
+    "failed", and a requeue would pay it twice."""
+    account_tx["entries"] = [_entry()]
+    monkeypatch.setattr(xrpl_ops.config, "FEE_COVER_LEDGER_MARGIN", 40)
+    _find()
+    assert account_tx["ledger_index_min"] == 6000 - (5000 + 400)
+    monkeypatch.setattr(xrpl_ops.config, "FEE_COVER_LEDGER_MARGIN", 2_000)
+    _find(min_ledger=100_000)
+    # The window grows with the margin, so the payout stays inside it.
+    assert account_tx["ledger_index_min"] == 100_000 - (5000 + 20_000)
+
+
+def test_find_claim_payment_keeps_the_plain_slack(monkeypatch):
+    """The fee-cover widening is local to the fee-cover caller: the BRIX claim
+    scan, whose deadline is `current + margin`, is unchanged."""
+    seen = {}
+
+    class _Resp:
+        result = {"transactions": [], "marker": None}
+
+        def is_successful(self):
+            return True
+
+    def fake_request(self, request):
+        seen["min"] = request.ledger_index_min
+        return _Resp()
+
+    monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request, raising=False)
+    monkeypatch.setattr(xrpl_ops, "distributor_address", lambda: config.SIGNING_ACCOUNT)
+    _run(xrpl_ops.find_claim_payment(1, BUYER, 5, min_ledger=6000))
+    assert seen["min"] == 6000 - 5000

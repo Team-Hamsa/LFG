@@ -6,7 +6,6 @@ Spec: docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md.
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from typing import Any
 
 from xrpl.core.addresscodec import encode_classic_address
 
-from lfg_core import brokers
+from lfg_core import brokers, fee_cover_store
 from lfg_core.fee_cover_store import BPS, Campaign, RefundDecision
 
 # A refund is always strictly below the royalty received on the same sale, so
@@ -28,6 +27,14 @@ RECORDED_PROMISE_DECLINES = frozenset(
 )
 
 _LSF_SELL_NFTOKEN = 0x00000001
+
+
+class LinkageUnavailable(Exception):
+    """The buyer/seller linkage lookup could not answer, so self-dealing can be
+    neither proved nor ruled out. Raised by the `linked` callable and allowed to
+    propagate out of `compute_refund`: an unknown link DEFERS the settlement
+    (the promise stays open and the sweep retries) rather than resolving to
+    "unrelated", which would pay a refund on a sale the rule might forbid."""
 
 
 @dataclass(frozen=True)
@@ -73,8 +80,13 @@ def external_listing_for(
 
 def promise_drops(bid_drops: int, broker_rate: float, coverage_bps: int) -> int:
     """The most this bid can be refunded: the broker's fee on it (rounded UP,
-    exactly as cafe computes it) times coverage."""
-    return math.ceil(bid_drops * broker_rate) * coverage_bps // BPS
+    exactly as cafe computes it) times coverage.
+
+    Defined in the store so `record_promise` can re-derive it under its own
+    write lock — the promise that is WRITTEN is always sized on the campaign as
+    it stands at that moment. This is the same function, re-exported for the
+    advisory quote."""
+    return fee_cover_store.promise_drops(bid_drops, broker_rate, coverage_bps)
 
 
 def promise_decline_reason(
@@ -146,7 +158,10 @@ def compute_refund(
     linked: Callable[[str, str], bool],
 ) -> RefundDecision:
     """What a validated accept refunds against its promise — derived from the
-    transaction and its metadata, never from any listed price."""
+    transaction and its metadata, never from any listed price.
+
+    `linked` may raise `LinkageUnavailable`, which propagates: an unanswerable
+    linkage lookup must defer the settlement, never resolve to "unrelated"."""
     tx_hash = str(tx.get("hash") or "")
     raw_meta = tx.get("meta")
     meta: Mapping[str, Any] = raw_meta if isinstance(raw_meta, Mapping) else {}
