@@ -794,3 +794,224 @@ def test_linked_funder_lookup_error_defers_instead_of_answering(env, monkeypatch
     monkeypatch.setattr(server.funding, "cached_funder", funder_boom)
     with pytest.raises(server.fee_cover.LinkageUnavailable):
         server._fee_cover_linked(BIDDER, OWNER)
+
+
+# --- Durable quotes: a cover the buyer was shown survives errors and restarts ---
+
+
+def _quote_row(app_db, session_id):
+    conn = fee_cover_store.connect(app_db)
+    try:
+        return fee_cover_store.get_quote(conn, session_id)
+    finally:
+        conn.close()
+
+
+def _age_quote(app_db, session_id, seconds):
+    conn = fee_cover_store.connect(app_db)
+    try:
+        conn.execute(
+            "UPDATE fee_cover_quotes SET created_at = created_at - ? WHERE session_id = ?",
+            (seconds, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _wallet_status(monkeypatch, status):
+    calls = []
+
+    async def fake(uuid, **kwargs):
+        calls.append(uuid)
+        if isinstance(status, Exception):
+            raise status
+        return status
+
+    monkeypatch.setattr(server.xumm_ops, "get_payload_status", fake)
+    return calls
+
+
+def _signed(account=BIDDER, txid="TXHASH"):
+    return {"signed": True, "expired": False, "account": account, "txid": txid}
+
+
+def test_a_covered_quote_is_recorded_durably(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    row = _quote_row(env["app_db"], session.id)
+    assert row["state"] == "pending" and row["payload_uuid"] == "U1"
+    assert (row["bidder"], row["nft_id"], row["owner"]) == (BIDDER, CHAR, OWNER)
+    assert row["bid_drops"] == 5_075_000
+    assert json.loads(row["listing_json"])["offer_index"] == "E" * 64
+
+
+def test_a_quote_that_cannot_be_recorded_is_not_offered(env, monkeypatch):
+    """A cover the service can't carry through a restart is never shown."""
+    _seed_char_with_cafe_listing(env["onchain"])
+    _campaign(env["app_db"])
+    _fake_payload(monkeypatch)
+
+    def boom(session):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(server, "_fee_cover_record_quote", boom)
+    body = _body(
+        _run(
+            server.handle_market_bid_start(
+                _post("/api/market/bid", {"nft_id": CHAR, "price_xrp": "5.075"})
+            )
+        )
+    )
+    assert body["fee_cover"] is None
+    assert server.market_sessions[body["id"]].fee_cover_listing is None
+
+
+def test_a_failed_promise_write_keeps_the_quote_and_the_sweep_finishes_it(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    real = server._fee_cover_record_promise
+    state = {"fail": True}
+
+    def flaky(s, bid_row):
+        if state["fail"]:
+            raise RuntimeError("database is locked")
+        return real(s, bid_row)
+
+    monkeypatch.setattr(server, "_fee_cover_record_promise", flaky)
+    body = _body(_run(server.handle_market_bid_status(_StatusReq(session.id))))
+    # the quote the buyer was shown is not erased by the error...
+    assert body["state"] == "done" and body["fee_cover"]["state"] == "quoted"
+    assert _promise_row(env["app_db"]) is None
+    assert _quote_row(env["app_db"], session.id)["state"] == "pending"
+    # ...and once the error clears, the sweep's reconciler writes the promise.
+    state["fail"] = False
+    _age_quote(env["app_db"], session.id, 120)
+    _wallet_status(monkeypatch, _signed())
+    _run(server._reconcile_fee_cover_quotes())
+    assert _promise_row(env["app_db"])["state"] == "open"
+    assert session.fee_cover["state"] == "open"
+    row = _quote_row(env["app_db"], session.id)
+    assert (row["state"], row["outcome"], row["offer_index"]) == ("closed", "promised", "D" * 64)
+
+
+def test_a_bid_row_index_failure_still_writes_the_promise(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+
+    def boom(network, row):
+        raise RuntimeError("onchain db locked")
+
+    monkeypatch.setattr(server, "_write_bid_row", boom)
+
+    async def go():
+        await server._advance_market_session("bid", session, asyncio.get_event_loop())
+
+    with pytest.raises(RuntimeError, match="onchain db locked"):
+        _run(go())  # the indexing error still surfaces, as before
+    assert _promise_row(env["app_db"])["state"] == "open"
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "promised"
+
+
+def test_a_quote_lost_to_a_restart_is_reconciled_from_the_ledger(env, monkeypatch):
+    """The bid validated but the service restarted before observing it: the
+    in-memory session is gone, and the durable quote rebuilds it."""
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()  # the restart
+    _age_quote(env["app_db"], session.id, 120)
+    rebuilt = []
+    advance = _finalizing_advance()
+
+    async def recording_advance(s):
+        rebuilt.append((s.id, s.state, s.txid, s.wallet_address, s.fee_cover_listing))
+        return await advance(s)
+
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", recording_advance)
+    _wallet_status(monkeypatch, _signed())
+    _run(server._reconcile_fee_cover_quotes())
+    [(sid, st, txid, wallet, listing)] = rebuilt
+    assert (sid, st, txid, wallet) == (session.id, server.market_flow.PENDING, "TXHASH", BIDDER)
+    assert listing["offer_index"] == "E" * 64
+    assert _promise_row(env["app_db"])["state"] == "open"
+    row = _quote_row(env["app_db"], session.id)
+    assert row["outcome"] == "promised" and row["txid"] == "TXHASH"
+
+
+def test_a_persisted_txid_goes_straight_to_the_ledger(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    server._fee_cover_note_txid(session.id, "TXHASH")
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, 120)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    calls = _wallet_status(monkeypatch, RuntimeError("must not ask the wallet"))
+    _run(server._reconcile_fee_cover_quotes())
+    assert calls == []
+    assert _promise_row(env["app_db"])["state"] == "open"
+
+
+@pytest.mark.parametrize(
+    "status, outcome",
+    [
+        ({"signed": False, "expired": True}, "expired"),
+        (_signed(account="rSomeoneElse000000000000000000000"), "failed"),
+    ],
+)
+def test_reconcile_closes_quotes_that_never_became_a_valid_bid(env, monkeypatch, status, outcome):
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, 120)
+
+    async def never(s):
+        raise AssertionError("no ledger check for a bid that was never validly signed")
+
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", never)
+    _wallet_status(monkeypatch, status)
+    _run(server._reconcile_fee_cover_quotes())
+    assert _quote_row(env["app_db"], session.id)["outcome"] == outcome
+    assert _promise_row(env["app_db"]) is None
+
+
+def test_reconcile_leaves_unresolved_quotes_pending(env, monkeypatch):
+    """Unsigned-but-live, an unreachable wallet provider, or a bid not yet
+    validated: all retry next sweep."""
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, 120)
+
+    async def not_validated(s):
+        return None
+
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", not_validated)
+    for status in ({"signed": False, "expired": False}, None, _signed()):
+        _wallet_status(monkeypatch, status)
+        _run(server._reconcile_fee_cover_quotes())
+        assert _quote_row(env["app_db"], session.id)["state"] == "pending"
+
+
+def test_reconcile_skips_a_fresh_quote_and_a_live_unfinished_session(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    calls = _wallet_status(monkeypatch, _signed())
+    _run(server._reconcile_fee_cover_quotes())  # fresh: inside the grace period
+    _age_quote(env["app_db"], session.id, 120)
+    _run(server._reconcile_fee_cover_quotes())  # aged, but its live session owns it
+    assert calls == []
+    assert _quote_row(env["app_db"], session.id)["state"] == "pending"
+
+
+def test_reconcile_abandons_a_quote_past_its_max_age(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, server._FEE_COVER_QUOTE_MAX_AGE_SECONDS + 1)
+    calls = _wallet_status(monkeypatch, _signed())
+    _run(server._reconcile_fee_cover_quotes())
+    assert calls == []
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "abandoned"
+
+
+def test_an_uncovered_finalize_closes_its_quote(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    conn = fee_cover_store.connect(env["app_db"])
+    fee_cover_store.stop_campaign(conn, network="testnet", actor="t")
+    conn.close()
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    _run(server.handle_market_bid_status(_StatusReq(session.id)))
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "uncovered"

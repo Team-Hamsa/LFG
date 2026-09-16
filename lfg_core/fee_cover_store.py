@@ -81,6 +81,27 @@ CREATE TABLE IF NOT EXISTS fee_cover_refunds (
 CREATE INDEX IF NOT EXISTS idx_fee_cover_refunds_state
   ON fee_cover_refunds(network, state);
 
+-- One row per bid the service QUOTED as covered, written before the buyer
+-- signs. It is the durable twin of the in-memory BidSession: enough to rebuild
+-- that session and re-run its on-ledger checks, so a promise the buyer was
+-- shown survives a failed promise write or a service restart. A quote reserves
+-- no budget; the promise it resolves into does.
+CREATE TABLE IF NOT EXISTS fee_cover_quotes (
+  session_id TEXT PRIMARY KEY,
+  network TEXT NOT NULL,
+  payload_uuid TEXT NOT NULL,
+  txid TEXT,
+  nft_id TEXT NOT NULL, owner TEXT NOT NULL, bidder TEXT NOT NULL,
+  bid_drops INTEGER NOT NULL,
+  listing_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','closed')),
+  outcome TEXT,
+  offer_index TEXT,
+  created_at INTEGER NOT NULL, closed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_pending
+  ON fee_cover_quotes(network, state, created_at);
+
 CREATE TABLE IF NOT EXISTS fee_cover_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
@@ -782,6 +803,110 @@ def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
             (ts, accept_tx_hash),
         )
     return "requeued"
+
+
+@dataclass(frozen=True)
+class Quote:
+    session_id: str
+    network: str
+    payload_uuid: str
+    txid: str | None
+    nft_id: str
+    owner: str
+    bidder: str
+    bid_drops: int
+    listing: dict[str, Any]
+    created_at: int
+
+
+def _quote(row: sqlite3.Row) -> Quote:
+    return Quote(
+        session_id=str(row["session_id"]),
+        network=str(row["network"]),
+        payload_uuid=str(row["payload_uuid"]),
+        txid=None if row["txid"] is None else str(row["txid"]),
+        nft_id=str(row["nft_id"]),
+        owner=str(row["owner"]),
+        bidder=str(row["bidder"]),
+        bid_drops=int(row["bid_drops"]),
+        listing=json.loads(row["listing_json"]),
+        created_at=int(row["created_at"]),
+    )
+
+
+def record_quote(conn: sqlite3.Connection, quote: Quote) -> None:
+    """Durably record a covered quote (idempotent on session_id)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO fee_cover_quotes (session_id, network, payload_uuid, txid, nft_id,"
+        " owner, bidder, bid_drops, listing_json, state, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+        (
+            quote.session_id,
+            quote.network,
+            quote.payload_uuid,
+            quote.txid,
+            quote.nft_id,
+            quote.owner,
+            quote.bidder,
+            quote.bid_drops,
+            json.dumps(quote.listing, sort_keys=True),
+            quote.created_at,
+        ),
+    )
+    conn.commit()
+
+
+def get_quote(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            "SELECT * FROM fee_cover_quotes WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    )
+
+
+def set_quote_txid(conn: sqlite3.Connection, session_id: str, txid: str) -> None:
+    """Remember the signed tx hash once the (signer-checked) session learns
+    it, so a rebuilt session goes straight to the ledger without re-asking the
+    wallet provider."""
+    conn.execute(
+        "UPDATE fee_cover_quotes SET txid = ? WHERE session_id = ? AND txid IS NULL",
+        (txid, session_id),
+    )
+    conn.commit()
+
+
+def close_quote(
+    conn: sqlite3.Connection,
+    session_id: str,
+    outcome: str,
+    *,
+    offer_index: str | None = None,
+    now: int | None = None,
+) -> bool:
+    """pending -> closed with its outcome ('promised' | 'uncovered' | 'failed' |
+    'expired' | 'abandoned'). Only a pending quote moves."""
+    cursor = conn.execute(
+        "UPDATE fee_cover_quotes SET state = 'closed', outcome = ?, offer_index = ?, closed_at = ?"
+        " WHERE session_id = ? AND state = 'pending'",
+        (outcome, offer_index, _now(now), session_id),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def pending_quotes(
+    conn: sqlite3.Connection, network: str, *, created_before: int, limit: int
+) -> list[Quote]:
+    """Oldest pending quotes created before `created_before` — the live poll
+    path gets first go at a fresh one."""
+    return [
+        _quote(r)
+        for r in conn.execute(
+            "SELECT * FROM fee_cover_quotes WHERE network = ? AND state = 'pending'"
+            " AND created_at < ? ORDER BY created_at LIMIT ?",
+            (network, created_before, limit),
+        )
+    ]
 
 
 def view_for_offer(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:

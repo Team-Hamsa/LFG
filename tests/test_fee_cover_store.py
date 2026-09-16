@@ -588,3 +588,49 @@ def test_record_promise_keeps_campaign_independent_pure_declines(conn):
     c = _live(conn)
     row = store.record_promise(conn, c, _inp(), decline_reason="below_clearing", now=1001)
     assert row is not None and row["state"] == "declined" and row["reason"] == "below_clearing"
+
+
+def _quote(session_id="S1", created_at=1000, **over):
+    base = {
+        "session_id": session_id,
+        "network": NET,
+        "payload_uuid": "U1",
+        "txid": None,
+        "nft_id": "NFT1",
+        "owner": "rOwner",
+        "bidder": BIDDER,
+        "bid_drops": 5_075_000,
+        "listing": {"offer_index": "E" * 64, "broker": CAFE, "broker_rate": 0.01589},
+        "created_at": created_at,
+    }
+    base.update(over)
+    return store.Quote(**base)
+
+
+def test_quote_lifecycle(conn):
+    store.record_quote(conn, _quote())
+    store.record_quote(conn, _quote(bid_drops=1))  # idempotent on session_id
+    row = store.get_quote(conn, "S1")
+    assert row["state"] == "pending" and row["bid_drops"] == 5_075_000 and row["txid"] is None
+    store.set_quote_txid(conn, "S1", "TX1")
+    store.set_quote_txid(conn, "S1", "TX2")  # the first signed hash sticks
+    assert store.get_quote(conn, "S1")["txid"] == "TX1"
+    [pending] = store.pending_quotes(conn, NET, created_before=2000, limit=10)
+    assert pending.txid == "TX1" and pending.listing["broker"] == CAFE
+    assert store.close_quote(conn, "S1", "promised", offer_index="BID1", now=1500) is True
+    assert store.close_quote(conn, "S1", "failed", now=1600) is False  # only pending moves
+    row = store.get_quote(conn, "S1")
+    assert (row["state"], row["outcome"], row["offer_index"]) == ("closed", "promised", "BID1")
+    assert store.pending_quotes(conn, NET, created_before=2000, limit=10) == []
+
+
+def test_pending_quotes_respects_the_grace_period_network_and_limit(conn):
+    store.record_quote(conn, _quote("OLD1", created_at=1000))
+    store.record_quote(conn, _quote("OLD2", created_at=1001))
+    store.record_quote(conn, _quote("FRESH", created_at=1990))
+    store.record_quote(conn, _quote("MAINNET", created_at=1000, network="mainnet"))
+    ids = [q.session_id for q in store.pending_quotes(conn, NET, created_before=1500, limit=10)]
+    assert ids == ["OLD1", "OLD2"]
+    assert [
+        q.session_id for q in store.pending_quotes(conn, NET, created_before=1500, limit=1)
+    ] == ["OLD1"]

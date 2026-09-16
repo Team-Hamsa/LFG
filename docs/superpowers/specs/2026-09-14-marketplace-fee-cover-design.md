@@ -345,8 +345,30 @@ promise.
   on the client's status poll, or — when the client stopped polling before
   the bid validated — by `sweep_fee_cover()`, which first advances every
   in-memory bid session that is not terminal and whose `fee_cover.state` is
-  `quoted`. Sessions live only in memory, so a bid whose session is lost to a
-  service restart before validation stays uncovered.
+  `quoted`.
+- **A shown cover is durable.** Sessions live only in memory, and
+  `advance_bid_session` hands the validated bid over exactly once. So the
+  promise the buyer was shown would otherwise be lost to a failed promise
+  write, a failed bid-row index write, or a restart between validation and
+  observation. Three rules close that:
+  - **Quote row.** At `POST /api/market/bid` a `quoted` cover is written to
+    `fee_cover_quotes`: session id, payload uuid, bidder, NFT, owner, bid
+    drops, saved listing. If that write fails the cover is **not offered**:
+    `fee_cover` is null.
+  - **Poll path.** The signed tx hash is saved on the quote once the session
+    learns it, after its signer check. The promise write runs in a `finally`
+    around the bid-row index write. A failed promise write logs and leaves
+    the session's `quoted` view in place, never null.
+  - **Reconciler.** `_reconcile_fee_cover_quotes` runs each sweep for pending
+    quotes older than 60 s whose live session is absent or terminal:
+    - It rebuilds the `BidSession`. It uses the saved tx hash, or else asks
+      the wallet provider for the payload status with the same fail-closed
+      signer check.
+    - It runs `advance_bid_session`, indexes the bid best-effort, and writes
+      the promise via the same `_fee_cover_record_promise`. That call is
+      idempotent on `offer_index`, so racing the poll path is safe.
+    - It closes the quote `promised` / `uncovered` / `expired` / `failed`, or
+      `abandoned` past 24 h. Anything unresolved retries next sweep.
 - **Primary trigger.** The bid status poll. In `_advance_market_session`'s
   `bid` branch, after computing `session.fill`: when `fill == "accepted"` and a
   promise exists, call `fee_cover.settle_promise(network, offer_index)`. This

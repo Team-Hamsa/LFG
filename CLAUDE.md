@@ -1235,8 +1235,14 @@ settles — so Buy-now costs the ask. Promise at bid finalize reserves budget
 (still live, or already sold to this bidder — a fast broker fill closes it
 before the first `done` poll); the settlement sweep also advances quoted,
 unfinished in-memory bid sessions so a client that stopped polling still gets
-its promise, but a session lost to a service restart before its bid validates
-stays uncovered. Refund = min(promise, observed
+its promise. A cover the buyer is SHOWN is durable: the quote is written to
+`fee_cover_quotes` (app DB) before the buyer signs, and if that write fails
+the cover isn't offered. The sweep's reconciler rebuilds the bid session from
+any pending quote whose live session is gone (restart) or terminal (a failed
+promise write, a tx lookup that gave up). It re-runs the same signer and
+on-ledger checks, then writes the promise (idempotent) and closes the quote
+`promised`/`uncovered`/`expired`/`failed`, or `abandoned` after 24 h.
+Refund = min(promise, observed
 `NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
 accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
 a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +
