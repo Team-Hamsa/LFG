@@ -20,7 +20,8 @@ import re
 import shutil
 import sys
 import tempfile
-from collections.abc import Iterator
+import urllib.parse
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -69,18 +70,26 @@ os.environ["BURN2MINT_JOBS_DIR"] = _store_path("burn2mint_jobs", mkdir=True)
 # networks share it (DB_PATH / ONCHAIN_DB_PATH / HISTORY_DB_PATH override the
 # per-network name); tests that need them apart already patch the path
 # functions directly.
-os.environ.setdefault("DB_PATH", _store_path("lfg_nfts.db"))
-os.environ.setdefault("ONCHAIN_DB_PATH", _store_path("onchain.db"))
-os.environ.setdefault("HISTORY_DB_PATH", _store_path("history.db"))
-os.environ.setdefault("IMAGES_DIR", _store_path("images"))
-os.environ.setdefault("X_STATE_DB_PATH", _store_path("x_state.db"))
-os.environ.setdefault("ECONOMY_RECORDS_DIR", _store_path("economy_records"))
-os.environ.setdefault("SWAP_RECORDS_DIR", _store_path("swap_records"))
-os.environ.setdefault("LAYER_CACHE_DIR", _store_path("layer_cache"))
-# Not a store, but the same leak: the CLI subprocess tests of
-# scripts/audit_layer_dimensions.py otherwise replace the checkout's pre-push
-# result cache with entries for their tmp fixtures.
-os.environ.setdefault("LAYER_DIM_CACHE", _store_path("layer_dimensions_cache.json"))
+_STORE_PINS = {
+    "DB_PATH": "lfg_nfts.db",
+    "ONCHAIN_DB_PATH": "onchain.db",
+    "HISTORY_DB_PATH": "history.db",
+    "IMAGES_DIR": "images",
+    "X_STATE_DB_PATH": "x_state.db",
+    "ECONOMY_RECORDS_DIR": "economy_records",
+    "SWAP_RECORDS_DIR": "swap_records",
+    "LAYER_CACHE_DIR": "layer_cache",
+    # Not a store, but the same leak: the CLI subprocess tests of
+    # scripts/audit_layer_dimensions.py otherwise replace the checkout's
+    # pre-push result cache with entries for their tmp fixtures.
+    "LAYER_DIM_CACHE": "layer_dimensions_cache.json",
+}
+for _var, _name in _STORE_PINS.items():
+    os.environ.setdefault(_var, _store_path(_name))
+# Every pin a Python subprocess must carry. A test that builds a child env from
+# scratch copies these in: `env.update({k: os.environ[k] for k in
+# conftest.STORE_PIN_VARS})` (the guard below fails it otherwise).
+STORE_PIN_VARS = ("BULK_MINT_JOBS_DIR", "BURN2MINT_JOBS_DIR", *_STORE_PINS)
 
 # --- Isolate the suite from the deployed .env (#323) ---
 # lfg_core/config.py gates its load_dotenv() on LFG_SKIP_DOTENV, so with this
@@ -193,10 +202,13 @@ def _isolated_payment_ledger(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
 #   session. Auditing THIS process — rather than diffing mtimes — keeps the
 #   guard quiet in ~/LFG and ~/LFG-staging, where the live services write the
 #   very same files while the suite runs.
-# * Subprocesses are invisible to the hook (they inherit the pins instead), so
-#   the session also diffs the checkout's store entries at start and finish
-#   and fails on any that appeared or vanished. Existence only, for the same
-#   live-writer reason.
+# * A subprocess's own file access is invisible to the hook, so the hook also
+#   watches subprocess.Popen: a Python child started without every store pin
+#   (a from-scratch env=, or after a monkeypatch.delenv), or with one pointing
+#   into the checkout, is a hit — a child can't write a checkout store it was
+#   never pointed at. As a last net for other children, the session diffs the
+#   checkout's store entries at start and finish and fails on any that
+#   appeared or vanished (existence only, for the same live-writer reason).
 _STORE_FILE_RE = re.compile(r"[^/]+\.db(?:-wal|-shm|-journal)?")
 _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 # Non-*.db names written relative to the CWD: record/journal dirs, the layer
@@ -239,27 +251,102 @@ def _is_store_name(name: str) -> bool:
     )
 
 
+def _may_name_store(path: str) -> bool:
+    """Cheap pre-filter: can any component of `path` be a store name?"""
+    if ".db" not in path and _STORE_DIR_PREFIX not in path:
+        if not any(name in path for name in _STORE_NAMES):
+            return False
+    return any(_is_store_name(part) for part in path.split(os.sep))
+
+
+def _sqlite_uri_path(uri: str) -> str:
+    """Filesystem path of a SQLite `file:` URI: authority dropped, %-decoded."""
+    path = uri[len("file:") :].split("?", 1)[0].split("#", 1)[0]
+    if path.startswith("//"):  # file://host/abs or file:///abs
+        path = "/" + path[2:].partition("/")[2]
+    return urllib.parse.unquote(path)
+
+
+def _is_python(executable: object) -> bool:
+    try:
+        exe = os.fsdecode(executable)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    if os.path.basename(exe).startswith("python"):
+        return True
+    return os.path.realpath(exe) == os.path.realpath(sys.executable)
+
+
 class _CheckoutStoreGuard:
     def __init__(self, roots: tuple[str, ...]) -> None:
-        self.roots = roots
+        self.roots = tuple(
+            dict.fromkeys(
+                r for root in roots for r in (os.path.abspath(root), os.path.realpath(root))
+            )
+        )
         # (test id or "<outside a test>", audit event, checkout path)
         self.hits: list[tuple[str, str, str]] = []
         self.entries_at_start: set[str] = set()
         self.session_report: list[str] = []
 
-    def store_path(self, path: str) -> str | None:
-        """`path` if it names a store inside a checkout root, else None."""
-        abspath = os.path.abspath(path)
+    def inside_roots(self, path: str) -> str | None:
+        """The checkout-relative part of `path` if it lies inside a root, else None."""
         for root in self.roots:
             prefix = root.rstrip(os.sep) + os.sep
-            if not abspath.startswith(prefix):
-                continue
-            top = abspath[len(prefix) :].split(os.sep, 1)[0]
-            if _is_store_name(top):
-                return abspath
+            if path.startswith(prefix):
+                return path[len(prefix) :]
         return None
 
+    def store_path(self, path: str) -> str | None:
+        """Where `path` lands if it names a store inside a checkout root, else None.
+
+        Checks the literal absolute path and its realpath, so a symlink into the
+        checkout counts. Only paths with a store-like component are resolved
+        (realpath stats every component, and this runs for every open() in
+        the suite), so a symlink with an unrelated name aimed straight at a
+        store file is the one shape this can miss.
+        """
+        abspath = os.path.abspath(path)
+        if not _may_name_store(abspath):
+            return None
+        for candidate in dict.fromkeys((abspath, os.path.realpath(abspath))):
+            rel = self.inside_roots(candidate)
+            if rel is not None and _is_store_name(rel.split(os.sep, 1)[0]):
+                return candidate
+        return None
+
+    def _record(self, event: str, what: str) -> None:
+        test = os.environ.get("PYTEST_CURRENT_TEST", "<outside a test>")
+        self.hits.append((test, event, what))
+
+    def _audit_popen(self, args: tuple[object, ...]) -> None:
+        executable, cwd, env = args[0], args[2], args[3]
+        if not _is_python(executable):
+            return
+        child_env = os.environ if env is None else env
+        if not isinstance(child_env, Mapping):
+            return
+        prog = os.path.basename(os.fsdecode(executable))  # type: ignore[arg-type]
+        base = os.fsdecode(cwd) if cwd is not None else os.getcwd()  # type: ignore[arg-type]
+        for var in STORE_PIN_VARS:
+            value = child_env.get(var)
+            if value is None and isinstance(child_env, dict):
+                value = child_env.get(os.fsencode(var))  # os.environ rejects bytes keys
+            if not value:  # empty reads as unset: the store falls back to its default
+                self._record("subprocess.Popen", f"{prog} child env lacks {var}")
+                continue
+            target = os.path.realpath(os.path.join(base, os.fsdecode(value)))
+            if self.inside_roots(target) is not None:
+                self._record("subprocess.Popen", f"{prog} child env {var}={target}")
+
     def audit(self, event: str, args: tuple[object, ...]) -> None:
+        if event == "subprocess.Popen":
+            # (executable, args, cwd, env); env None = the child inherits ours.
+            try:
+                self._audit_popen(args)
+            except Exception:
+                pass  # an exception escaping an audit hook aborts the audited call
+            return
         spec = _AUDITED_EVENTS.get(event)
         if spec is None:
             return
@@ -284,11 +371,10 @@ class _CheckoutStoreGuard:
                     if path in ("", ":memory:"):
                         continue
                     if path.startswith("file:"):
-                        path = path[len("file:") :].split("?", 1)[0].split("#", 1)[0]
+                        path = _sqlite_uri_path(path)
                 hit = self.store_path(path)
                 if hit is not None:
-                    test = os.environ.get("PYTEST_CURRENT_TEST", "<outside a test>")
-                    self.hits.append((test, event, hit))
+                    self._record(event, hit)
         except Exception:
             return
 
@@ -332,7 +418,8 @@ def _no_checkout_store_access() -> Iterator[None]:
     leaked = _CHECKOUT_STORE_GUARD.hits[start:]
     if leaked:
         pytest.fail(
-            "test reached a store inside the checkout — pin or monkeypatch its path "
+            "test reached a store inside the checkout, or started a Python subprocess "
+            "without conftest.STORE_PIN_VARS — pin or monkeypatch the path "
             "(see the store pins in the root conftest.py):\n  " + "\n  ".join(_format_hits(leaked)),
             pytrace=False,
         )

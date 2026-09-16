@@ -1444,7 +1444,11 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
   etc.). An audit hook in the same file fails any test that
   opens/connects/mkdirs a `*.db*`, job/record dir, `images_*`, `reports/`,
   `.layer_cache` or `.layer_dimensions_cache.json` inside the repo root or
-  starting CWD, and the session fails if one appears or vanishes there.
+  starting CWD (symlinks and SQLite `file:` URIs resolved), or starts a
+  Python subprocess whose env lacks one of `conftest.STORE_PIN_VARS` (or
+  points one into the checkout) — a from-scratch `env=` must copy them in
+  (`{var: os.environ[var] for var in conftest.STORE_PIN_VARS}`). The session
+  also fails if a store appears or vanishes in the checkout.
   Adding a new store with a relative default: pin it in `conftest.py` and, if
   its name isn't `*.db`, add it to `_STORE_NAMES`. Script constants like
   `REPORTS_DIR` aren't env-driven — monkeypatch them per test. A test that

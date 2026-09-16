@@ -12,6 +12,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import urllib.parse
 
 import pytest
 
@@ -83,13 +84,25 @@ def test_explicit_exports_win_except_the_hard_set_job_dirs(tmp_path):
         f"print(json.dumps({{k: os.environ[k] for k in {pinned!r}}}))\n"
         "print(conftest._STORE_ROOT)\n"
     )
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        env=env,
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
+    start = len(GUARD.hits)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        caught = list(GUARD.hits[start:])
+    finally:
+        # Dropping pins is the point here; the live Popen check must have
+        # flagged exactly those, and the autouse guard must not fail us for it.
+        del GUARD.hits[start:]
+    assert sorted(what for _, event, what in caught if event == "subprocess.Popen") == sorted(
+        f"{os.path.basename(sys.executable)} child env lacks {var}"
+        for var in pinned
+        if var not in ("DB_PATH", "BULK_MINT_JOBS_DIR")
     )
     values_line, store_root = proc.stdout.strip().splitlines()
     values = json.loads(values_line)
@@ -134,6 +147,81 @@ def test_guard_ignores_stores_outside_its_roots(tmp_path):
     assert guard.store_path(str(tmp_path / "lfg_nfts.db")) is None
     # A sibling directory that merely shares the root's name as a prefix.
     assert guard.store_path(str(tmp_path / "checkout-2" / "lfg_nfts.db")) is None
+
+
+def test_guard_resolves_symlinks_into_the_checkout(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (tmp_path / "alias").symlink_to(checkout, target_is_directory=True)
+    (tmp_path / "jobs").symlink_to(checkout / "bulk_mint_jobs", target_is_directory=True)
+    guard = conftest._CheckoutStoreGuard((str(checkout),))
+    assert guard.store_path(str(tmp_path / "alias" / "lfg_nfts.db")) == str(
+        checkout / "lfg_nfts.db"
+    )
+    assert guard.store_path(str(tmp_path / "alias" / "trait_config.yaml")) is None
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "file:{db}",
+        "file:{db}?mode=ro",
+        "file://{db}",
+        "file://localhost{db}#frag",
+        "file:{quoted}?cache=shared",
+    ],
+)
+def test_guard_decodes_sqlite_uris(tmp_path, uri):
+    checkout = tmp_path / "check out"  # a space, so the quoted form differs
+    checkout.mkdir()
+    db = str(checkout / "lfg_nfts.db")
+    guard = conftest._CheckoutStoreGuard((str(checkout),))
+    raw = uri.format(db=db, quoted=urllib.parse.quote(db))
+    guard.audit("sqlite3.connect", (os.fsencode(raw),))
+    assert [(event, path) for _, event, path in guard.hits] == [("sqlite3.connect", db)]
+
+
+def test_guard_requires_store_pins_on_python_subprocesses(tmp_path, monkeypatch):
+    guard = conftest._CheckoutStoreGuard((str(tmp_path),))
+    pins = {var: os.environ[var] for var in conftest.STORE_PIN_VARS}
+    python = sys.executable
+    prog = os.path.basename(python)
+
+    guard.audit("subprocess.Popen", (python, [python], None, None))  # inherits our pins
+    guard.audit("subprocess.Popen", (python, [python], None, os.environ))
+    guard.audit("subprocess.Popen", (python, [python], str(tmp_path), dict(pins)))
+    guard.audit("subprocess.Popen", ("/usr/bin/git", ["git"], None, {}))  # not Python
+    guard.audit("subprocess.Popen", (python, [python], None, "not-a-mapping"))
+    assert guard.hits == []
+
+    guard.audit("subprocess.Popen", (python, [python], None, {**pins, "DB_PATH": ""}))
+    guard.audit(
+        "subprocess.Popen",
+        (python, [python], None, {**pins, "HISTORY_DB_PATH": str(tmp_path / "history.db")}),
+    )
+    guard.audit(
+        "subprocess.Popen",
+        (python, [python], None, {k: v for k, v in pins.items() if k != "IMAGES_DIR"}),
+    )
+    # A relative pin resolves against the child's cwd — here, inside the checkout.
+    guard.audit(
+        "subprocess.Popen", (python, [python], str(tmp_path), {**pins, "X_STATE_DB_PATH": "x.db"})
+    )
+    # Bytes keys and values are accepted by Popen too.
+    guard.audit(
+        "subprocess.Popen",
+        (python, [python], None, {os.fsencode(k): os.fsencode(v) for k, v in pins.items()}),
+    )
+    # An inherited env is checked too: a delenv'd pin reaches the child unset.
+    monkeypatch.delenv("SWAP_RECORDS_DIR")
+    guard.audit("subprocess.Popen", (python, [python], None, None))
+    assert [what for _, _, what in guard.hits] == [
+        f"{prog} child env lacks DB_PATH",
+        f"{prog} child env HISTORY_DB_PATH={os.path.realpath(tmp_path / 'history.db')}",
+        f"{prog} child env lacks IMAGES_DIR",
+        f"{prog} child env X_STATE_DB_PATH={os.path.realpath(tmp_path / 'x.db')}",
+        f"{prog} child env lacks SWAP_RECORDS_DIR",
+    ]
 
 
 def test_guard_audit_event_shapes(tmp_path):

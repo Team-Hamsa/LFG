@@ -18,6 +18,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
+import conftest
 from lfg_core import config, db_helpers, user_db
 
 
@@ -70,6 +71,9 @@ def test_init_db_runs_without_runtime_secrets(tmp_path):
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     db = tmp_path / "bootstrap.db"
     env = {
+        # The root conftest's store pins (its guard requires them on a Python
+        # child); DB_PATH below still points this run at its own file.
+        **{var: os.environ[var] for var in conftest.STORE_PIN_VARS},
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": repo_root,
         "DB_PATH": str(db),
