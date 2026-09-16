@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS fee_cover_refunds (
   state TEXT NOT NULL CHECK (state IN ('owed','submitted','confirmed','failed','declined')),
   reason TEXT,
   payout_tx_hash TEXT, last_ledger_seq INTEGER,
+  -- The validated ledger index when the payout was claimed. A refund is
+  -- built after its claim, so it can never validate below this: it is the
+  -- recovery scan floor, independent of any ledger-margin setting.
+  claim_ledger INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fee_cover_refunds_state
@@ -669,14 +673,26 @@ def fill_promise(
 
 
 def claim_for_payout(
-    conn: sqlite3.Connection, accept_tx_hash: str, last_ledger_seq: int, now: int | None = None
+    conn: sqlite3.Connection,
+    accept_tx_hash: str,
+    last_ledger_seq: int,
+    *,
+    claim_ledger: int,
+    now: int | None = None,
 ) -> bool:
     """owed -> submitted in ONE conditional write that also records the
-    provisional deadline. Only the caller whose update changed a row submits."""
+    provisional deadline and the claim ledger. Only the caller whose update
+    changed a row submits.
+
+    `claim_ledger` is the validated ledger index read just before the claim.
+    Recovery scans for the payout from there. It's a fact about this row,
+    not derived from `last_ledger_seq` minus whatever margin is configured
+    later, so a changed `FEE_COVER_LEDGER_MARGIN` can never move the scan
+    past a refund that landed."""
     cursor = conn.execute(
-        "UPDATE fee_cover_refunds SET state = 'submitted', last_ledger_seq = ?, updated_at = ?"
-        " WHERE accept_tx_hash = ? AND state = 'owed'",
-        (last_ledger_seq, _now(now), accept_tx_hash),
+        "UPDATE fee_cover_refunds SET state = 'submitted', last_ledger_seq = ?, claim_ledger = ?,"
+        " updated_at = ? WHERE accept_tx_hash = ? AND state = 'owed'",
+        (last_ledger_seq, claim_ledger, _now(now), accept_tx_hash),
     )
     conn.commit()
     return cursor.rowcount == 1
@@ -735,8 +751,8 @@ def record_payout(
 def return_to_owed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> bool:
     """Only for a payout refused BEFORE anything was submitted (ClaimNotSubmitted)."""
     cursor = conn.execute(
-        "UPDATE fee_cover_refunds SET state = 'owed', last_ledger_seq = NULL, updated_at = ?"
-        " WHERE accept_tx_hash = ? AND state = 'submitted'",
+        "UPDATE fee_cover_refunds SET state = 'owed', last_ledger_seq = NULL, claim_ledger = NULL,"
+        " updated_at = ? WHERE accept_tx_hash = ? AND state = 'submitted'",
         (_now(now), accept_tx_hash),
     )
     conn.commit()
@@ -762,7 +778,7 @@ def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
             return "budget_exhausted"
         conn.execute(
             "UPDATE fee_cover_refunds SET state = 'owed', reason = NULL, payout_tx_hash = NULL,"
-            " last_ledger_seq = NULL, updated_at = ? WHERE accept_tx_hash = ?",
+            " last_ledger_seq = NULL, claim_ledger = NULL, updated_at = ? WHERE accept_tx_hash = ?",
             (ts, accept_tx_hash),
         )
     return "requeued"

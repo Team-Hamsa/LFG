@@ -260,11 +260,14 @@ promise.
 - **Order: record `owed` → claim → submit → record outcome.** The claim path
   is the template (`app.py::_claim_one_wallet`):
   - **The claim is one conditional write.** `UPDATE … SET
-    state='submitted', last_ledger_seq=<provisional> WHERE accept_tx_hash=?
-    AND state='owed'`. Only the caller whose update changes a row submits, so
-    the poll path and the sweep can race without paying twice.
-  - The provisional deadline (`current + FEE_COVER_LEDGER_MARGIN × 10`) is
-    recorded in that same write, so no `submitted` row ever lacks a deadline.
+    state='submitted', last_ledger_seq=<provisional>, claim_ledger=<current>
+    WHERE accept_tx_hash=? AND state='owed'`. Only the caller whose update
+    changes a row submits, so the poll path and the sweep can race without
+    paying twice.
+  - The provisional deadline (`current + FEE_COVER_LEDGER_MARGIN × 10`) and
+    the claim ledger (`current`, the validated index read just before the
+    claim) are recorded in that same write, so no `submitted` row ever lacks
+    either.
   - Submission goes through `xrpl_ops.send_fee_cover_refund(dest, drops,
     refund_key, max_last_ledger_seq)`, modelled on `send_brix_claim` and
     returning its `ClaimPayment` tri-state.
@@ -288,7 +291,11 @@ promise.
   (like `_start_brix_claim_recovery`) and by
   `scripts/recover_fee_cover_refunds.py`.
   - It pages `config.SIGNING_ACCOUNT`'s `account_tx` from
-    `last_ledger_seq - 5000`.
+    `claim_ledger - 5000`. The floor comes from the **claim ledger**, never
+    from the deadline minus a margin: no refund can validate before its own
+    claim, whereas the deadline was set with the margin in force at claim
+    time. A floor re-derived from today's `FEE_COVER_LEDGER_MARGIN` would
+    start after a refund that landed once the margin had been lowered.
   - It matches the refund memo tag `lfg:fee_cover:<accept_tx_hash>` and
     requires a genuine payout: validated, `tesSUCCESS`, `Payment`,
     `Account == SIGNING_ACCOUNT`, `Destination == bidder`, XRP
@@ -311,7 +318,7 @@ promise.
   `_submit_and_confirm`.
   - Before requeueing, `--requeue` re-checks the chain with
     `find_fee_cover_payment(accept, destination=bidder, drops=refund_drops,
-    min_ledger=last_ledger_seq)`. A hash found → it prints `<hash> found
+    min_ledger=claim_ledger)`. A hash found → it prints `<hash> found
     on-ledger; not requeued` and exits 1; a lookup error → it prints the error
     and exits 1. Only a clean "absent" requeues.
 
@@ -434,6 +441,7 @@ CREATE TABLE IF NOT EXISTS fee_cover_refunds (
   state TEXT NOT NULL CHECK (state IN ('owed','submitted','confirmed','failed','declined')),
   reason TEXT,
   payout_tx_hash TEXT, last_ledger_seq INTEGER,
+  claim_ledger INTEGER,                 -- validated index at claim: the recovery scan floor
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 

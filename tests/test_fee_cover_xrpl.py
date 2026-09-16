@@ -245,21 +245,17 @@ def test_get_xrp_balance_drops(monkeypatch):
     assert _run(xrpl_ops.get_xrp_balance_drops("rIssuer")) is None
 
 
-def test_find_fee_cover_payment_scans_from_before_the_provisional_deadline(account_tx, monkeypatch):
-    """`min_ledger` is the row's DEADLINE, and before the payout is recorded
-    that deadline is the provisional `current + FEE_COVER_LEDGER_MARGIN * 10`.
-    The scan floor has to clear that whole span: a margin raised past ~500
-    would otherwise start the scan after the refund actually validated and
-    report a payout that landed as absent — which past the deadline reads as
-    "failed", and a requeue would pay it twice."""
+def test_find_fee_cover_payment_floor_ignores_the_configured_margin(account_tx, monkeypatch):
+    """`min_ledger` is the refund's CLAIM ledger, which no refund can predate,
+    so the scan floor is that minus the fixed slack whatever
+    FEE_COVER_LEDGER_MARGIN says now. A floor derived from the deadline and
+    the CURRENT margin would move past a refund that landed after the margin
+    was lowered, and a requeue would pay it twice."""
     account_tx["entries"] = [_entry()]
-    monkeypatch.setattr(xrpl_ops.config, "FEE_COVER_LEDGER_MARGIN", 40)
-    _find()
-    assert account_tx["ledger_index_min"] == 6000 - (5000 + 400)
-    monkeypatch.setattr(xrpl_ops.config, "FEE_COVER_LEDGER_MARGIN", 2_000)
-    _find(min_ledger=100_000)
-    # The window grows with the margin, so the payout stays inside it.
-    assert account_tx["ledger_index_min"] == 100_000 - (5000 + 20_000)
+    for margin in (40, 2_000, 0):
+        monkeypatch.setattr(xrpl_ops.config, "FEE_COVER_LEDGER_MARGIN", margin)
+        assert _find(min_ledger=100_000) == "PAYOUTHASH"
+        assert account_tx["ledger_index_min"] == 100_000 - 5000
 
 
 def test_find_claim_payment_keeps_the_plain_slack(monkeypatch):

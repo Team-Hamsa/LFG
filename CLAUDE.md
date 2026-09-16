@@ -1245,9 +1245,11 @@ automatically: `payout_failed` (a validated definitive failure) and
 `payout_expired` verdict rests on an absence, so a `confirmed` result that
 arrives afterwards overwrites it — the money moved, and dropping that hash
 would leave the row requeueable and the refund payable twice. For the same
-reason the recovery scan floor widens with `FEE_COVER_LEDGER_MARGIN`: the
-deadline it scans back from is the PROVISIONAL `current + margin * 10`, so a
-margin past ~500 would otherwise start the scan after the refund landed. An
+reason recovery and `--requeue` scan `account_tx` from the row's persisted
+`claim_ledger` (the validated ledger read just before the claim; no refund can
+predate it), never from the deadline minus a margin. The deadline was set with
+the margin in force at claim time, so a floor re-derived from today's
+`FEE_COVER_LEDGER_MARGIN` could start after a refund that landed. An
 operator fixes the cause, then requeues either with
 `scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`
 (it re-checks the chain first and refuses, exit 1, if the payout is found or

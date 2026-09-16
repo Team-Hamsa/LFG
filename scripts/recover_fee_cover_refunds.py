@@ -43,7 +43,9 @@ def _requeue(network: str, accept_tx_hash: str) -> int:
                         accept_tx_hash,
                         destination=str(row["bidder"]),
                         drops=int(row["refund_drops"]),
-                        min_ledger=row["last_ledger_seq"],
+                        # From the claim ledger, never deadline-minus-margin:
+                        # see fee_cover_settle.recover_refunds.
+                        min_ledger=row["claim_ledger"],
                     )
                 )
             except Exception as exc:

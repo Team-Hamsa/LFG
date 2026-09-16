@@ -2629,22 +2629,23 @@ async def _find_memo_tagged_tx(
     is_genuine: Callable[[dict[str, Any]], bool],
     min_ledger: int | None,
     label: str,
-    slack: int = _CLAIM_SCAN_LEDGER_SLACK,
 ) -> str | None:
     """Hash of the first `sender` account_tx entry carrying memo `tag` that
     `is_genuine` accepts, or None if absent. Shared by BRIX claim and fee-cover
     recovery: the memo makes a payout findable, `is_genuine` makes it
     trustworthy (memos are user-writable). Absence is NOT proof of failure.
 
-    `min_ledger` is a DEADLINE (a LastLedgerSequence), not the ledger the
-    payout validated in, so `slack` must cover the whole span between them or
-    the scan starts past the payout and reports it absent — which past the
-    deadline reads as "failed" and pays twice on a requeue. Callers whose
-    deadline can sit further than `_CLAIM_SCAN_LEDGER_SLACK` ledgers ahead of
-    submission must widen it."""
+    The scan starts `_CLAIM_SCAN_LEDGER_SLACK` ledgers below `min_ledger`, so
+    `min_ledger` must never sit more than that above the ledger the payout
+    could have validated in. Otherwise the scan starts past the payout and
+    reports it absent, which past the deadline reads as "failed" and pays
+    twice on a requeue. A BRIX claim passes its LastLedgerSequence
+    (`current + margin`, well inside the slack). A fee-cover refund passes
+    the ledger it was claimed at, which no refund can predate. None scans
+    all history."""
     client = rpc_client()
     # Bounded: a payout cannot predate the ledger window it was built for.
-    scan_from = -1 if min_ledger is None else max(1, min_ledger - slack)
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
     marker: Any = None
     while True:
         request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
@@ -2803,11 +2804,12 @@ async def find_fee_cover_payment(
 ) -> str | None:
     """Hash of the genuine on-ledger refund for `accept_tx_hash`, or None.
 
-    `min_ledger` is the row's recorded deadline, which before the payout is
-    recorded is the PROVISIONAL one the claim wrote: `current_ledger +
-    FEE_COVER_LEDGER_MARGIN * 10`. The scan floor has to clear that whole span
-    as well as the ordinary slack, or a margin raised past ~500 would start the
-    scan after the refund and report a payout that landed as absent."""
+    `min_ledger` is the refund row's `claim_ledger` — the validated ledger
+    index read just before the payout was claimed — NEVER its deadline. The
+    deadline is `claim_ledger + FEE_COVER_LEDGER_MARGIN * 10`, and deriving a
+    floor from it would need the margin in force at claim time, which a later
+    config change silently replaces. A refund can't validate before its own
+    claim, so the claim ledger is an exact floor under any margin."""
     sender = config.SIGNING_ACCOUNT
     return await _find_memo_tagged_tx(
         sender,
@@ -2815,7 +2817,6 @@ async def find_fee_cover_payment(
         lambda entry: _is_genuine_xrp_refund(entry, destination, drops, sender),
         min_ledger,
         f"find_fee_cover_payment({accept_tx_hash})",
-        slack=_CLAIM_SCAN_LEDGER_SLACK + max(0, config.FEE_COVER_LEDGER_MARGIN) * 10,
     )
 
 

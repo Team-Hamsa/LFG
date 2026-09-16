@@ -358,8 +358,8 @@ def test_payout_claim_happens_exactly_once(conn):
     c = _live(conn)
     store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
-    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101) is True
-    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1102) is False
+    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101) is True
+    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1102) is False
     row = store.get_refund(conn, "ACCEPT1")
     assert row["state"] == "submitted" and row["last_ledger_seq"] == 5_000
 
@@ -368,11 +368,11 @@ def test_record_payout_and_return_to_owed(conn):
     c = _live(conn)
     store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
-    store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101)
     assert store.return_to_owed(conn, "ACCEPT1", now=1102) is True
     row = store.get_refund(conn, "ACCEPT1")
     assert row["state"] == "owed" and row["last_ledger_seq"] is None
-    store.claim_for_payout(conn, "ACCEPT1", 6_000, now=1103)
+    store.claim_for_payout(conn, "ACCEPT1", 6_000, claim_ledger=4_000, now=1103)
     store.record_payout(
         conn, "ACCEPT1", state="confirmed", tx_hash="PAYOUT1", last_ledger_seq=5_990, now=1104
     )
@@ -393,7 +393,7 @@ def test_requeue_failed_requires_budget_headroom(conn):
     c = _live(conn, budget=100_000, cap=1_000_000)
     store.record_promise(conn, c, _inp("BID1"), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed("ACCEPT1"), now=1100)
-    store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101)
     store.record_payout(
         conn, "ACCEPT1", state="failed", tx_hash=None, last_ledger_seq=5_000, now=1102
     )
@@ -423,7 +423,7 @@ def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
             now=1001,
         )
         store.fill_promise(conn, bid, _owed(accept), now=1100)
-        store.claim_for_payout(conn, accept, 5_000, now=1101)
+        store.claim_for_payout(conn, accept, 5_000, claim_ledger=4_000, now=1101)
         store.record_payout(
             conn,
             accept,
@@ -438,7 +438,7 @@ def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
     # a non-failed outcome never takes the reason
     store.record_promise(conn, c, _inp("BID3", bidder="rBID3"), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID3", _owed("ACCEPT3"), now=1100)
-    store.claim_for_payout(conn, "ACCEPT3", 5_000, now=1101)
+    store.claim_for_payout(conn, "ACCEPT3", 5_000, claim_ledger=4_000, now=1101)
     store.record_payout(
         conn,
         "ACCEPT3",
@@ -463,7 +463,7 @@ def test_view_folds_refund_over_promise(conn):
         "payout_tx_hash": None,
     }
     store.fill_promise(conn, "BID1", _owed(), now=1100)
-    store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101)
     store.record_payout(
         conn, "ACCEPT1", state="confirmed", tx_hash="PAYOUT1", last_ledger_seq=4_990, now=1102
     )
@@ -506,7 +506,7 @@ def test_a_confirmed_payout_overrides_a_row_recovery_already_parked_failed(conn)
     c = _live(conn)
     store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
-    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101) is True
+    assert store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101) is True
     assert (
         store.record_payout(
             conn,
@@ -540,7 +540,7 @@ def test_a_failed_payout_never_overrides_a_confirmed_one(conn):
     c = _live(conn)
     store.record_promise(conn, c, _inp(), decline_reason=None, now=1001)
     store.fill_promise(conn, "BID1", _owed(), now=1100)
-    store.claim_for_payout(conn, "ACCEPT1", 5_000, now=1101)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101)
     store.record_payout(
         conn, "ACCEPT1", state="confirmed", tx_hash="PAYOUT1", last_ledger_seq=None, now=1102
     )

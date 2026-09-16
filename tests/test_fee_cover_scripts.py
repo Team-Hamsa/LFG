@@ -96,7 +96,7 @@ def _chain_lookup(monkeypatch, *, found=None, error=None):
 
 def _failed_refund(app_db):
     conn = _refund(app_db, state="failed")
-    conn.execute("UPDATE fee_cover_refunds SET last_ledger_seq = 7040")
+    conn.execute("UPDATE fee_cover_refunds SET last_ledger_seq = 7400, claim_ledger = 7000")
     conn.commit()
     conn.close()
 
@@ -113,7 +113,8 @@ def test_recover_cli_requeues_a_parked_failure(app_db, monkeypatch):
     _failed_refund(app_db)
     calls = _chain_lookup(monkeypatch, found=None)
     assert recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 0
-    assert calls == [("ACC1", "rB", 80_642, 7040)]
+    # scanned from the claim ledger, never the deadline
+    assert calls == [("ACC1", "rB", 80_642, 7000)]
     assert _state(app_db) == "owed"
     assert (
         recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 1

@@ -194,10 +194,12 @@ def _open_promises(deps: FeeCoverDeps) -> list[dict[str, Any]]:
         conn.close()
 
 
-def _claim(deps: FeeCoverDeps, key: str, last_ledger_seq: int) -> bool:
+def _claim(deps: FeeCoverDeps, key: str, last_ledger_seq: int, claim_ledger: int) -> bool:
     conn = fee_cover_store.connect(deps.app_db_path)
     try:
-        return fee_cover_store.claim_for_payout(conn, key, last_ledger_seq, now=deps.now())
+        return fee_cover_store.claim_for_payout(
+            conn, key, last_ledger_seq, claim_ledger=claim_ledger, now=deps.now()
+        )
     finally:
         conn.close()
 
@@ -354,7 +356,7 @@ async def pay_refund(deps: FeeCoverDeps, accept_tx_hash: str) -> str:
     if current is None:
         return "deferred"
     provisional = current + deps.ledger_margin * 10
-    if not await asyncio.to_thread(_claim, deps, accept_tx_hash, provisional):
+    if not await asyncio.to_thread(_claim, deps, accept_tx_hash, provisional, current):
         latest = await asyncio.to_thread(_refund_row, deps, accept_tx_hash)
         return str(latest["state"]) if latest else "missing"
     try:
@@ -399,11 +401,15 @@ async def recover_refunds(deps: FeeCoverDeps) -> dict[str, str]:
         key = str(row["accept_tx_hash"])
         last_ledger_seq = row["last_ledger_seq"]
         try:
+            # Scan from the claim ledger: the refund was built after it, so it
+            # can't have validated earlier. Never derive a floor from the
+            # deadline and the CURRENT margin — the margin may have changed
+            # since the claim. A row with no claim ledger scans everything.
             found = await deps.find_refund_payment(
                 key,
                 destination=str(row["bidder"]),
                 drops=int(row["refund_drops"]),
-                min_ledger=last_ledger_seq,
+                min_ledger=row["claim_ledger"],
             )
         except Exception:
             logging.warning(

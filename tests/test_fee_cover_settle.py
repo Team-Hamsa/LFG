@@ -44,6 +44,7 @@ class Ledger:
         self.found: dict[str, str] = {}
         self.find_error: Exception | None = None
         self.validated_index: int | None = 7_000
+        self.find_min_ledgers: list[int | None] = []
 
     async def get_tx(self, tx_hash):
         self.get_tx_calls.append(tx_hash)
@@ -69,6 +70,7 @@ class Ledger:
         return self.payment
 
     async def find_refund_payment(self, accept_tx_hash, *, destination, drops, min_ledger):
+        self.find_min_ledgers.append(min_ledger)
         if self.find_error:
             raise self.find_error
         return self.found.get(accept_tx_hash)
@@ -373,7 +375,32 @@ def test_pay_refund_unexpected_error_leaves_it_submitted_for_recovery(env):
     _owed(deps, campaign)
     ledger.send_error = RuntimeError("boom")
     assert _run(settle.pay_refund(deps, ACCEPT)) == "submitted"
-    assert _refund(deps)["last_ledger_seq"] == 7_400  # the provisional deadline
+    row = _refund(deps)
+    assert row["last_ledger_seq"] == 7_400  # the provisional deadline
+    assert row["claim_ledger"] == 7_000  # the validated ledger read before the claim
+
+
+def test_recovery_scans_from_the_claim_ledger_not_deadline_minus_margin(env):
+    """The deadline was set with the margin in force at CLAIM time. Recovery
+    must not re-derive a floor from it with whatever margin is configured now:
+    lower the margin and that floor would move past a refund that landed, the
+    row would park `payout_expired`, and a requeue would pay it twice."""
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+    ledger.send_error = RuntimeError("boom")  # left submitted for recovery
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "submitted"
+    deps.ledger_margin = 1  # the operator lowers the margin after the claim
+    ledger.found = {ACCEPT: "PAYOUT"}
+    assert _run(settle.recover_refunds(deps)) == {ACCEPT: "confirmed"}
+    assert ledger.find_min_ledgers == [7_000]
+
+
+def test_returning_to_owed_clears_the_claim_ledger(env):
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+    ledger.send_error = xrpl_ops.ClaimNotSubmitted("no ledger")
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "deferred"
+    assert _refund(deps)["claim_ledger"] is None
 
 
 def test_pay_refund_without_a_ledger_index_does_not_claim(env):
