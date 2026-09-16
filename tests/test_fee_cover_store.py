@@ -169,9 +169,9 @@ SELLER = "rSeller1111111111111111111111111"
 CAFE = "rpx9JThQ2y37FaGeeJP7PXDUVEXY3PHZSC"
 
 
-def _live(conn, *, budget=1_000_000, cap=500_000, now=1000):
+def _live(conn, *, budget=1_000_000, cap=500_000, now=1000, min_bid=0):
     knobs = store.Knobs(
-        coverage_bps=10_000, budget_drops=budget, wallet_cap_drops=cap, min_bid_drops=0
+        coverage_bps=10_000, budget_drops=budget, wallet_cap_drops=cap, min_bid_drops=min_bid
     )
     campaign, _ = store.start_campaign(
         conn, network=NET, actor="discord:1", knobs=knobs, duration_seconds=None, now=now
@@ -558,3 +558,33 @@ def test_a_failed_payout_never_overrides_a_confirmed_one(conn):
     )
     row = store.get_refund(conn, "ACCEPT1")
     assert row["state"] == "confirmed" and row["payout_tx_hash"] == "PAYOUT1"
+
+
+def test_record_promise_applies_a_lowered_minimum_bid_under_the_lock(conn):
+    """The mirror image: the caller's stale read declined the bid below the old
+    floor, but the admin lowered it before the write. The promise is written
+    into the campaign as it now stands, so the bid qualifies and is promised."""
+    stale = _live(conn, min_bid=9_000_000)
+    store.update_campaign(
+        conn,
+        network=NET,
+        actor="discord:2",
+        knobs=store.Knobs(
+            coverage_bps=10_000,
+            budget_drops=50_000_000,
+            wallet_cap_drops=5_000_000,
+            min_bid_drops=1_000_000,
+        ),
+        now=1001,
+    )
+    row = store.record_promise(conn, stale, _inp(), decline_reason="below_min_bid", now=1002)
+    assert row is not None and row["state"] == "open" and row["reason"] is None
+    assert store.committed_drops(conn, stale.id) == PROMISE
+
+
+def test_record_promise_keeps_campaign_independent_pure_declines(conn):
+    """Only `below_min_bid` is re-decided under the lock; a verdict that doesn't
+    depend on the campaign (e.g. below the listing's clearing price) stands."""
+    c = _live(conn)
+    row = store.record_promise(conn, c, _inp(), decline_reason="below_clearing", now=1001)
+    assert row is not None and row["state"] == "declined" and row["reason"] == "below_clearing"

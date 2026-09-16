@@ -541,7 +541,14 @@ def record_promise(
         if fresh is None or not fresh.is_live(ts):
             return None
         promised_drops = promise_drops(inp.bid_drops, inp.broker_rate, fresh.coverage_bps)
-        reason = decline_reason
+        # `below_min_bid` is the one pure verdict that depends on the CAMPAIGN,
+        # so the caller's is discarded and re-decided from `fresh` in BOTH
+        # directions: a raised minimum declines a bid the stale read admitted,
+        # and a lowered one admits a bid it declined. The other pure reasons
+        # (system wallet, below clearing) don't depend on the campaign and
+        # stand. They are also checked first, so a caller's `below_min_bid`
+        # already means neither of them applied.
+        reason = None if decline_reason == "below_min_bid" else decline_reason
         if reason is None and inp.bid_drops < fresh.min_bid_drops:
             reason = "below_min_bid"
         if reason is None:
