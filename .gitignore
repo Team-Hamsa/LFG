@@ -56,6 +56,9 @@ history_mainnet.db*
 
 # Network-aware app DB + rarity cache (regenerable; never commit)
 lfg_nfts_*.db
+# SQLite WAL/shared-memory sidecars (the app DB runs in WAL mode)
+lfg_nfts.db-*
+lfg_nfts_*.db-*
 rarity.db
 
 # X (Twitter) bot posting state — pause/resume + dedup/budget (runtime, #41)
