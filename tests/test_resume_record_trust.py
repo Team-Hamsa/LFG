@@ -11,6 +11,7 @@
 import json
 import os
 
+import conftest
 from lfg_core import bulk_mint_flow, burn2mint_flow, config
 
 VALID = "rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH"
@@ -20,7 +21,8 @@ def test_suite_pins_record_dirs_away_from_the_checkout():
     for mod, default in ((bulk_mint_flow, "bulk_mint_jobs"), (burn2mint_flow, "burn2mint_jobs")):
         assert mod.JOBS_DIR != default
         assert os.path.isabs(mod.JOBS_DIR)
-        assert "lfg-test-jobs-" in mod.JOBS_DIR
+        # Hard-set into the session's throwaway store root (removed at exit).
+        assert os.path.dirname(mod.JOBS_DIR) == conftest._STORE_ROOT
 
 
 def test_record_refusal_reasons(monkeypatch):

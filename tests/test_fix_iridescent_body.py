@@ -75,6 +75,13 @@ def _seed_app(path):
     conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _reports_in_tmp(tmp_path, monkeypatch):
+    # fx.run() writes its JSON report to the CWD-relative reports/ dir — keep
+    # it out of the checkout (the root conftest's checkout-store guard).
+    monkeypatch.setattr(fx, "REPORTS_DIR", str(tmp_path / "reports"))
+
+
 @pytest.fixture()
 def dbs(tmp_path):
     index_db = str(tmp_path / "onchain_test.db")

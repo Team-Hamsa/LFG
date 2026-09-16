@@ -1433,6 +1433,22 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
   `_require(...)`-mandatory vars (`SEED`, `XUMM_*`, `TOKEN_*`, `BUNNY_CDN_*`)
   and the layer knobs centrally. The ~116 existing per-file preambles are
   harmless no-ops kept for now (cleanup = follow-up).
+- **No test may touch a store in the checkout.** Every store defaults to a
+  CWD- or repo-root-relative path, so `conftest.py` pins them all into one
+  per-session temp root (removed at exit): `DB_PATH`, `ONCHAIN_DB_PATH`,
+  `HISTORY_DB_PATH`, `IMAGES_DIR`, `X_STATE_DB_PATH`, `ECONOMY_RECORDS_DIR`,
+  `SWAP_RECORDS_DIR`, `LAYER_CACHE_DIR`, `LAYER_DIM_CACHE` (setdefault), plus
+  the hard-set `BULK_MINT_JOBS_DIR`/`BURN2MINT_JOBS_DIR` (2026-09-08
+  incident). One file per store, so both networks share it — a test that
+  needs them apart patches the path function (`nft_index.index_db_path`
+  etc.). An audit hook in the same file fails any test that
+  opens/connects/mkdirs a `*.db*`, job/record dir, `images_*`, `reports/`,
+  `.layer_cache` or `.layer_dimensions_cache.json` inside the repo root or
+  starting CWD, and the session fails if one appears or vanishes there.
+  Adding a new store with a relative default: pin it in `conftest.py` and, if
+  its name isn't `*.db`, add it to `_STORE_NAMES`. Script constants like
+  `REPORTS_DIR` aren't env-driven — monkeypatch them per test. A test that
+  `delenv`s a pin must not do I/O through the default path.
 
 ## Important Notes
 

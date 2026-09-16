@@ -21,14 +21,17 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 from lfg_core import config, db_helpers, user_db
 
 
-def test_default_db_path_is_network_suffixed():
-    # The suite runs with XRPL_NETWORK=testnet; the default app DB must not
-    # be the legacy mainnet file.
-    assert config.app_db_path("mainnet") == "lfg_nfts.db"
-    assert config.app_db_path("testnet") == "lfg_nfts_testnet.db"
+def test_default_db_path_is_network_suffixed(monkeypatch):
     # config.DB_PATH freezes at first import (whole-suite order varies which
     # network that is) — assert consistency, not a specific network.
     assert config.DB_PATH == config.app_db_path(config.XRPL_NETWORK)
+    # The root conftest.py pins DB_PATH into a per-session temp dir so no test
+    # writes the checkout's app DB; clear it to see the per-network defaults.
+    # The suite runs with XRPL_NETWORK=testnet; the default app DB must not
+    # be the legacy mainnet file.
+    monkeypatch.delenv("DB_PATH", raising=False)
+    assert config.app_db_path("mainnet") == "lfg_nfts.db"
+    assert config.app_db_path("testnet") == "lfg_nfts_testnet.db"
 
 
 def test_db_path_env_override(monkeypatch):
