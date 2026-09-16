@@ -1182,7 +1182,7 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   padding: 2px 6px; border-radius: 999px; pointer-events: none;
 }
 .listing-offers { margin: 6px 0 2px; text-align: left; }
-.listing-offers-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 160px; overflow-y: auto; }
+.listing-offers-list { list-style: none; margin: 4px 0 0; padding: 0; } /* no inner scroll box — the modal body is the one scroll region */
 .listing-offers-list li + li { margin-top: 4px; }
 .listing-offer-row {
   display: flex; justify-content: space-between; align-items: center; gap: 8px;
