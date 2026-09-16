@@ -55,7 +55,6 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from xrpl.asyncio.clients import AsyncJsonRpcClient  # noqa: E402
 from xrpl.asyncio.transaction import submit_and_wait  # noqa: E402
 from xrpl.models.amounts import IssuedCurrencyAmount  # noqa: E402
 from xrpl.models.currencies import XRP, IssuedCurrency  # noqa: E402
@@ -82,7 +81,7 @@ async def main() -> int:
         return 1
 
     wallet = Wallet.from_seed(config.SEED)
-    client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+    client = xrpl_ops.async_rpc_client()
     issuer = config.SWAP_OFFER_ISSUER
     currency = config.SWAP_OFFER_CURRENCY_HEX
     print(f"Network: testnet | Account/issuer: {wallet.classic_address}")

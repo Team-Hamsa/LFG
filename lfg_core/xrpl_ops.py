@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import traceback
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,7 +59,28 @@ from xrpl.transaction import autofill_and_sign, simulate, submit_and_wait
 from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
-from lfg_core import config, memos, owner_lock, payment_ledger
+from lfg_core import config, memos, owner_lock, payment_ledger, xrpl_rpc
+
+
+def rpc_client(urls: Sequence[str] | None = None) -> JsonRpcClient:
+    """THE sync JSON-RPC client factory — no backend site constructs a client
+    class directly. Fails over across `urls` (default: `config.JSON_RPC_URLS`,
+    primary first, narrowed by any `xrpl_rpc.restrict_to` restriction) on
+    busy/unsynced/unreachable endpoints — never on a transaction result or any
+    other real answer. Pass an explicit `urls` (never filtered), e.g. a
+    one-element list for per-endpoint chain verification. Rules and the
+    duplicate-submit safety argument: lfg_core/xrpl_rpc.py."""
+    return xrpl_rpc.FailoverJsonRpcClient(_resolve_urls(urls))
+
+
+def async_rpc_client(urls: Sequence[str] | None = None) -> AsyncJsonRpcClient:
+    """Async twin of `rpc_client` (same URL list, same failover rules)."""
+    return xrpl_rpc.AsyncFailoverJsonRpcClient(_resolve_urls(urls))
+
+
+def _resolve_urls(urls: Sequence[str] | None) -> Sequence[str]:
+    return xrpl_rpc.default_urls(config.JSON_RPC_URLS) if urls is None else urls
+
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)
 NFT_FLAG_BURNABLE = 0x0001
@@ -81,7 +102,16 @@ class IndeterminateResultError(RuntimeError):
     economy this raise is what makes closet_token.sync_closet surface
     ClosetIndeterminateError so the phase-aware _sync_then_persist taxonomy (#107)
     engages instead of collapsing an unknown outcome to a plain ClosetError
-    ('did NOT commit') and running an asset-destroying compensation (#179)."""
+    ('did NOT commit') and running an asset-destroying compensation (#179).
+
+    `tx_hash` is the signed transaction's hash when it is known (always, for a
+    raise out of `_submit_and_confirm`, which signs exactly once), so callers can
+    journal the pending hash and a reconciler can look the outcome up later
+    (#493). None when no single hash identifies the outcome."""
+
+    def __init__(self, *args: object, tx_hash: str | None = None) -> None:
+        super().__init__(*args)
+        self.tx_hash = tx_hash
 
 
 @dataclass(frozen=True)
@@ -447,7 +477,8 @@ async def _submit_and_confirm(
             )
             if confirmed is None:
                 raise IndeterminateResultError(
-                    f"{label}: on-ledger outcome unknown after submit raised ({e})"
+                    f"{label}: on-ledger outcome unknown after submit raised ({e})",
+                    tx_hash=signed.get_hash(),
                 ) from e
             validated = _validated_result(confirmed, label)
         else:
@@ -511,7 +542,7 @@ async def mint_nft(
     """
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
 
         eff_flags = config.NFT_FLAGS if flags is None else flags
         kwargs: dict[str, Any] = {
@@ -557,7 +588,8 @@ async def mint_nft(
         # definitive-failure None — the NFT is on-ledger and must not be treated
         # as "mint failed".
         raise IndeterminateResultError(
-            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta"
+            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta",
+            tx_hash=result.get("hash"),
         )
 
     except IndeterminateResultError:
@@ -613,7 +645,7 @@ async def prepare_sponsored_mint(
         return MintPreparation("failed", None, None, "claim correlation is required")
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         async with _submission_scope(config.SIGNING_ACCOUNT, coordinator_held):
             signed_ledger_floor = await _current_validated_ledger_index(client)
             if signed_ledger_floor is None:
@@ -705,7 +737,7 @@ async def submit_sponsored_mint(
         return MintSubmission(
             "indeterminate", signed_tx_hash, None, "signed mint hash/blob mismatch"
         )
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     last_ledger_sequence = getattr(signed, "last_ledger_sequence", None)
     if (
         prove_expiry
@@ -761,7 +793,7 @@ async def submit_sponsored_mint(
 async def reconcile_sponsored_mint(tx_hash: str) -> MintReconciliation:
     """Classify only the exact journaled hash; this path never submits."""
 
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     try:
         response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
         result = response.result
@@ -797,7 +829,7 @@ async def account_exists(address: str) -> bool | None:
     silently drops real work.
     """
     try:
-        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        client = async_rpc_client()
         response = await client.request(AccountInfo(account=address, ledger_index="validated"))
     except Exception as e:
         logging.warning(f"account_exists({address}) lookup failed: {e}")
@@ -825,7 +857,7 @@ async def disallows_incoming_nft_offers(address: str) -> bool | None:
     user blocked us" and silently drops an NFT they are owed.
     """
     try:
-        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        client = async_rpc_client()
         response = await client.request(AccountInfo(account=address, ledger_index="validated"))
     except Exception as e:
         logging.warning(f"disallows_incoming_nft_offers({address}) lookup failed: {e}")
@@ -928,7 +960,7 @@ async def destination_preflight(address: str) -> DestinationPreflight:
     regress — so this is a third helper, not a refactor of them.
     """
     try:
-        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        client = async_rpc_client()
         response = await client.request(AccountInfo(account=address, ledger_index="validated"))
     except Exception as e:
         logging.warning(f"destination_preflight({address}) lookup failed: {e}")
@@ -980,7 +1012,7 @@ async def create_nft_offer(
     None. action lets callers (e.g. the trait shop) stamp non-default memo
     provenance."""
     try:
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         wallet = Wallet.from_seed(config.SEED)
 
         offer = NFTokenCreateOffer(
@@ -1001,7 +1033,8 @@ async def create_nft_offer(
         offer_id = meta.get("offer_id") if isinstance(meta, dict) else None
         if not isinstance(offer_id, str) or not offer_id:
             raise IndeterminateResultError(
-                "NFTokenCreateOffer validated but its offer ID was absent"
+                "NFTokenCreateOffer validated but its offer ID was absent",
+                tx_hash=result.get("hash"),
             )
         logging.info(f"Offer created: {offer_id}")
         return offer_id
@@ -1028,7 +1061,7 @@ async def cancel_nft_offer(offer_index: str, platform: str = memos.PLATFORM_BACK
     here as safe to ignore and proceed."""
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         cancel = NFTokenCancelOffer(
             account=config.SIGNING_ACCOUNT,
             nftoken_offers=[offer_index],
@@ -1196,7 +1229,7 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
     the exception re-raised instead.
     """
     try:
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         response = await asyncio.to_thread(client.request, NFTSellOffers(nft_id=nft_id))
         result = response.result
         # A non-tesSUCCESS RESULT (status:error) never raised above, so strict
@@ -1271,7 +1304,7 @@ async def get_account_nft_offers(address: str) -> list[dict[str, Any]]:
     `nft_id`. Always raises on RPC/soft errors (callers are fail-closed
     verifiers or 503 the read; an empty list must mean "genuinely none")."""
     out: list[dict[str, Any]] = []
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     marker: Any = None
     while True:
         req = AccountObjects(
@@ -1336,7 +1369,7 @@ async def get_nft_buy_offers(nft_id: str, raise_on_error: bool = False) -> list[
     identical normalization, objectNotFound whitelisting, and strict-mode
     raise semantics (see that function's docstring)."""
     try:
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         response = await asyncio.to_thread(client.request, NFTBuyOffers(nft_id=nft_id))
         result = response.result
         if isinstance(result, dict) and result.get("error"):
@@ -1390,7 +1423,7 @@ async def get_tx(tx_hash: str) -> dict[str, Any]:
     Like the confirm-by-hash path, this is a pure read — a malformed 200 body
     with no `result` key (#385) is retried a bounded number of times before
     the error propagates."""
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     return await _tx_lookup_with_retry(client, tx_hash, "get_tx")
 
 
@@ -1405,7 +1438,7 @@ async def get_ledger_time() -> int:
     unlike get_nft_sell_offers, this does NOT swallow) so a fail-closed caller
     (`market_ops.verify_sell_offer`) can tell "the lookup itself broke" apart
     from a real answer and refuse to hand the buyer a doomed payload."""
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     response = await asyncio.to_thread(client.request, Ledger(ledger_index="validated"))
     result = response.result
     ledger = result.get("ledger") if isinstance(result, dict) else None
@@ -1529,7 +1562,7 @@ async def prepare_sponsored_burn(
         )
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         async with _submission_scope(source, coordinator_held):
             signed_ledger_floor = await _current_validated_ledger_index(client)
             if signed_ledger_floor is None:
@@ -1638,7 +1671,7 @@ async def submit_sponsored_burn(
         return BurnSubmission("failed", signed_tx_hash, f"persisted burn decode failed: {exc}")
     if decoded_hash != signed_tx_hash:
         return BurnSubmission("failed", signed_tx_hash, "signed burn hash/blob mismatch")
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     try:
         async with _submission_scope(source, coordinator_held):
             try:
@@ -2012,7 +2045,7 @@ async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:
             or last_ledger_sequence <= 0
         ):
             return None
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         validated_index = await _current_validated_ledger_index(client)
         if validated_index is not None and validated_index > last_ledger_sequence:
             return last_ledger_sequence
@@ -2178,7 +2211,7 @@ async def find_sponsored_burn(
     request_ledger_max = required_ledger_max if bounded else -1
     assert isinstance(request_ledger_min, int)
     assert isinstance(request_ledger_max, int)
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     marker = None
     seen_markers: set[str] = set()
     incomplete_error: str | None = None
@@ -2294,7 +2327,7 @@ async def buy_and_burn(
             )
             return "self-issuer-noop"
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         kwargs: dict[str, Any] = {
             "account": config.SIGNING_ACCOUNT,
             "destination": issuer,
@@ -2340,7 +2373,7 @@ async def burn_nft(
     or None. `platform` records the originating surface in the memo (#54)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         kwargs: dict[str, Any] = {
             "account": config.SIGNING_ACCOUNT,
             "nftoken_id": nft_id,
@@ -2375,7 +2408,7 @@ async def modify_nft(
     or None. `platform` records the originating surface in the memo (#54)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         kwargs: dict[str, Any] = {
             "account": config.SIGNING_ACCOUNT,
             "nftoken_id": nft_id,
@@ -2755,7 +2788,7 @@ async def send_brix_claim(
 
     wallet = Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED)
     account = distributor_address()
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
 
     current = await _current_validated_ledger_index(client)
     if current is None:
@@ -2915,7 +2948,7 @@ async def find_claim_payment(
     """
     sender = distributor_address()
     tag = claim_memo_tag(claim_id)
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     # Bound the scan. A claim that was never paid is the COMMON recovery case,
     # and unbounded it would page the distributor's entire history — once per
     # open claim, growing forever as successful claims accumulate. The payout
@@ -2957,5 +2990,5 @@ async def find_claim_payment(
 
 async def current_validated_ledger_index() -> int | None:
     """Index of the latest validated ledger, or None if it can't be read."""
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     return await _current_validated_ledger_index(client)

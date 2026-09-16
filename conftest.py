@@ -88,6 +88,7 @@ os.environ.setdefault("SHOP_MAX_BRIX", "5000")
 os.environ.setdefault("SHOP_OFFER_TTL_SECONDS", "900")
 
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,22 @@ def _reset_xumm_status_cache() -> None:
     app_mod = sys.modules.get("lfg_service.app")
     if app_mod is not None:
         app_mod._signin_create_hits.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_xrpl_rpc_state() -> Iterator[None]:
+    # lfg_core.xrpl_rpc keeps process-level JSON-RPC state: per-URL failover
+    # cooldowns and the verify_endpoint_chain endpoint restriction. Scrub both
+    # around every test so one test's busy endpoint or restriction can't
+    # reorder / narrow another's clients. (xrpl_rpc imports no lfg_core config,
+    # so this lazy import freezes nothing.)
+    from lfg_core import xrpl_rpc
+
+    xrpl_rpc.reset_cooldowns()
+    xrpl_rpc.clear_restriction()
+    yield
+    xrpl_rpc.reset_cooldowns()
+    xrpl_rpc.clear_restriction()
 
 
 @pytest.fixture(autouse=True)

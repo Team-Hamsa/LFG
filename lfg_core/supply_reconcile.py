@@ -6,6 +6,9 @@
 # genesis edition"). This sweep writes the missing rows back from the on-chain
 # index's stored metadata — the same source the listener would have used.
 # Idempotent: an edition already in the effective genesis is never touched.
+# A BLANK token at an edition the supply ledger already knows is the legacy
+# harvest upgrade's remint, never growth (#493 — mirrors the listener's #429
+# guard in nft_listener._apply_possible_growth).
 
 from __future__ import annotations
 
@@ -22,12 +25,21 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
     character edition missing from the effective genesis. Tokens with
     unreadable metadata (no attributes) are skipped and reported, never
     guessed at — a wrong delta row would corrupt the conservation audit.
-    Returns {"written": [editions], "skipped_unreadable": [editions]}."""
+    A BLANK canonical token at an edition the supply_changes ledger already
+    names is skipped and reported as `skipped_known_blank` (#493): it is the
+    legacy flag-24 harvest upgrade reminting the edition its own burn row just
+    popped, and the flow — not this sweep — owns the matching mint row (with
+    the harvested traits, which the blank metadata cannot tell us). Recording
+    growth here double-counts the edition as +8 `<Slot>|None`; this is the
+    exact guard the listener applies (#429).
+    Returns {"written": [editions], "skipped_unreadable": [editions],
+    "skipped_known_blank": [editions]}."""
     genesis = trait_economy.effective_genesis(
         economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
     )
     written: list[int] = []
     skipped_unreadable: list[int] = []
+    skipped_known_blank: list[int] = []
     covered = set(genesis.edition_bodies)
     # One canonical token per uncovered edition, by the same rule as
     # dedupe_editions/nft_by_number: prefer mutable, tie-break on highest
@@ -44,7 +56,13 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
         ):
             canonical[edition] = rec
     for edition, rec in sorted(canonical.items()):
+        known_edition = economy_store.supply_change_exists_for_edition(conn, edition)
         try:
+            # Inside the guard: attrs_are_blank reads every entry, so malformed
+            # attributes must land in skipped_unreadable, not abort the sweep.
+            if known_edition and trait_economy.attrs_are_blank(rec.attributes):
+                skipped_known_blank.append(edition)
+                continue
             body_value = swap_meta.get_attr(rec.attributes, "Body")
             deltas = {
                 f"{slot}|{trait_economy.slot_value(rec, slot)}": 1
@@ -71,7 +89,11 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
                 f"growth reconcile {rec.nft_id}",
             )
         written.append(edition)
-    return {"written": sorted(written), "skipped_unreadable": sorted(set(skipped_unreadable))}
+    return {
+        "written": sorted(written),
+        "skipped_unreadable": sorted(set(skipped_unreadable)),
+        "skipped_known_blank": sorted(skipped_known_blank),
+    }
 
 
 def reconcile_shrinkage(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, Any]:

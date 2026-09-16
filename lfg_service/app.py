@@ -86,6 +86,7 @@ from lfg_core import (
     xumm_ops,
 )
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
+from lfg_core.log_hygiene import quiet_http_client_loggers
 from lfg_core.signing import context as signing_context
 from lfg_core.signing import proof as signing_proof
 from lfg_core.signing import store as sign_request_store
@@ -106,6 +107,9 @@ from surfaces.x_bot import state as x_state
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# xrpl-py's JSON-RPC client is httpx: without this every RPC call logs a request
+# line (~137k/day in prod, lfg_core/log_hygiene.py).
+quiet_http_client_loggers()
 
 CLIENT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "webapp", "client"
@@ -5713,11 +5717,9 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
 
     async def _run() -> None:
         try:
-            conn = await asyncio.to_thread(_brix_conn)
-            try:
-                outcomes = await brix_drip.recover_from_chain(conn)
-            finally:
-                conn.close()
+            # Each DB phase opens its own connection in the worker thread that
+            # uses it — a to_thread-opened connection is unusable on the loop.
+            outcomes = await brix_drip.recover_from_chain_threaded(_brix_conn)
             if outcomes:
                 logging.info(
                     "brix claim recovery resolved %s claim(s): %s", len(outcomes), outcomes

@@ -4943,7 +4943,7 @@ function renderListingHistory(items) {
     const li = document.createElement('li');
     const when = it.ts ? new Date(it.ts * 1000).toLocaleDateString() : '';
     const price = it.price_drops != null
-      ? `${marketPure.dropsToXrpStr(String(it.price_drops))} XRP`
+      ? `${marketPure.displayXrp(marketPure.dropsToXrpStr(String(it.price_drops)))} XRP`
       : (it.amount_brix != null ? `${it.amount_brix} BRIX` : '');
     const label = it.event ? it.event.replace(/_/g, ' ') : 'sold';
     li.textContent = [label, price, when].filter(Boolean).join(' · ');
@@ -5954,7 +5954,7 @@ let externalFillTimer = null;
 async function buyExternalNow(row, vm) {
   const ok = await confirmDialog({
     title: `Buy now via ${vm.marketplace || 'the marketplace'}?`,
-    text: `${vm.clearingXrp} XRP — ${marketPure.externalFeeNote(vm)} Your offer expires on its own if it isn't taken (nothing is held).`,
+    text: `${marketPure.displayXrp(vm.clearingXrp)} XRP — ${marketPure.externalFeeNote(vm)} Your offer expires on its own if it isn't taken (nothing is held).`,
     confirmLabel: 'Place offer',
   });
   if (!ok) return;
@@ -6049,7 +6049,7 @@ async function openBuyFlow(row) {
       showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
       return;
     }
-    text = `${vm.amountXrp} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
+    text = `${marketPure.displayXrp(vm.amountXrp)} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
   }
   const ok = await confirmDialog({
     title: `Buy ${vm.title}?`,

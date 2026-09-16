@@ -206,7 +206,7 @@ def test_malformed_offer_startup_keeps_admin_not_ready_and_never_creates_offer(m
     async def recover_offers_only():
         await server._recover_sponsored_offers(campaign_db, network="mainnet")
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", MalformedClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", MalformedClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server, "resume_bulk_jobs", recover_offers_only)
 

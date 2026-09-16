@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**LFG Bot** is a Discord bot that allows users to mint NFTs on the XRP Ledger (XRPL) and trade tokens (LFGO) using the XUMM app. The bot dynamically generates NFT images by compositing trait layers, uploads them to BunnyCDN, and mints them on the XRPL.
+**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or XRP via a DEX buy-and-burn), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
 
 ## Feature Workflow: Brainstorming → Spec → Plan → Issue Link
 
@@ -85,7 +85,7 @@ NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
 TRAIT_TAXON=176                                             # optional; tradeable trait token taxon (default 176, flipped from 1763 for #217)
 ASSEMBLE_TAXON=1760                                         # optional; taxon for Assemble-minted rebirth characters, distinct from NFT_TAXON=0 (default 1760)
-SHOP_ENABLED=0                                              # optional; Trait Shop master flag — 0 (default) = the PROJECT never sells traits; users only buy them from each other via the marketplace
+SHOP_ENABLED=0                                              # optional; Trait Shop master flag — 0 (default, and prod) = no on-demand project trait minting; the marketplace Traits tab (user + fixture listings) stays on
 SHOP_BASE_BRIX=1.0                                          # optional; Trait Shop price numerator, BRIX (default 1.0, #217)
 SHOP_MIN_BRIX=5                                             # optional; Trait Shop price floor, BRIX (default 5, #217)
 SHOP_MAX_BRIX=5000                                          # optional; Trait Shop price ceiling, BRIX (default 5000, #217)
@@ -144,6 +144,7 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 LISTENER_AUTO_CATCHUP=1                                     # optional (#402); default ON — on (re)subscribe the index listener auto-runs the bounded --catch-up-from-gap in the background when the archive is certified-but-gapped (needs BRIX_DISTRIBUTOR_ADDRESS; skips otherwise)
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
+XRPL_JSON_RPC_FALLBACK_URLS=<url,url>                       # optional (#493); comma-separated JSON-RPC failover endpoints tried after XRPL_JSON_RPC_URL on busy/unsynced/unreachable servers (never on tx results) — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
@@ -232,6 +233,9 @@ auto-restart hook is retired.
 | `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
 | `lfg-brix-accrue` (cron 00:40) | `stg-brix-accrue` (cron 00:40, testnet) |
 | `lfg-market-sweep` (cron 03:30) | `stg-market-sweep` (cron 03:30, testnet) |
+| `lfg-economy-reconcile` (cron 00:20) → `lfg-economy-audit` (00:25) | `stg-economy-reconcile` / `stg-economy-audit` (testnet) |
+| `lfg-x` (X mint auto-poster, live since 2026-09-10) | none (no staging X creds) |
+| `lfg-funnel-health` | not registered |
 | `lfg-deployer` | `stg-deployer` |
 
 `lfg-market-sweep` / `stg-market-sweep` (#288) run `scripts/backfill_market.py
@@ -248,7 +252,16 @@ running stack — going live is an ops step per stack:
 `pm2 start ecosystem.prod.config.js --only lfg-market-sweep && pm2 save`
 (staging: `--only stg-market-sweep`).
 
-The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
+The X auto-poster (#41, `run_x.py`) runs in prod as `lfg-x` (registered in
+`ecosystem.prod.config.js` with `stop_exit_codes: [0]` so an X_ENABLED-off
+exit(0) parks instead of thrashing) since 2026-09-10: `X_ENABLED=1` + all four
+OAuth 1.0a creds + `SERVICE_TOKEN_X` in the prod `.env`, posting as
+@JoshuaHamsa for now, tweets are link-free text with the branded share-card
+render attached (`SHARE_CARD_RENDER_ENABLED=1`, #479). Per-user "Share from
+my account" (#252) is built but DARK in prod — `X_TOKEN_ENC_KEY` is not set,
+so `/api/config` reports `x_user_share:false`. Nightly economy audits have
+reported `Conservation: DRIFT` since the flip and `ECONOMY_AUDIT_WEBHOOK_URL`
+is unset in prod, so nothing alerts — tracked in #493.
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
@@ -568,6 +581,19 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
 
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
+- **JSON-RPC failover (#493):** every backend JSON-RPC call goes through
+  `xrpl_ops.rpc_client()` / `async_rpc_client()` (`lfg_core/xrpl_rpc.py`),
+  which walks `config.JSON_RPC_URLS` (`XRPL_JSON_RPC_URL` first, then
+  `XRPL_JSON_RPC_FALLBACK_URLS` or the per-network defaults). It moves on only
+  on transport failures and named server-state errors (`tooBusy`, `slowDown`,
+  `noCurrent`, `notSynced`, …) — never on an engine result or any other error —
+  with a 45 s per-URL cooldown; if all fail, the last outcome surfaces
+  unchanged. Re-sending a submit is safe: `_submit_and_confirm` signs once, the
+  client only re-posts the identical signed blob (same hash + Sequence, at most
+  one can validate). Never construct a JSON-RPC client class directly
+  (`JsonRpcClient(...)` or the failover classes) — pass `urls=[url]` to the
+  factory when a single endpoint is needed (e.g. `brix_drip`'s per-endpoint
+  chain check). WS / clio endpoints have no failover.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
@@ -815,8 +841,13 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
-  `XRPL_NETWORK`, the endpoint's ledger-32570 hash matches the chain identity
-  the archive recorded, **and** the collection index is non-empty
+  `XRPL_NETWORK`, every reachable JSON-RPC failover endpoint's ledger-32570
+  hash matches the chain identity the archive recorded (each checked through
+  its own single-endpoint `xrpl_ops.rpc_client(urls=[url])`; at least one must
+  answer; an endpoint that can't produce the hash — unreachable, or a
+  history-pruned `online_delete` node answering `lgrNotFound` — is skipped,
+  not refused, and excluded from that run's default clients via
+  `xrpl_rpc.restrict_to`; the next run re-checks it), **and** the collection index is non-empty
   (`nft_index.collection_owners`) — an empty index would make every token look
   ineligible and certify a silent zero-pay day.
 - **The archive replay is only as good as the DERIVED table, and both jobs
@@ -1438,9 +1469,9 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
 
 ## Important Notes
 
-1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.
+1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; the backend buys-and-burns the LFGO). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
 
-2. **XUMM Flow**: All signing is handled by XUMM (no private keys in bot). Users scan QR codes to approve transactions in their XUMM wallet app.
+2. **Signing**: users sign their own transactions in Xaman (every surface) or Joey Wallet over WalletConnect (web-only sign-in + signing, #447) — the app never holds a *user's* key. The backend DOES hold hot keys: `SEED` (the issuer's regular key, submitted for `SIGNING_ACCOUNT`) signs mints, delivery/shop offers, `NFTokenModify`, burns and the AMM buy-and-burn, and `BRIX_DISTRIBUTOR_SEED` signs drip payouts — ~77% of tagged mainnet txs are backend-signed. Never write "no private keys in the app" in user-facing docs; the accurate claim is "no user keys".
 
    **Push delivery (#135):** for a returning, registered user the sign request
    is *push-delivered* to their Xaman app instead of forcing a fresh QR scan.
