@@ -100,3 +100,16 @@ def test_closet_market_dom_lookups_are_null_guarded():
     ):
         assert f"el('{element_id}').on" not in js, element_id
     assert "if (closetBidNote) closetBidNote.textContent" in js
+
+
+def test_closet_ask_errors_are_surfaced():
+    """Staging 2026-09-16: a 409 trustline_required from POST /api/closet/ask
+    was an unhandled rejection — the list modal closed and nothing happened."""
+    js = _read("webapp/client/app.js")
+    body = js[
+        js.index("async function postClosetAsk(") : js.index("async function loadClosetMine()")
+    ]
+    assert "e.body.code === 'trustline_required'" in body
+    assert "startBrixTrustline(" in body
+    assert "el('market-list-confirm-btn').onclick = submitListForm;" not in js
+    assert "submitListForm().catch((e) => showError(e.message))" in js

@@ -5728,7 +5728,21 @@ async function placeClosetBid(slot, value, price) {
 }
 
 async function postClosetAsk(item, price) {
-  const res = await api('/api/closet/ask', { method: 'POST', body: JSON.stringify({ slot: item.slot, value: item.value, price_brix: price }) });
+  let res;
+  try {
+    res = await api('/api/closet/ask', { method: 'POST', body: JSON.stringify({ slot: item.slot, value: item.value, price_brix: price }) });
+  } catch (e) {
+    if (e.body && e.body.code === 'trustline_required') {
+      // Same #441 recovery as marketFlow: set the BRIX line (proceeds land on
+      // it), then re-post the very same ask.
+      startBrixTrustline({
+        back: () => showPanel('market-panel'),
+        onSet: () => postClosetAsk(item, price).catch((err) => showError(err.message)),
+      });
+      return;
+    }
+    throw e;
+  }
   if (res.fill) {
     showFlow(closetFillRender(res.fill));
     if (!marketPure.isMarketTerminal(res.fill.state)) pollMarketFlow('closet_fill', res.fill.id, closetFillRender);
@@ -6290,7 +6304,7 @@ async function main() {
     if (e.key === 'Escape' && !el('listing-overlay').hidden) closeListingDetail();
   });
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
-  el('market-list-confirm-btn').onclick = submitListForm;
+  el('market-list-confirm-btn').onclick = () => submitListForm().catch((e) => showError(e.message));
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');
   // Null-guarded: a missing id (cached older index.html) must not abort main() (PR #502 C5).
   const closetBidNew = el('closet-bid-new-btn');
