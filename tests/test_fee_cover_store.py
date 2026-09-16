@@ -699,10 +699,49 @@ def test_connect_migrates_a_db_created_by_an_earlier_build(tmp_path):
         assert "claim_ledger" in refund_cols
         assert {"bid_expires_at", "last_attempt_at"} <= quote_cols
         [quote] = store.pending_quotes(conn, "testnet", created_before=2000, limit=5)
-        assert quote.bid_expires_at == 1000 + 30 * 86_400
+        # no knowable expiry: left unknown rather than assumed (see _migrate)
+        assert quote.bid_expires_at is None
         store.touch_quote(conn, "OLD", now=1500)
         indexes = {r[1] for r in conn.execute("PRAGMA index_list(fee_cover_quotes)")}
         assert "idx_fee_cover_quotes_rotation" in indexes
         assert "idx_fee_cover_quotes_pending" not in indexes
+    finally:
+        conn.close()
+
+
+def test_migration_tolerates_a_concurrent_migrator_adding_the_column_first(tmp_path, monkeypatch):
+    """Two connections race on an older DB: both see the column missing, the
+    other one's ALTER lands first, and ours must shrug off the duplicate."""
+    path = str(tmp_path / "race.db")
+    store.connect(path).close()
+    conn = sqlite3.connect(path)
+    real_execute = conn.execute
+    raced = []
+
+    class _Conn:
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA table_info(fee_cover_quotes)"):
+                # the stale read: last_attempt_at looks missing to us
+                rows = [r for r in real_execute(sql, *args) if r[1] != "last_attempt_at"]
+                return iter(rows)
+            if "ADD COLUMN last_attempt_at" in sql:
+                raced.append(sql)
+            return real_execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    store._migrate(_Conn())  # the column already exists: the ALTER must be tolerated
+    assert raced
+    conn.close()
+
+
+def test_migration_still_raises_a_real_alter_failure(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "broken.db"))
+    try:
+        # no fee_cover tables at all: PRAGMA reports nothing, and the ALTER fails
+        # with "no such table" — not a duplicate column, so it must surface
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            store._migrate(conn)
     finally:
         conn.close()

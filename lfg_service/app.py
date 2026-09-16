@@ -5525,11 +5525,15 @@ _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS = 86_400
 _FEE_COVER_QUOTE_BATCH = 25
 
 
-def _fee_cover_quote_abandon_at(quote: fee_cover_store.Quote) -> int:
+def _fee_cover_quote_abandon_at(quote: fee_cover_store.Quote) -> int | None:
     """When an UNRESOLVED quote is closed `abandoned`: the Expiration its bid
     was actually signed with, plus a margin. The bid can fill until then and
     the quote is its only durable recovery record. Stored per quote, never
-    re-derived from MARKET_BID_TTL_SECONDS, which a later deploy may lower."""
+    re-derived from MARKET_BID_TTL_SECONDS, which a later deploy may lower.
+    None for a quote that predates the column: with no knowable expiry, age
+    alone never abandons it."""
+    if quote.bid_expires_at is None:
+        return None
     return quote.bid_expires_at + _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS
 
 
@@ -5566,7 +5570,8 @@ async def _reconcile_fee_cover_quotes() -> None:
             resolved = False
         # Age only ever ends a quote the ledger could NOT resolve this pass: a
         # quote whose bid has validated is promised however old it is.
-        if not resolved and now > _fee_cover_quote_abandon_at(quote):
+        abandon_at = _fee_cover_quote_abandon_at(quote)
+        if not resolved and abandon_at is not None and now > abandon_at:
             logging.warning(
                 "fee cover: quote %s (bid by %s on %s) unresolved past its bid's expiry; abandoned",
                 quote.session_id,

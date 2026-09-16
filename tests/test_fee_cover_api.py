@@ -1046,6 +1046,21 @@ def test_lowering_the_bid_ttl_never_abandons_a_quote_signed_under_a_longer_one(e
     assert _quote_row(env["app_db"], session.id)["state"] == "pending"
 
 
+def test_a_quote_with_no_recorded_expiry_is_never_aged_out(env, monkeypatch):
+    """A quote that predates bid_expires_at has no knowable expiry, so age
+    alone never abandons it (it still closes on any ledger outcome)."""
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, 400 * 86_400)
+    _set_bid_expiry(env["app_db"], session.id, None)
+    _wallet_status(monkeypatch, {"signed": False, "expired": False})
+    _run(server._reconcile_fee_cover_quotes())
+    assert _quote_row(env["app_db"], session.id)["state"] == "pending"
+    _wallet_status(monkeypatch, {"signed": False, "expired": True})
+    _run(server._reconcile_fee_cover_quotes())
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "expired"
+
+
 def test_an_old_quote_with_a_validated_bid_is_promised_not_abandoned(env, monkeypatch):
     """Age never beats the ledger: a quote whose persisted tx has validated is
     promised on the attempt, even past its abandonment deadline."""

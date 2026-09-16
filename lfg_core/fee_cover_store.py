@@ -96,7 +96,9 @@ CREATE TABLE IF NOT EXISTS fee_cover_quotes (
   -- The bid's on-ledger Expiration (unix seconds) as its payload set it. The
   -- bid can fill until then, so the quote is never abandoned before it — and
   -- it is fixed per bid, not re-derived from a TTL setting that may change.
-  bid_expires_at INTEGER NOT NULL,
+  -- Every quote written by record_quote carries it; NULL only on a quote that
+  -- predates the column, whose real expiry is unknowable (never aged out).
+  bid_expires_at INTEGER,
   listing_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending','closed')),
   -- When the reconciler last considered this quote: selection rotates on it,
@@ -174,24 +176,29 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("fee_cover_quotes", "bid_expires_at", "INTEGER"),
     ("fee_cover_quotes", "last_attempt_at", "INTEGER"),
 )
-# The expiry assumed for a quote recorded before bid_expires_at existed.
-# Deliberately longer than any bid TTL this code sets (7 days by default), so
-# a migrated quote is never abandoned while its bid could still fill.
-_MIGRATED_QUOTE_EXPIRY_SECONDS = 30 * 86_400
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any missing column. Every fee-cover path opens its own connection,
+    so two processes can race on an older DB. Both see the column missing,
+    and the loser's ALTER fails with "duplicate column name": that's the
+    outcome we wanted, so it's tolerated like the repo's other
+    self-migrations.
+
+    Nothing is backfilled. A refund left without a claim_ledger scans all
+    history in recovery, which is slower but never misses a payout. A quote
+    left without bid_expires_at has no knowable expiry, and any assumed one
+    could fall before the bid's real one under some TTL setting. So it's
+    never aged out, and it still closes on every ledger outcome."""
     for table, column, decl in _ADDED_COLUMNS:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
+        if column in existing:
+            continue
+        try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-    # A refund left without a claim_ledger scans all history in recovery,
-    # which is slower but never misses a payout. A quote without an expiry
-    # gets the conservative assumed one.
-    conn.execute(
-        "UPDATE fee_cover_quotes SET bid_expires_at = created_at + ? WHERE bid_expires_at IS NULL",
-        (_MIGRATED_QUOTE_EXPIRY_SECONDS,),
-    )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     # Built here, after its columns are guaranteed to exist. The earlier index
     # (without last_attempt_at) is replaced.
     conn.execute("DROP INDEX IF EXISTS idx_fee_cover_quotes_pending")
@@ -856,7 +863,7 @@ class Quote:
     owner: str
     bidder: str
     bid_drops: int
-    bid_expires_at: int
+    bid_expires_at: int | None
     listing: dict[str, Any]
     created_at: int
 
@@ -871,7 +878,7 @@ def _quote(row: sqlite3.Row) -> Quote:
         owner=str(row["owner"]),
         bidder=str(row["bidder"]),
         bid_drops=int(row["bid_drops"]),
-        bid_expires_at=int(row["bid_expires_at"]),
+        bid_expires_at=None if row["bid_expires_at"] is None else int(row["bid_expires_at"]),
         listing=json.loads(row["listing_json"]),
         created_at=int(row["created_at"]),
     )
