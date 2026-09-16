@@ -179,7 +179,7 @@ def main() -> int:
         print("refusing: testnet only")
         return 2
     config.CLOSET_MARKET_ENC_KEY = Fernet.generate_key().decode()
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = xrpl_ops.rpc_client()
     bidder, seller = generate_faucet_wallet(client), generate_faucet_wallet(client)
     _fund_with_brix(client, bidder, "100")
     _fund_with_brix(client, seller, "0")

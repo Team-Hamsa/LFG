@@ -34,7 +34,7 @@ from xrpl.models.transactions import AccountSet, AccountSetAsfFlag, TrustSet  # 
 from xrpl.transaction import submit_and_wait  # noqa: E402
 from xrpl.wallet import Wallet  # noqa: E402
 
-from lfg_core import config, memos  # noqa: E402
+from lfg_core import config, memos, xrpl_ops  # noqa: E402
 
 LSF_ALLOW_TRUSTLINE_LOCKING = 0x40000000
 
@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply-app-limit", action="store_true")
     args = parser.parse_args(argv)
     config.assert_cli_network_match(args.network)
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = xrpl_ops.rpc_client()
     if args.apply_issuer_flag:
         apply_issuer_flag(client, args.network)
     if args.apply_app_limit:

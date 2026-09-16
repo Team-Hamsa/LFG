@@ -1754,7 +1754,7 @@ def _closet_memos(action: str, tag: str) -> list[Memo]:
 async def _submit_app_tx(
     build: Callable[[int], Transaction], label: str, *, max_last_ledger_seq: int | None = None
 ) -> TxOutcome:
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     current = await _current_validated_ledger_index(client)
     if current is None:
         raise TxNotSubmitted(f"{label}: could not read the validated ledger index")
@@ -1852,7 +1852,7 @@ async def get_escrow(owner: str, sequence: int) -> dict[str, Any] | None:
     """The validated Escrow ledger object, or None if it does not exist
     (finished / cancelled / never created). Raises on any other failure —
     a failed lookup is never "absent"."""
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     request = LedgerEntry(
         escrow=LedgerEntryEscrow(owner=owner, seq=sequence), ledger_index="validated"
     )
@@ -1894,7 +1894,7 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     that predates `min_ledger`, which would otherwise report a false "absent"
     and resubmit (double-send) a tx that already landed."""
     account = config.SIGNING_ACCOUNT
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
     found: list[dict[str, Any]] = []
     marker: Any = None
@@ -1940,7 +1940,7 @@ async def find_invoice_payments(
     not proof the payment can't still be found."""
     account = config.SIGNING_ACCOUNT
     want = invoice_id.upper()
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     marker: Any = None
     scanned_to: int | None = None
     found: list[dict[str, Any]] = []
@@ -2005,7 +2005,7 @@ async def find_escrow_by_condition(
                 f"before the required ledger {require_ledger}"
             )
 
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     marker: Any = None
     while True:
         request = AccountObjects(

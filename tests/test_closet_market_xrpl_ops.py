@@ -146,7 +146,7 @@ class _Client:
 
 
 def test_get_escrow(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _Client(None))
     _Client.responses = [
         _Resp({"node": {"Account": "rA"}}),
         _Resp({"error": "entryNotFound"}, ok=False),
@@ -159,7 +159,7 @@ def test_get_escrow(monkeypatch):
 
 
 def test_find_app_txs_by_memo_pages_and_ignores_inbound(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _Client(None))
     tag = "lfg:closet_forward:F1"
     memo = [{"Memo": {"MemoData": _tag_hex(tag)}}]
     app = config.SIGNING_ACCOUNT
@@ -190,7 +190,7 @@ def test_find_app_txs_by_memo_raises_when_scan_lags_deadline(monkeypatch):
     ledger_index_max reaching min_ledger, its view of "nothing found" is too
     stale to trust — raise so the caller treats it as "wait", not "absent"
     (which would resubmit a tx that may have already landed)."""
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _Client(None))
     tag = "lfg:closet_forward:F1"
     _Client.responses = [_Resp({"transactions": [], "ledger_index_max": 400})]
     with pytest.raises(RuntimeError):
@@ -201,7 +201,7 @@ def test_find_app_txs_by_memo_raises_when_ledger_index_max_absent(monkeypatch):
     """(#443 review fix round 2) No page reporting ledger_index_max at all is
     just as untrustworthy as an insufficient one — raise rather than treat
     the scan's silence as a genuine "nothing found"."""
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _Client(None))
     tag = "lfg:closet_forward:F1"
     _Client.responses = [_Resp({"transactions": []})]  # no ledger_index_max key at all
     with pytest.raises(RuntimeError):
@@ -294,7 +294,7 @@ def _invoice_entry(invoice, *, account="rBuyer", destination=None, validated=Tru
 
 
 def test_find_invoice_payments_pages_and_filters_inbound(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _RecordingClient(None))
     _RecordingClient.requests = []
     invoice = "AB" * 32
     outbound = _invoice_entry(
@@ -325,7 +325,7 @@ def test_find_invoice_payments_pages_and_filters_inbound(monkeypatch):
 
 
 def test_find_invoice_payments_not_found_and_transport_failure(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _RecordingClient(None))
     _RecordingClient.requests = []
     _Client.responses = [_Resp({"transactions": [_invoice_entry("CD" * 32)]})]
     assert _run(xrpl_ops.find_invoice_payments("AB" * 32, None)) == []
@@ -336,7 +336,7 @@ def test_find_invoice_payments_not_found_and_transport_failure(monkeypatch):
 
 
 def test_find_escrow_by_condition(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _RecordingClient(None))
     _RecordingClient.requests = []
     wanted = {"LedgerEntryType": "Escrow", "Condition": "a025ff", "PreviousTxnID": "ECH"}
     _Client.responses = [
@@ -361,7 +361,7 @@ def test_find_escrow_by_condition(monkeypatch):
 
 
 def test_find_invoice_payments_require_ledger_coverage(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _RecordingClient(None))
     invoice = "AB" * 32
     _Client.responses = [
         _Resp({"transactions": [], "marker": "m", "ledger_index_max": 140}),
@@ -380,7 +380,7 @@ def test_find_invoice_payments_require_ledger_coverage(monkeypatch):
 
 
 def test_find_escrow_by_condition_require_ledger_coverage(monkeypatch):
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: _RecordingClient(None))
     _Client.responses = [_Resp({"account_objects": [], "ledger_index": 149})]
     with pytest.raises(RuntimeError):
         _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150))
