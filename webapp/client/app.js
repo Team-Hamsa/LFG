@@ -5850,7 +5850,7 @@ async function openBuyFlow(row) {
       showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
       return;
     }
-    text = `${vm.amountXrp} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
+    text = `${marketPure.displayXrp(vm.amountXrp)} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
   }
   const ok = await confirmDialog({
     title: `Buy ${vm.title}?`,
