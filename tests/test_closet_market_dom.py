@@ -113,3 +113,17 @@ def test_closet_ask_errors_are_surfaced():
     assert "startBrixTrustline(" in body
     assert "el('market-list-confirm-btn').onclick = submitListForm;" not in js
     assert "submitListForm().catch((e) => showError(e.message))" in js
+
+
+def test_every_shown_panel_is_registered():
+    """Staging 2026-09-16: showPanel('closet-bid-form-panel') hid every panel in
+    ALL_PANELS but the form itself was not in the list, so Place a bid left a
+    blank screen. Every literal showPanel target must be registered."""
+    js = _read("webapp/client/app.js")
+    registry = js[
+        js.index("const ALL_PANELS = [") : js.index("];", js.index("const ALL_PANELS = ["))
+    ]
+    registered = set(re.findall(r"'([a-z0-9-]+)'", registry))
+    shown = set(re.findall(r"showPanel\('([a-z0-9-]+)'\)", js))
+    assert shown, "no showPanel targets found"
+    assert shown <= registered, sorted(shown - registered)

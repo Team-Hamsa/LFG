@@ -1297,7 +1297,7 @@ const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel',
                     'offers-panel', 'trustline-panel', 'claimall-panel',
-                    'link-panel'];
+                    'link-panel', 'closet-bid-form-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
