@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 
+import conftest
+
 # Env guard: set before lfg_core imports so frozen config constants are sane
 # when this file runs first (see test-env-guard convention).
 os.environ.setdefault("XUMM_API_KEY", "test")
@@ -79,6 +81,9 @@ def _config_subprocess(tmp_path, extra_env, code):
         "BUNNY_CDN_STORAGE_ZONE": "test",
         "LAYER_SOURCE": "local",
         "BUNNY_PULL_ZONE": "nft.pullzone.example",
+        # The root conftest's store pins: a Python child without them could
+        # write the checkout's stores (its guard fails the test otherwise).
+        **{var: os.environ[var] for var in conftest.STORE_PIN_VARS},
     }
     env.update(extra_env)
     return subprocess.run(

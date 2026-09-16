@@ -18,17 +18,21 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
+import conftest
 from lfg_core import config, db_helpers, user_db
 
 
-def test_default_db_path_is_network_suffixed():
-    # The suite runs with XRPL_NETWORK=testnet; the default app DB must not
-    # be the legacy mainnet file.
-    assert config.app_db_path("mainnet") == "lfg_nfts.db"
-    assert config.app_db_path("testnet") == "lfg_nfts_testnet.db"
+def test_default_db_path_is_network_suffixed(monkeypatch):
     # config.DB_PATH freezes at first import (whole-suite order varies which
     # network that is) — assert consistency, not a specific network.
     assert config.DB_PATH == config.app_db_path(config.XRPL_NETWORK)
+    # The root conftest.py pins DB_PATH into a per-session temp dir so no test
+    # writes the checkout's app DB; clear it to see the per-network defaults.
+    # The suite runs with XRPL_NETWORK=testnet; the default app DB must not
+    # be the legacy mainnet file.
+    monkeypatch.delenv("DB_PATH", raising=False)
+    assert config.app_db_path("mainnet") == "lfg_nfts.db"
+    assert config.app_db_path("testnet") == "lfg_nfts_testnet.db"
 
 
 def test_db_path_env_override(monkeypatch):
@@ -67,6 +71,9 @@ def test_init_db_runs_without_runtime_secrets(tmp_path):
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     db = tmp_path / "bootstrap.db"
     env = {
+        # The root conftest's store pins (its guard requires them on a Python
+        # child); DB_PATH below still points this run at its own file.
+        **{var: os.environ[var] for var in conftest.STORE_PIN_VARS},
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": repo_root,
         "DB_PATH": str(db),
