@@ -93,14 +93,21 @@ CREATE TABLE IF NOT EXISTS fee_cover_quotes (
   txid TEXT,
   nft_id TEXT NOT NULL, owner TEXT NOT NULL, bidder TEXT NOT NULL,
   bid_drops INTEGER NOT NULL,
+  -- The bid's on-ledger Expiration (unix seconds) as its payload set it. The
+  -- bid can fill until then, so the quote is never abandoned before it — and
+  -- it is fixed per bid, not re-derived from a TTL setting that may change.
+  bid_expires_at INTEGER NOT NULL,
   listing_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending','closed')),
+  -- When the reconciler last considered this quote: selection rotates on it,
+  -- so a batch of long-unresolved quotes can't starve newer ones.
+  last_attempt_at INTEGER,
   outcome TEXT,
   offer_index TEXT,
   created_at INTEGER NOT NULL, closed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_pending
-  ON fee_cover_quotes(network, state, created_at);
+  ON fee_cover_quotes(network, state, last_attempt_at, created_at);
 
 CREATE TABLE IF NOT EXISTS fee_cover_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -815,6 +822,7 @@ class Quote:
     owner: str
     bidder: str
     bid_drops: int
+    bid_expires_at: int
     listing: dict[str, Any]
     created_at: int
 
@@ -829,6 +837,7 @@ def _quote(row: sqlite3.Row) -> Quote:
         owner=str(row["owner"]),
         bidder=str(row["bidder"]),
         bid_drops=int(row["bid_drops"]),
+        bid_expires_at=int(row["bid_expires_at"]),
         listing=json.loads(row["listing_json"]),
         created_at=int(row["created_at"]),
     )
@@ -838,8 +847,8 @@ def record_quote(conn: sqlite3.Connection, quote: Quote) -> None:
     """Durably record a covered quote (idempotent on session_id)."""
     conn.execute(
         "INSERT OR IGNORE INTO fee_cover_quotes (session_id, network, payload_uuid, txid, nft_id,"
-        " owner, bidder, bid_drops, listing_json, state, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+        " owner, bidder, bid_drops, bid_expires_at, listing_json, state, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
         (
             quote.session_id,
             quote.network,
@@ -849,6 +858,7 @@ def record_quote(conn: sqlite3.Connection, quote: Quote) -> None:
             quote.owner,
             quote.bidder,
             quote.bid_drops,
+            quote.bid_expires_at,
             json.dumps(quote.listing, sort_keys=True),
             quote.created_at,
         ),
@@ -897,16 +907,27 @@ def close_quote(
 def pending_quotes(
     conn: sqlite3.Connection, network: str, *, created_before: int, limit: int
 ) -> list[Quote]:
-    """Oldest pending quotes created before `created_before` — the live poll
-    path gets first go at a fresh one."""
+    """Pending quotes created before `created_before` (the live poll path gets
+    first go at a fresh one), least-recently-attempted first, then oldest. The
+    caller `touch_quote`s every quote it considers, so selection rotates and a
+    batch of long-unresolved quotes can never starve newer ones."""
     return [
         _quote(r)
         for r in conn.execute(
             "SELECT * FROM fee_cover_quotes WHERE network = ? AND state = 'pending'"
-            " AND created_at < ? ORDER BY created_at LIMIT ?",
+            " AND created_at < ? ORDER BY COALESCE(last_attempt_at, 0), created_at LIMIT ?",
             (network, created_before, limit),
         )
     ]
+
+
+def touch_quote(conn: sqlite3.Connection, session_id: str, now: int | None = None) -> None:
+    """Record that the reconciler considered this quote (resolved or not)."""
+    conn.execute(
+        "UPDATE fee_cover_quotes SET last_attempt_at = ? WHERE session_id = ?",
+        (_now(now), session_id),
+    )
+    conn.commit()
 
 
 def view_for_offer(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:

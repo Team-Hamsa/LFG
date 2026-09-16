@@ -353,7 +353,7 @@ promise.
   observation. Three rules close that:
   - **Quote row.** At `POST /api/market/bid` a `quoted` cover is written to
     `fee_cover_quotes`: session id, payload uuid, bidder, NFT, owner, bid
-    drops, saved listing. If that write fails the cover is **not offered**:
+    drops, the bid's signed expiry, saved listing. If that write fails the cover is **not offered**:
     `fee_cover` is null.
   - **Poll path.** The signed tx hash is saved on the quote once the session
     learns it, after its signer check. The promise write runs in a `finally`
@@ -369,9 +369,14 @@ promise.
       idempotent on `offer_index`, so racing the poll path is safe.
     - It closes the quote `promised` / `uncovered` / `expired` / `failed`, or
       `abandoned`. Anything unresolved retries next sweep. Every pass tries the
-      ledger first, and only a quote still unresolved and older than
-      `MARKET_BID_TTL_SECONDS` + 1 day is abandoned. The bid can fill until
-      its own on-ledger expiry, and the quote is its only recovery record.
+      ledger first. A quote is abandoned only while still unresolved and
+      past `bid_expires_at` + 1 day. `bid_expires_at` is the `Expiration`
+      its bid was signed with, stored on the quote, so lowering
+      `MARKET_BID_TTL_SECONDS` later can't cut short a bid that can still
+      fill.
+    - Selection orders by `last_attempt_at` (then `created_at`), and every
+      quote considered is touched, so a batch of stuck quotes can't
+      starve newer ones.
 - **Primary trigger.** The bid status poll. In `_advance_market_session`'s
   `bid` branch, after computing `session.fill`: when `fill == "accepted"` and a
   promise exists, call `fee_cover.settle_promise(network, offer_index)`. This

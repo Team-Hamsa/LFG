@@ -1242,8 +1242,10 @@ any pending quote whose live session is gone (restart) or terminal (a failed
 promise write, a tx lookup that gave up). It re-runs the same signer and
 on-ledger checks, then writes the promise (idempotent) and closes the quote
 `promised`/`uncovered`/`expired`/`failed`. Age never beats the ledger: only a quote
-the ledger still can't resolve, and older than `MARKET_BID_TTL_SECONDS` + 1 day
-(the bid could fill until then), is closed `abandoned`.
+the ledger still can't resolve, past its bid's own signed `Expiration` + 1 day
+(stored per quote, so a later TTL change can't cut it short), is closed
+`abandoned`. Selection rotates by last attempt, so stuck quotes can't starve
+newer ones.
 Refund = min(promise, observed
 `NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
 accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as

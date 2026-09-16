@@ -600,6 +600,7 @@ def _quote(session_id="S1", created_at=1000, **over):
         "owner": "rOwner",
         "bidder": BIDDER,
         "bid_drops": 5_075_000,
+        "bid_expires_at": created_at + 604_800,
         "listing": {"offer_index": "E" * 64, "broker": CAFE, "broker_rate": 0.01589},
         "created_at": created_at,
     }
@@ -634,3 +635,23 @@ def test_pending_quotes_respects_the_grace_period_network_and_limit(conn):
     assert [
         q.session_id for q in store.pending_quotes(conn, NET, created_before=1500, limit=1)
     ] == ["OLD1"]
+
+
+def test_pending_quotes_rotate_by_last_attempt_so_old_ones_cannot_starve_new(conn):
+    """Five long-unresolved quotes and a batch of two: every attempted quote is
+    touched, so the newer ones still get their turn."""
+    for n in range(5):
+        store.record_quote(conn, _quote(f"Q{n}", created_at=1000 + n))
+
+    def batch(now):
+        picked = [
+            q.session_id for q in store.pending_quotes(conn, NET, created_before=5000, limit=2)
+        ]
+        for session_id in picked:
+            store.touch_quote(conn, session_id, now=now)
+        return picked
+
+    assert batch(2000) == ["Q0", "Q1"]
+    assert batch(2001) == ["Q2", "Q3"]
+    assert batch(2002) == ["Q4", "Q0"]  # never-attempted first, then least recent
+    assert store.get_quote(conn, "Q0")["last_attempt_at"] == 2002

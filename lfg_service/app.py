@@ -4243,7 +4243,7 @@ def _fee_cover_close_quote(session_id: str, outcome: str, offer_index: str | Non
         conn.close()
 
 
-def _fee_cover_record_quote(session: Any) -> None:
+def _fee_cover_record_quote(session: Any, bid_expires_at: int) -> None:
     conn = fee_cover_store.connect(_fee_cover_db())
     try:
         fee_cover_store.record_quote(
@@ -4257,10 +4257,19 @@ def _fee_cover_record_quote(session: Any) -> None:
                 owner=session.owner,
                 bidder=session.wallet_address,
                 bid_drops=int(session.amount_drops),
+                bid_expires_at=int(bid_expires_at),
                 listing=dict(session.fee_cover_listing),
                 created_at=int(session.created_at),
             ),
         )
+    finally:
+        conn.close()
+
+
+def _fee_cover_touch_quote(session_id: str, now: int) -> None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        fee_cover_store.touch_quote(conn, session_id, now)
     finally:
         conn.close()
 
@@ -4537,7 +4546,12 @@ async def handle_market_bid_start(request):
         session.fee_cover, session.fee_cover_listing = quote
         if session.fee_cover is not None and session.fee_cover.get("state") == "quoted":
             try:
-                await loop.run_in_executor(None, _fee_cover_record_quote, session)
+                await loop.run_in_executor(
+                    None,
+                    _fee_cover_record_quote,
+                    session,
+                    expiration + xrpl_ops.RIPPLE_EPOCH_OFFSET,
+                )
             except Exception:
                 # A cover the buyer is shown must survive a failed promise
                 # write or a restart, which needs this row. Without it, don't
@@ -5505,19 +5519,18 @@ async def _advance_quoted_bid_sessions() -> None:
 # A fresh quote belongs to its live session first; the reconciler only steps
 # in after this grace period.
 _FEE_COVER_QUOTE_GRACE_SECONDS = 60
-# Margin past the bid's own on-ledger lifetime before an unresolved quote is
-# given up on.
+# Margin past the bid's own on-ledger expiry before an unresolved quote is
+# given up on (listener/archive lag past the expiry).
 _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS = 86_400
 _FEE_COVER_QUOTE_BATCH = 25
 
 
-def _fee_cover_quote_max_age_seconds() -> int:
-    """How long an UNRESOLVED quote is retried before it's closed `abandoned`.
-    Never shorter than the bid's on-ledger lifetime (MARKET_BID_TTL_SECONDS):
-    a covered bid can still fill until then, and the quote is its only
-    durable recovery record. The margin covers listener and archive lag past
-    the expiry."""
-    return int(config.MARKET_BID_TTL_SECONDS) + _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS
+def _fee_cover_quote_abandon_at(quote: fee_cover_store.Quote) -> int:
+    """When an UNRESOLVED quote is closed `abandoned`: the Expiration its bid
+    was actually signed with, plus a margin. The bid can fill until then and
+    the quote is its only durable recovery record. Stored per quote, never
+    re-derived from MARKET_BID_TTL_SECONDS, which a later deploy may lower."""
+    return quote.bid_expires_at + _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS
 
 
 async def _reconcile_fee_cover_quotes() -> None:
@@ -5533,6 +5546,12 @@ async def _reconcile_fee_cover_quotes() -> None:
         None, _fee_cover_pending_quotes, now - _FEE_COVER_QUOTE_GRACE_SECONDS
     )
     for quote in quotes:
+        # Every selected quote rotates to the back of the next selection,
+        # skipped or attempted, so the batch can't pin on the same rows.
+        try:
+            await loop.run_in_executor(None, _fee_cover_touch_quote, quote.session_id, now)
+        except Exception:
+            logging.warning("fee cover: touching quote %s failed", quote.session_id, exc_info=True)
         live = market_sessions.get(quote.session_id)
         if live is not None and live.state not in market_flow.TERMINAL_STATES:
             continue  # its poll, or _advance_quoted_bid_sessions, owns it
@@ -5547,14 +5566,12 @@ async def _reconcile_fee_cover_quotes() -> None:
             resolved = False
         # Age only ever ends a quote the ledger could NOT resolve this pass: a
         # quote whose bid has validated is promised however old it is.
-        max_age = _fee_cover_quote_max_age_seconds()
-        if not resolved and now - quote.created_at > max_age:
+        if not resolved and now > _fee_cover_quote_abandon_at(quote):
             logging.warning(
-                "fee cover: quote %s (bid by %s on %s) unresolved after %ss; abandoned",
+                "fee cover: quote %s (bid by %s on %s) unresolved past its bid's expiry; abandoned",
                 quote.session_id,
                 quote.bidder,
                 quote.nft_id,
-                max_age,
             )
             try:
                 await loop.run_in_executor(
