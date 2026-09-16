@@ -486,3 +486,29 @@ class LFGServiceClient:
             token=self._service_token,
             json={"actor": actor},
         )
+
+    # ---- admin: marketplace fee cover (spec 2026-09-14) ----
+
+    async def fee_cover_status(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/admin/fee-cover/status", token=self._service_token)
+
+    async def fee_cover_start(self, actor: str, **fields: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/admin/fee-cover/start",
+            token=self._service_token,
+            json={"actor": actor, **fields},
+        )
+
+    async def fee_cover_update(self, actor: str, **fields: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/admin/fee-cover/update",
+            token=self._service_token,
+            json={"actor": actor, **fields},
+        )
+
+    async def fee_cover_stop(self, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/admin/fee-cover/stop", token=self._service_token, json={"actor": actor}
+        )

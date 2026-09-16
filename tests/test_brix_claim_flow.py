@@ -341,13 +341,19 @@ def account_tx(monkeypatch):
     """Serve a canned account_tx page and pin the distributor config."""
     monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", DISTRIBUTOR, raising=False)
     monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_SEED", DISTRIBUTOR_SEED, raising=False)
-    box = {"entries": []}
+    box = {"entries": [], "error": None}
 
     class _Resp:
-        def __init__(self, result):
+        def __init__(self, result, ok=True):
             self.result = result
+            self._ok = ok
+
+        def is_successful(self):
+            return self._ok
 
     def fake_request(self, request):
+        if box["error"] is not None:
+            return _Resp(box["error"], ok=False)
         return _Resp({"transactions": box["entries"], "marker": None})
 
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request, raising=False)
@@ -447,6 +453,21 @@ def test_find_claim_payment_raises_rather_than_reporting_a_hashless_payout_absen
         _find()
 
 
+def test_find_claim_payment_raises_on_an_account_tx_error_response(account_tx):
+    """An error response has no `transactions`; reading it as "absent" past
+    LastLedgerSequence would fail the claim and unbind accruals whose payout
+    may have landed — paying the BRIX twice."""
+    account_tx["error"] = {"error": "lgrIdxMalformed", "status": "error"}
+    loop = asyncio.new_event_loop()  # private loop: never unsets the global one
+    try:
+        with pytest.raises(RuntimeError, match="account_tx error"):
+            loop.run_until_complete(
+                xrpl_ops.find_claim_payment(42, wallet="rAlice", amount=5, min_ledger=100000)
+            )
+    finally:
+        loop.close()
+
+
 def test_find_claim_payment_bounds_the_scan_by_the_claim_deadline(account_tx, monkeypatch):
     """Unbounded, a never-paid claim pages the distributor's whole history —
     once per open claim, growing forever as payouts accumulate."""
@@ -455,6 +476,9 @@ def test_find_claim_payment_bounds_the_scan_by_the_claim_deadline(account_tx, mo
     class _Resp:
         def __init__(self, result):
             self.result = result
+
+        def is_successful(self):
+            return True
 
     def capture(self, request):
         seen["min"] = request.ledger_index_min

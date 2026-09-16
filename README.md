@@ -14,7 +14,7 @@
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/-web%20app%20%C2%B7%20live-D89030?style=flat-square&logoColor=white&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8%2BPGVsbGlwc2UgY3g9IjEyIiBjeT0iMTIiIHJ4PSI0IiByeT0iMTAiLz48cGF0aCBkPSJNMiAxMmgyME00IDdoMTZNNCAxN2gxNiIvPjwvZz48L3N2Zz4K" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-4%2C371-2ea043?style=flat-square" alt="4,371 tests">
+<img src="https://img.shields.io/badge/tests-4%2C560-2ea043?style=flat-square" alt="4,560 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
@@ -453,10 +453,10 @@ collection (not a general tool). Full rationale per row in
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
-- [ ] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
 - [x] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48) (closed 2026-08-24)
 - [x] [#354 — Skeleton body cannot wear the pirate outfit ("Swashbuckler") — missing skeleton art](../../issues/354) (closed 2026-08-24)
 - [x] [#332 — ops(sponsored-mint): execute the staging rehearsal before any production activation of the SourceTag free mint](../../issues/332) (closed 2026-08-23)

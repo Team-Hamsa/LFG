@@ -29,7 +29,7 @@ import traceback
 import uuid as uuid_lib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import urlparse
@@ -55,6 +55,9 @@ from lfg_core import (
     db_path,
     economy_flow,
     economy_store,
+    fee_cover,
+    fee_cover_settle,
+    fee_cover_store,
     funding,
     headroom,
     history_store,
@@ -1470,6 +1473,172 @@ async def handle_sponsored_mint_status(request):
     status["recovery_ready"] = _sponsored_recovery_ready
     status["reverify"] = _reverify_status(config.XRPL_NETWORK)
     return web.json_response(status)
+
+
+# --- Fee cover campaign admin (Discord /admin only) ------------------------
+
+
+async def _admin_json(request: Any) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _xrp_field_drops(body: dict[str, Any], name: str, *, allow_zero: bool) -> int:
+    try:
+        value = Decimal(str(body.get(name)))
+    except DecimalException:
+        raise ValueError(f"{name} must be a number") from None
+    if not value.is_finite() or value < 0 or (value == 0 and not allow_zero):
+        raise ValueError(f"{name} must be {'zero or more' if allow_zero else 'greater than zero'}")
+    if value > market_ops.MAX_XRP:
+        raise ValueError(f"{name} exceeds the total XRP supply")
+    try:
+        drops = value * 1_000_000
+    except DecimalException:
+        raise ValueError(f"{name} exceeds the total XRP supply") from None
+    if drops != drops.to_integral_value():
+        raise ValueError(f"{name} has more than 6 decimal places")
+    return int(drops)
+
+
+def _fee_cover_knobs(body: dict[str, Any]) -> fee_cover_store.Knobs:
+    try:
+        pct = Decimal(str(body.get("coverage_pct")))
+    except DecimalException:
+        raise ValueError("coverage_pct must be a number") from None
+    if not pct.is_finite():
+        raise ValueError("coverage_pct must be a number")
+    if pct < 0 or pct > 100:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals")
+    try:
+        bps = pct * 100
+    except DecimalException:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals") from None
+    if bps != bps.to_integral_value() or not 0 <= bps <= fee_cover_store.BPS:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals")
+    knobs = fee_cover_store.Knobs(
+        coverage_bps=int(bps),
+        budget_drops=_xrp_field_drops(body, "budget_xrp", allow_zero=False),
+        wallet_cap_drops=_xrp_field_drops(body, "wallet_cap_xrp", allow_zero=False),
+        min_bid_drops=_xrp_field_drops(body, "min_bid_xrp", allow_zero=True),
+    )
+    knobs.validate()
+    return knobs
+
+
+def _fee_cover_duration(body: dict[str, Any]) -> int | None:
+    raw = body.get("duration_hours")
+    if raw is None or raw == "":
+        return None
+    try:
+        hours = Decimal(str(raw))
+    except DecimalException:
+        raise ValueError("duration_hours must be a number") from None
+    if not hours.is_finite() or hours <= 0:
+        raise ValueError("duration_hours must be greater than zero")
+    if hours > 87_600:
+        raise ValueError("duration_hours must be at most 87600")
+    try:
+        seconds = hours * 3600
+    except DecimalException:
+        raise ValueError("duration_hours must be at most 87600") from None
+    if int(seconds) <= 0:
+        # A positive duration under one second would end the campaign the
+        # moment it starts.
+        raise ValueError("duration_hours must be at least one second")
+    return int(seconds)
+
+
+def _bad_request(message: str) -> web.Response:
+    return web.json_response({"error": message, "code": "bad_request"}, status=400)
+
+
+def _fee_cover_admin_run(action: Callable[[sqlite3.Connection], str | None]) -> dict[str, Any]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        result = action(conn)
+        status = fee_cover_store.status_summary(conn, config.XRPL_NETWORK)
+    finally:
+        conn.close()
+    if result is not None:
+        status["result"] = result
+    return status
+
+
+async def _fee_cover_admin_response(
+    action: Callable[[sqlite3.Connection], str | None],
+) -> web.Response:
+    status = await asyncio.get_event_loop().run_in_executor(None, _fee_cover_admin_run, action)
+    status["issuer_balance_drops"] = await xrpl_ops.get_xrp_balance_drops(config.SIGNING_ACCOUNT)
+    return web.json_response(status)
+
+
+@require_service_token
+async def handle_fee_cover_status(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    return await _fee_cover_admin_response(lambda conn: None)
+
+
+@require_service_token
+async def handle_fee_cover_start(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    try:
+        knobs = _fee_cover_knobs(body)
+        duration = _fee_cover_duration(body)
+    except ValueError as e:
+        return _bad_request(str(e))
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.start_campaign(
+            conn, network=config.XRPL_NETWORK, actor=actor, knobs=knobs, duration_seconds=duration
+        )[1]
+    )
+
+
+@require_service_token
+async def handle_fee_cover_update(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    try:
+        knobs = _fee_cover_knobs(body)
+    except ValueError as e:
+        return _bad_request(str(e))
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.update_campaign(
+            conn, network=config.XRPL_NETWORK, actor=actor, knobs=knobs
+        )[1]
+    )
+
+
+@require_service_token
+async def handle_fee_cover_stop(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.stop_campaign(conn, network=config.XRPL_NETWORK, actor=actor)[
+            1
+        ]
+    )
 
 
 async def handle_telegram_auth(request):
@@ -2930,6 +3099,13 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     if kind == "trait" and group and config.closet_market_enabled():
         summary = await _closet_db(closet_market_store.book_summary)
         _attach_closet_book(rows_out, page, summary)
+    if include_external and kind == "character":
+        fee_cover_state = await asyncio.get_event_loop().run_in_executor(
+            None, _fee_cover_safe, _fee_cover_browse_state
+        )
+        if fee_cover_state is not None:
+            for out in rows_out:
+                _apply_fee_cover_estimate(out, fee_cover_state)
     return web.json_response({"rows": rows_out, "total": len(filtered)})
 
 
@@ -3714,9 +3890,23 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
             network = _market_network(session.listing_kind)
             await loop.run_in_executor(None, _write_listing_row, network, row)
     elif prefix == "bid":
+        had_txid = session.txid is not None
         bid_row = await market_flow.advance_bid_session(session)
+        if not had_txid and session.txid and getattr(session, "fee_cover_listing", None):
+            # The signer check has passed: a rebuilt session can go straight to
+            # the ledger with this hash.
+            await loop.run_in_executor(
+                None, _fee_cover_safe, _fee_cover_note_txid, session.id, session.txid
+            )
         if bid_row is not None:
-            await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
+            try:
+                await loop.run_in_executor(
+                    None, _write_bid_row, _market_network("character"), bid_row
+                )
+            finally:
+                # Fee cover: the bid is on-ledger, so its promise is written
+                # now, even when indexing the bid row raised.
+                await _fee_cover_finalize(session, bid_row, loop)
         # #426: once the bid is on-ledger, report whether the indexed buy
         # offer is still live or has been consumed (a broker's brokered
         # accept closes it 'accepted' via the listener) — the external
@@ -3726,6 +3916,15 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
             session.fill = await loop.run_in_executor(
                 None, _bid_fill_state, _market_network("character"), session.offer_index
             )
+            if session.fee_cover is not None:
+                if session.fill == "accepted":
+                    settled = await _fee_cover_settle_safe(session.offer_index)
+                    session.fee_cover = settled or session.fee_cover
+                else:
+                    refreshed = await loop.run_in_executor(
+                        None, _fee_cover_safe, _fee_cover_view, session.offer_index
+                    )
+                    session.fee_cover = refreshed or session.fee_cover
     elif prefix == "bid_accept":
         accepted = await market_flow.advance_bid_accept_session(session)
         if accepted is not None:
@@ -3871,6 +4070,332 @@ def _close_bid_sync(network: str, offer_index: str, reason: str) -> None:
         conn.close()
 
 
+# --- Marketplace fee cover (docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md) ---
+# LFG refunds an allowlisted broker's fee on bids placed through LFG that the
+# broker's bot settles. Everything here is best-effort with respect to the bid
+# flow: a fee-cover failure must never fail a bid.
+
+
+def _fee_cover_db() -> str:
+    return db_path.app_db_path(config.XRPL_NETWORK)
+
+
+def _fee_cover_system_wallets() -> frozenset[str]:
+    configured = frozenset(w for w in (config.BRIX_DISTRIBUTOR_ADDRESS,) if w)
+    return sponsored_mint.excluded_wallets() | system_wallets.with_durable(configured)
+
+
+def _fee_cover_linked(bidder: str, seller: str) -> bool:
+    """Same logical user (identity bucket) or the same non-exchange activation
+    funder (#461).
+
+    A lookup that cannot answer raises `fee_cover.LinkageUnavailable` rather
+    than reporting "unlinked": a self-dealing pair reached during a DB error
+    would otherwise be settled as unrelated and paid. The caller defers instead
+    — the promise stays open and the next sweep retries it — so a transient
+    error costs a delay, not a wrong payout. A lookup that is merely EMPTY (no
+    bucket, no cached funder) is a real answer and is not a deferral."""
+    try:
+        bucket = identity_store.bucket_for_wallet(bidder)
+    except Exception as exc:
+        raise fee_cover.LinkageUnavailable(f"identity bucket lookup for {bidder} failed") from exc
+    if bucket is not None and seller in cast(list[str], bucket.get("wallets") or []):
+        return True
+    try:
+        conn = sqlite3.connect(_fee_cover_db())
+        try:
+            funding.ensure_schema(conn)
+            funder_a = funding.cached_funder(conn, bidder)
+            funder_b = funding.cached_funder(conn, seller)
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise fee_cover.LinkageUnavailable(f"funder lookup for {bidder}/{seller} failed") from exc
+    return funder_a is not None and funder_a == funder_b and funder_a not in funding.EXCHANGES
+
+
+def _fee_cover_deps() -> fee_cover_settle.FeeCoverDeps:
+    deps = fee_cover_settle.service_deps(config.XRPL_NETWORK, linked=_fee_cover_linked)
+    deps.app_db_path = _fee_cover_db()
+    return deps
+
+
+def _fee_cover_safe(fn: Callable[..., Any], *args: Any) -> Any:
+    try:
+        return fn(*args)
+    except Exception:
+        logging.warning("fee cover: %s failed", getattr(fn, "__name__", fn), exc_info=True)
+        return None
+
+
+def _fee_cover_saved_listing(
+    oconn: sqlite3.Connection, saved: dict[str, Any], nft_id: str, owner: str, bidder: str
+) -> fee_cover.ExternalListing | None:
+    """The listing the quote was evaluated against, re-read at finalize. It
+    still qualifies while live, or once closed `sold` to THIS bidder: the
+    broker's bot can fill the bid and the listener close the listing before
+    the session's first `done` poll. Rebuilt from the row, so the broker must
+    still resolve with a measured rate and the seller still be `owner`."""
+    row = market_store.get_listing(oconn, str(saved["offer_index"]))
+    if row is None or row.get("nft_id") != nft_id:
+        return None
+    sold_to_bidder = row.get("closed_reason") == "sold" and row.get("buyer") == bidder
+    if row.get("is_live") != 1 and not sold_to_bidder:
+        return None
+    return fee_cover.external_listing_for([row], owner, nft_id)
+
+
+def _fee_cover_evaluate(
+    nft_id: str,
+    owner: str,
+    bidder: str,
+    bid_drops: int,
+    saved_listing: dict[str, Any] | None = None,
+) -> tuple[fee_cover_store.Campaign | None, fee_cover.ExternalListing | None, str | None, int]:
+    """Campaign + external listing + pure decline reason + promise size.
+    `saved_listing` (the quote's listing) pins the finalize to that row;
+    without one the NFT's live listings are searched."""
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        campaign = fee_cover_store.live_campaign(conn, config.XRPL_NETWORK)
+    finally:
+        conn.close()
+    listing: fee_cover.ExternalListing | None = None
+    if campaign is not None:
+        oconn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
+        try:
+            market_store.init_db(oconn)
+            if saved_listing is not None:
+                listing = _fee_cover_saved_listing(oconn, saved_listing, nft_id, owner, bidder)
+            else:
+                listing = fee_cover.external_listing_for(
+                    market_store.live_listings_for_nft(oconn, nft_id), owner, nft_id
+                )
+        finally:
+            oconn.close()
+    reason = fee_cover.promise_decline_reason(
+        campaign=campaign,
+        listing=listing,
+        bid_drops=bid_drops,
+        bidder=bidder,
+        system_wallets=_fee_cover_system_wallets(),
+    )
+    drops = (
+        fee_cover.promise_drops(bid_drops, listing.broker_rate, campaign.coverage_bps)
+        if campaign is not None and listing is not None
+        else 0
+    )
+    return campaign, listing, reason, drops
+
+
+def _fee_cover_quote(
+    nft_id: str, owner: str, bidder: str, bid_drops: int
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Advisory quote at POST /api/market/bid — reserves nothing. Returns
+    (view, listing): the view for session.fee_cover and the external listing
+    it was evaluated against for session.fee_cover_listing; (None, None) for
+    an ordinary bid."""
+    campaign, listing, reason, drops = _fee_cover_evaluate(nft_id, owner, bidder, bid_drops)
+    if campaign is None or listing is None:
+        return None, None  # an ordinary bid
+    if reason is None:
+        conn = fee_cover_store.connect(_fee_cover_db())
+        try:
+            reason = fee_cover_store.headroom_reason(
+                conn, campaign, config.XRPL_NETWORK, bidder, drops, int(time.time())
+            )
+        finally:
+            conn.close()
+    shown = drops if reason is None else 0
+    view = {
+        "state": "quoted" if reason is None else "declined",
+        "drops": shown,
+        "xrp": market_ops.drops_to_xrp_str(str(shown)),
+        "reason": reason,
+        "payout_tx_hash": None,
+    }
+    return view, dataclasses.asdict(listing)
+
+
+def _fee_cover_record_promise(session: Any, bid_row: dict[str, Any]) -> dict[str, Any] | None:
+    """The bid is on-ledger: write the promise (budget reservation), re-evaluated
+    against fresh state — on the quote's own listing when one was saved (live,
+    or already sold to this bidder), else the NFT's live listings. Returns the
+    view, or None for an ordinary bid."""
+    bid_drops = int(bid_row["amount_drops"])
+    bidder = str(bid_row["bidder"])
+    campaign, listing, reason, _drops = _fee_cover_evaluate(
+        session.nft_id,
+        session.owner,
+        bidder,
+        bid_drops,
+        getattr(session, "fee_cover_listing", None),
+    )
+    offer_index = str(bid_row["offer_index"])
+    if campaign is None or listing is None:
+        _fee_cover_close_quote(session.id, "uncovered", offer_index)
+        return None
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        row = fee_cover_store.record_promise(
+            conn,
+            campaign,
+            fee_cover_store.PromiseInput(
+                offer_index=offer_index,
+                network=config.XRPL_NETWORK,
+                nft_id=session.nft_id,
+                bidder=bidder,
+                bid_drops=bid_drops,
+                ask_drops=listing.ask_drops,
+                broker=listing.broker,
+                broker_rate=listing.broker_rate,
+                bid_expiration=bid_row.get("expiration"),
+            ),
+            decline_reason=reason,
+        )
+        # Written or not, the quote has its answer. If closing it fails, the
+        # reconciler re-runs this, and record_promise is idempotent.
+        fee_cover_store.close_quote(
+            conn, session.id, "uncovered" if row is None else "promised", offer_index=offer_index
+        )
+        return None if row is None else fee_cover_store.view_for_offer(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def _fee_cover_close_quote(session_id: str, outcome: str, offer_index: str | None = None) -> None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        fee_cover_store.close_quote(conn, session_id, outcome, offer_index=offer_index)
+    finally:
+        conn.close()
+
+
+def _fee_cover_record_quote(session: Any, bid_expires_at: int) -> None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        fee_cover_store.record_quote(
+            conn,
+            fee_cover_store.Quote(
+                session_id=session.id,
+                network=config.XRPL_NETWORK,
+                payload_uuid=str(session.payload_uuid),
+                txid=None,
+                nft_id=session.nft_id,
+                owner=session.owner,
+                bidder=session.wallet_address,
+                bid_drops=int(session.amount_drops),
+                bid_expires_at=int(bid_expires_at),
+                listing=dict(session.fee_cover_listing),
+                created_at=int(session.created_at),
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def _fee_cover_touch_quote(session_id: str, now: int) -> None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        fee_cover_store.touch_quote(conn, session_id, now)
+    finally:
+        conn.close()
+
+
+def _fee_cover_note_txid(session_id: str, txid: str) -> None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        fee_cover_store.set_quote_txid(conn, session_id, txid)
+    finally:
+        conn.close()
+
+
+def _fee_cover_pending_quotes(created_before: int) -> list[fee_cover_store.Quote]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        return fee_cover_store.pending_quotes(
+            conn,
+            config.XRPL_NETWORK,
+            created_before=created_before,
+            limit=_FEE_COVER_QUOTE_BATCH,
+        )
+    finally:
+        conn.close()
+
+
+async def _fee_cover_finalize(session: Any, bid_row: dict[str, Any], loop: Any) -> None:
+    """Write the promise for a bid that just validated. A failure leaves the
+    session's quote showing and its durable quote pending, so the sweep's
+    reconciler finishes the job. Never overwrite the quote with None on an
+    error: that would erase a cover the buyer was shown."""
+    try:
+        session.fee_cover = await loop.run_in_executor(
+            None, _fee_cover_record_promise, session, bid_row
+        )
+    except Exception:
+        logging.warning(
+            "fee cover: promise write for bid %s failed; its quote stays pending for the sweep",
+            session.id,
+            exc_info=True,
+        )
+
+
+def _fee_cover_view(offer_index: str) -> dict[str, Any] | None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        return fee_cover_store.view_for_offer(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def _fee_cover_views(offer_indexes: list[str]) -> dict[str, dict[str, Any]]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        views = {oi: fee_cover_store.view_for_offer(conn, oi) for oi in offer_indexes}
+    finally:
+        conn.close()
+    return {oi: v for oi, v in views.items() if v is not None}
+
+
+async def _fee_cover_settle_safe(offer_index: str) -> dict[str, Any] | None:
+    try:
+        return await fee_cover_settle.settle_promise(_fee_cover_deps(), offer_index)
+    except Exception:
+        logging.warning("fee cover: settling %s failed", offer_index, exc_info=True)
+        return None
+
+
+def _fee_cover_browse_state() -> tuple[int, int, int] | None:
+    """(coverage_bps, remaining_budget_drops, min_bid_drops) of the live
+    campaign, or None. Read on every browse, AFTER the 60 s market cache, so
+    a Stop is reflected immediately."""
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        campaign = fee_cover_store.live_campaign(conn, config.XRPL_NETWORK)
+        if campaign is None:
+            return None
+        remaining = campaign.budget_drops - fee_cover_store.committed_drops(conn, campaign.id)
+    finally:
+        conn.close()
+    return campaign.coverage_bps, remaining, campaign.min_bid_drops
+
+
+def _apply_fee_cover_estimate(out: dict[str, Any], state: tuple[int, int, int]) -> None:
+    """Public, unauthenticated estimate for a Buy-now at the clearing price.
+    Ignores per-wallet caps (the client copy says "limits apply")."""
+    coverage_bps, remaining, min_bid = state
+    clearing = out.get("clearing_drops")
+    rate = out.get("broker_rate")
+    if not isinstance(clearing, int) or rate is None or clearing < min_bid:
+        return
+    estimate = fee_cover.promise_drops(clearing, float(rate), coverage_bps)
+    if 0 < estimate <= remaining:
+        out["fee_cover_drops"] = estimate
+        out["fee_cover_xrp"] = market_ops.drops_to_xrp_str(str(estimate))
+        # Lets the client promise "you pay the ask" only at 100% coverage.
+        out["fee_cover_coverage_bps"] = coverage_bps
+
+
 def _get_bid_sync(network: str, offer_index: str) -> dict[str, Any] | None:
     conn = nft_index.init_db(nft_index.index_db_path(network))
     conn.row_factory = sqlite3.Row
@@ -3944,9 +4469,17 @@ async def handle_market_bids_mine(request):
             conn.close()
 
     mine, incoming = await asyncio.get_event_loop().run_in_executor(None, _compute)
+    views = (
+        await asyncio.get_event_loop().run_in_executor(
+            None, _fee_cover_safe, _fee_cover_views, [r["offer_index"] for r in mine]
+        )
+        or {}
+    )
     return web.json_response(
         {
-            "my_bids": [_serialize_bid(r) for r in mine],
+            "my_bids": [
+                {**_serialize_bid(r), "fee_cover": views.get(r["offer_index"])} for r in mine
+            ],
             "bids_on_my_nfts": [_serialize_bid(r) for r in incoming],
         }
     )
@@ -4034,6 +4567,30 @@ async def handle_market_bid_start(request):
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
     session.push = payload.get("push")
+    quote = await loop.run_in_executor(
+        None, _fee_cover_safe, _fee_cover_quote, nft_id, owner, wallet, amount_drops
+    )
+    if quote is not None:
+        session.fee_cover, session.fee_cover_listing = quote
+        if session.fee_cover is not None and session.fee_cover.get("state") == "quoted":
+            try:
+                await loop.run_in_executor(
+                    None,
+                    _fee_cover_record_quote,
+                    session,
+                    expiration + xrpl_ops.RIPPLE_EPOCH_OFFSET,
+                )
+            except Exception:
+                # A cover the buyer is shown must survive a failed promise
+                # write or a restart, which needs this row. Without it, don't
+                # show the cover at all.
+                logging.warning(
+                    "fee cover: recording the quote for bid %s failed; not offering cover",
+                    session.id,
+                    exc_info=True,
+                )
+                session.fee_cover = None
+                session.fee_cover_listing = None
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -5671,6 +6228,200 @@ async def handle_closet_ask_buy(request):
     return web.json_response(view)
 
 
+_fee_cover_attempts: dict[str, int] = {}
+
+
+def _write_fee_cover_giveup(row: dict[str, Any]) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) that the sweep stopped retrying an owed
+    fee-cover refund. Nothing is lost: the row stays `owed` for an operator."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"fee-cover-giveup-{row['accept_tx_hash']}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "accept_tx_hash": row["accept_tx_hash"],
+                    "offer_index": row["offer_index"],
+                    "bidder": row["bidder"],
+                    "refund_drops": row["refund_drops"],
+                    "attempts": _SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(f"failed to write fee cover giveup record: {traceback.format_exc()}")
+
+
+async def _advance_quoted_bid_sessions() -> None:
+    """Advance every in-memory bid session still awaiting its on-ledger
+    validation whose quote said "covered", so its promise is written even when
+    the client stopped polling. A session lost to a service restart before
+    validation stays uncovered (it only ever lived in memory)."""
+    loop = asyncio.get_event_loop()
+    for session in list(market_sessions.values()):
+        if (
+            getattr(session, "kind", None) != "bid"
+            or session.state in market_flow.TERMINAL_STATES
+            or (getattr(session, "fee_cover", None) or {}).get("state") != "quoted"
+        ):
+            continue
+        try:
+            await _advance_market_session("bid", session, loop)
+        except Exception:
+            logging.warning(
+                "fee cover sweep: advancing bid session %s failed", session.id, exc_info=True
+            )
+
+
+# A fresh quote belongs to its live session first; the reconciler only steps
+# in after this grace period.
+_FEE_COVER_QUOTE_GRACE_SECONDS = 60
+# Margin past the bid's own on-ledger expiry before an unresolved quote is
+# given up on (listener/archive lag past the expiry).
+_FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS = 86_400
+_FEE_COVER_QUOTE_BATCH = 25
+
+
+def _fee_cover_quote_abandon_at(quote: fee_cover_store.Quote) -> int | None:
+    """When an UNRESOLVED quote is closed `abandoned`: the Expiration its bid
+    was actually signed with, plus a margin. The bid can fill until then and
+    the quote is its only durable recovery record. Stored per quote, never
+    re-derived from MARKET_BID_TTL_SECONDS, which a later deploy may lower.
+    None for a quote that predates the column: with no knowable expiry, age
+    alone never abandons it."""
+    if quote.bid_expires_at is None:
+        return None
+    return quote.bid_expires_at + _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS
+
+
+async def _reconcile_fee_cover_quotes() -> None:
+    """Finish every covered quote whose live session can no longer do it:
+    the session is gone (service restart) or already terminal (a failed
+    promise write, or a tx lookup that gave up). Rebuilds the BidSession
+    from the durable quote and re-runs the same on-ledger checks as the live
+    path. record_promise is idempotent, so racing the poll path can't
+    double-promise."""
+    loop = asyncio.get_event_loop()
+    now = int(time.time())
+    quotes = await loop.run_in_executor(
+        None, _fee_cover_pending_quotes, now - _FEE_COVER_QUOTE_GRACE_SECONDS
+    )
+    for quote in quotes:
+        # Every selected quote rotates to the back of the next selection,
+        # skipped or attempted, so the batch can't pin on the same rows.
+        try:
+            await loop.run_in_executor(None, _fee_cover_touch_quote, quote.session_id, now)
+        except Exception:
+            logging.warning("fee cover: touching quote %s failed", quote.session_id, exc_info=True)
+        live = market_sessions.get(quote.session_id)
+        if live is not None and live.state not in market_flow.TERMINAL_STATES:
+            continue  # its poll, or _advance_quoted_bid_sessions, owns it
+        try:
+            resolved = await _reconcile_fee_cover_quote(quote, live, loop)
+        except Exception:
+            logging.warning(
+                "fee cover: reconciling quote %s failed; retrying next sweep",
+                quote.session_id,
+                exc_info=True,
+            )
+            resolved = False
+        # Age only ever ends a quote the ledger could NOT resolve this pass: a
+        # quote whose bid has validated is promised however old it is.
+        abandon_at = _fee_cover_quote_abandon_at(quote)
+        if not resolved and abandon_at is not None and now > abandon_at:
+            logging.warning(
+                "fee cover: quote %s (bid by %s on %s) unresolved past its bid's expiry; abandoned",
+                quote.session_id,
+                quote.bidder,
+                quote.nft_id,
+            )
+            try:
+                await loop.run_in_executor(
+                    None, _fee_cover_close_quote, quote.session_id, "abandoned"
+                )
+            except Exception:
+                logging.warning(
+                    "fee cover: abandoning quote %s failed", quote.session_id, exc_info=True
+                )
+
+
+async def _reconcile_fee_cover_quote(quote: fee_cover_store.Quote, live: Any, loop: Any) -> bool:
+    """One attempt to resolve a pending quote. True once it has an outcome
+    (closed, or its promise written); False when it's still unresolved and
+    should be retried."""
+    txid = quote.txid
+    if txid is None:
+        status = await xumm_ops.get_payload_status(quote.payload_uuid)
+        if status is None:
+            return False  # provider unreachable: retry
+        if status.get("signed"):
+            # Same fail-closed signer check as advance_bid_session.
+            if status.get("account") != quote.bidder:
+                await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "failed")
+                return True
+            txid = status.get("txid")
+            if not txid:
+                return False
+            await loop.run_in_executor(None, _fee_cover_note_txid, quote.session_id, txid)
+        elif status.get("expired"):
+            await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "expired")
+            return True
+        else:
+            return False  # not signed yet
+    session = market_flow.BidSession(
+        discord_id="",
+        wallet_address=quote.bidder,
+        nft_id=quote.nft_id,
+        owner=quote.owner,
+        amount_drops=quote.bid_drops,
+    )
+    session.id = quote.session_id
+    session.payload_uuid = quote.payload_uuid
+    session.fee_cover_listing = quote.listing
+    session.txid = txid
+    session.state = market_flow.PENDING
+    bid_row = await market_flow.advance_bid_session(session)
+    if bid_row is None:
+        if session.state == market_flow.FAILED:
+            await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "failed")
+            return True
+        return False  # not validated yet, or the lookup failed: retry next sweep
+    try:
+        await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
+    except Exception:
+        # The listener indexes the bid on its own; the promise doesn't need it.
+        logging.warning(
+            "fee cover: indexing reconciled bid %s failed", bid_row["offer_index"], exc_info=True
+        )
+    view = await loop.run_in_executor(None, _fee_cover_record_promise, session, bid_row)
+    if live is not None:
+        live.fee_cover = view
+    return True
+
+
+async def sweep_fee_cover() -> None:
+    """Advance quoted bid sessions, finish quotes their sessions can't, settle
+    filled promises, release dead ones, pay owed refunds, recover submitted
+    ones (spec §Fill detection and promise release)."""
+    await _advance_quoted_bid_sessions()
+    try:
+        await _reconcile_fee_cover_quotes()
+    except Exception:
+        logging.warning("fee cover sweep: quote reconciliation failed", exc_info=True)
+    report = await fee_cover_settle.sweep_once(
+        _fee_cover_deps(),
+        attempts=_fee_cover_attempts,
+        max_attempts=_SWEEP_MAX_ATTEMPTS,
+        on_giveup=_write_fee_cover_giveup,
+    )
+    if report.settled or report.released or report.paid or report.recovered:
+        logging.info("fee cover sweep: %s", report)
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         if config.ECONOMY_ENABLED:
@@ -5697,6 +6448,10 @@ async def _settlement_sweep_loop() -> None:
             await sweep_sign_requests()
         except Exception:
             logging.error(f"sign request sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_fee_cover()
+        except Exception:
+            logging.error(f"fee cover sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -5730,16 +6485,49 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
     app["brix_recovery_task"] = asyncio.get_event_loop().create_task(_run())
 
 
+async def _start_fee_cover_recovery(app: web.Application) -> None:
+    """aiohttp on_startup hook: resolve fee-cover refunds left `submitted` by a
+    crash. Fire-and-forget and fully guarded — never delays startup, and reads
+    the ledger only when a submitted row exists."""
+
+    async def _run() -> None:
+        try:
+            outcomes = await fee_cover_settle.recover_refunds(_fee_cover_deps())
+            if outcomes:
+                logging.info(
+                    "fee cover recovery resolved %s refund(s): %s", len(outcomes), outcomes
+                )
+        except Exception:
+            logging.warning("fee cover recovery failed at startup", exc_info=True)
+
+    app["fee_cover_recovery_task"] = asyncio.get_event_loop().create_task(_run())
+
+
+async def _stop_startup_recovery(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: retire the fire-and-forget startup recovery
+    tasks. Without this a recovery still inside an account_tx call or a DB
+    write runs on after aiohttp has torn its session down, or is abandoned
+    when the loop closes. Cancelling is safe for both: neither submits a
+    payment, and a row left `submitted` is re-resolved by the next startup
+    recovery or sweep pass."""
+    for key in ("fee_cover_recovery_task", "brix_recovery_task"):
+        task = app.get(key)
+        if task is None:
+            continue
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def _start_settlement_sweep(app: web.Application) -> None:
     """aiohttp on_startup hook: schedule the settlement sweep as a background
     task for the lifetime of the app.
 
-    Started when the trait economy has listings to settle OR WalletConnect is
-    configured — the loop also retires lapsed sign requests (#447), which is
-    independent of the economy.
+    Always started: the fee-cover sweep must settle open promises and pay owed
+    refunds on every stack, even one with the economy and WalletConnect off.
+    Each sweep inside the loop keeps its own gate, and all are cheap no-ops
+    when they have no rows.
     """
-    if not (config.ECONOMY_ENABLED or config.wc_enabled()):
-        return
     app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
 
 
@@ -10410,6 +11198,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/admin/sponsored-mint/start", handle_sponsored_mint_start)
     app.router.add_post("/api/admin/sponsored-mint/stop", handle_sponsored_mint_stop)
     app.router.add_get("/api/admin/sponsored-mint/status", handle_sponsored_mint_status)
+    app.router.add_get("/api/admin/fee-cover/status", handle_fee_cover_status)
+    app.router.add_post("/api/admin/fee-cover/start", handle_fee_cover_start)
+    app.router.add_post("/api/admin/fee-cover/update", handle_fee_cover_update)
+    app.router.add_post("/api/admin/fee-cover/stop", handle_fee_cover_stop)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
@@ -10417,7 +11209,9 @@ def create_app() -> web.Application:
     app.router.add_static("/", CLIENT_DIR)
     app.on_startup.append(_start_settlement_sweep)
     app.on_startup.append(_start_brix_claim_recovery)
+    app.on_startup.append(_start_fee_cover_recovery)
     app.on_cleanup.append(_stop_settlement_sweep)
+    app.on_cleanup.append(_stop_startup_recovery)
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)
     app.on_cleanup.append(_stop_sponsored_burn_worker)

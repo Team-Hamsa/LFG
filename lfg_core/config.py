@@ -403,6 +403,9 @@ BRIX_DISTRIBUTOR_SEED = os.getenv("BRIX_DISTRIBUTOR_SEED")
 # guarantees the transaction can never validate, so an absent tx is proof of
 # failure rather than a guess.
 BRIX_CLAIM_LEDGER_MARGIN = int(os.getenv("BRIX_CLAIM_LEDGER_MARGIN", "40"))
+# Ledgers of LastLedgerSequence headroom on a fee-cover refund Payment — what
+# makes an indeterminate refund decidable by recovery.
+FEE_COVER_LEDGER_MARGIN = int(os.getenv("FEE_COVER_LEDGER_MARGIN", "40"))
 # AMM account for LP token snapshots (testnet rLUnD5mskBnHfwFxCjakDA3RVgK584XQXG)
 BRIX_AMM_ACCOUNT = os.getenv("BRIX_AMM_ACCOUNT")
 NFT_SCHEMA_URL = os.getenv(

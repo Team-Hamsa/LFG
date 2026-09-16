@@ -22,6 +22,7 @@ module.exports = {
     // pm2 cron_restart fires in HOST-LOCAL time (no timezone option); this box runs Etc/UTC
     // (timedatectl, verified 2026-08-16) — keep the host on UTC or adjust these schedules.
     { name: "stg-market-sweep", cwd: CWD, script: "scripts/backfill_market.py", interpreter: PY, args: ["--network", "testnet", "--report"], cron_restart: "30 3 * * *", autorestart: false },
+    { name: "stg-fee-cover-audit", cwd: CWD, script: "scripts/fee_cover_report.py", interpreter: PY, args: ["--network", "testnet", "--audit"], cron_restart: "40 3 * * *", autorestart: false },
     { name: "stg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["staging"] },
   ],
 };

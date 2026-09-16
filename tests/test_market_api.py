@@ -130,11 +130,21 @@ def onchain_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ONCHAIN_DB_PATH", onchain_path)
     monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
+    # Fee cover reads its campaign from the app DB on browse/bid: keep it in
+    # tmp so a market test never opens a working-tree app DB.
+    fee_cover_db = str(tmp_path / "fee_cover_app.db")
+    monkeypatch.setattr(server, "_fee_cover_db", lambda: fee_cover_db)
     server._MARKET_CACHE.clear()
     server.market_sessions.clear()
     yield onchain_path
     server._MARKET_CACHE.clear()
     server.market_sessions.clear()
+
+
+def test_onchain_env_isolates_the_fee_cover_app_db(onchain_env, tmp_path):
+    """Browse/bid handlers read the fee-cover campaign from the app DB; a
+    market test must never open (or create tables in) a working-tree one."""
+    assert server._fee_cover_db().startswith(str(tmp_path))
 
 
 @pytest.fixture

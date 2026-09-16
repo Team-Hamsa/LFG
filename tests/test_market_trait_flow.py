@@ -943,14 +943,18 @@ def test_start_settlement_sweep_schedules_task_when_economy_enabled(monkeypatch)
     _run(go())
 
 
-def test_start_settlement_sweep_skipped_when_economy_disabled(monkeypatch):
+def test_start_settlement_sweep_runs_even_when_economy_disabled(monkeypatch):
+    # Fee cover (spec 2026-09-14): open promises must settle on any stack, so
+    # the loop always starts; each sweep inside keeps its own gate.
     monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
 
     async def go():
         app: dict = {}
         await server._start_settlement_sweep(app)
-        assert "settlement_sweep_task" not in app
-        await server._stop_settlement_sweep(app)  # no-op, must not raise
+        task = app.get("settlement_sweep_task")
+        assert isinstance(task, asyncio.Task)
+        await server._stop_settlement_sweep(app)
+        assert task.cancelled() or task.done()
 
     _run(go())
 
