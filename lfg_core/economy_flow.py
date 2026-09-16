@@ -148,10 +148,12 @@ import logging
 import os
 import traceback
 import uuid
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as bt
 from lfg_core import config, db_helpers, nft_index, owner_lock, xrpl_ops
 from lfg_core import economy_store as es
@@ -336,6 +338,22 @@ def _owner_contents(conn: Any, owner: str) -> dict[tuple[str, str], int]:
     Bodies are Task 2+ loose assets too — they live in `closet_assets` as
     ("Body", value) rows now, not the separate `closet_bodies` table."""
     return {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
+
+
+def _listed_error(
+    conn: Any,
+    owner: str,
+    need: Mapping[tuple[str, str], int],
+    assets: dict[tuple[str, str], int],
+) -> str | None:
+    """#443: a Closet Market ask (or an in-flight holder fill) encumbers a
+    unit without decrementing its count. Refuse to consume a unit the owner
+    has promised to a buyer."""
+    enc = cms.encumbrance(conn, owner)
+    for (slot, value), qty in need.items():
+        if assets.get((slot, value), 0) - enc.get((slot, value), 0) < qty:
+            return f"'{value}' ({slot}) is listed in your Closet market — cancel that order first"
+    return None
 
 
 def _assets_to_list(assets: dict[tuple[str, str], int]) -> list[bt.Asset]:
@@ -890,6 +908,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             session.fail(f"cannot assemble: {chk.reason}")
             return
 
+        need = Counter((s, session.chosen[s]) for s in te.NON_BODY_SLOTS)
+        need[("Body", session.body_value)] += 1
+        listed = _listed_error(conn, owner, need, assets)
+        if listed:
+            session.fail(f"cannot assemble: {listed}")
+            return
+
         err = await _require_active_closet(deps, owner)
         if err:
             session.fail(err)
@@ -1272,6 +1297,11 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             session.fail("cannot equip: no changes to apply")
             return
         assets = _owner_contents(conn, owner)
+        listed = _listed_error(conn, owner, Counter(session.changes), assets)
+        if listed:
+            session.resolution = "reverted"
+            session.fail(f"cannot equip: {listed}")
+            return
         # Precheck every change, accumulating each (-incoming, +displaced) delta
         # into ONE asset dict for the single Closet sync below. Assets are keyed
         # (slot, value) and a slot may appear at most once, so the changes are
@@ -1506,6 +1536,11 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         assets = _owner_contents(conn, owner)
         if assets.get((slot, value), 0) < 1:
             session.fail(f"no loose '{value}' {slot} in your Closet to extract")
+            return
+
+        listed = _listed_error(conn, owner, {(slot, value): 1}, assets)
+        if listed:
+            session.fail(listed)
             return
 
         image_url = await deps.trait_compose_fn(slot, value)  # type: ignore[misc]

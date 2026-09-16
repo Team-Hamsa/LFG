@@ -85,7 +85,7 @@ def test_shop_tab_wired_into_market_tab_switch():
     src = _read("app.js")
     assert "function switchMarketTab(tab)" in src
     switch_start = src.index("function switchMarketTab(tab)")
-    switch_body = src[switch_start : switch_start + 500]
+    switch_body = src[switch_start : switch_start + 700]
     assert "market-shop" in switch_body
     assert "loadShopCatalog()" in switch_body
 

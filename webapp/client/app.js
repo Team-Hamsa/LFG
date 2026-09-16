@@ -10,6 +10,8 @@
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
 import * as marketPure from './market_pure.js?v=29';
+// Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
+import * as closetPure from './closet_market_pure.js?v=1';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=25';
@@ -4784,6 +4786,8 @@ const MARKET_STATUS_PATH = {
   bid: (id) => `/api/market/bid/${id}`,
   bid_accept: (id) => `/api/market/bid/accept/${id}`,
   trait_list: (id) => `/api/market/trait/list/${id}`,
+  closet_bid: (id) => `/api/closet/bid/${id}`,
+  closet_fill: (id) => `/api/closet/fill/${id}`,
 };
 
 const marketState = { tab: 'browse', kind: 'character', offset: 0, sortTouched: false };
@@ -4816,13 +4820,17 @@ async function openMarket() {
 
 function switchMarketTab(tab) {
   if (tab === 'shop' && !shopEnabled) tab = 'browse';
+  if (tab === 'book' && !closetMarketEnabled) tab = 'browse';
   marketState.tab = tab;
   highlightTabs('market-tabs', 'tab', tab);
   el('market-browse').hidden = tab !== 'browse';
   el('market-mine').hidden = tab !== 'mine';
   el('market-shop').hidden = tab !== 'shop';
+  const book = el('market-book');
+  if (book) book.hidden = tab !== 'book';
   if (tab === 'browse') loadMarketBrowse();
   else if (tab === 'mine') loadMarketMine();
+  else if (tab === 'book') loadClosetBook().catch((e) => showError(e.message));
   else loadShopCatalog();
 }
 
@@ -4886,6 +4894,13 @@ function renderMarketGrid(rows, { append = false } = {}) {
       cnt.textContent = `×${vm.count}`;
       cnt.title = `${vm.count} offers`;
       card.appendChild(cnt);
+    }
+    const bidBadge = closetMarketEnabled ? closetPure.bookBadge(row.book) : null;
+    if (bidBadge) {
+      const b = document.createElement('span');
+      b.className = 'market-card-bid';
+      b.textContent = bidBadge;
+      card.appendChild(b);
     }
     // #298: grid tiles stay static stills; the badge flags art that plays as
     // video in the listing-detail overlay (same marker as the swap grid).
@@ -5058,14 +5073,23 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   bidsLine.hidden = true;
   bidForm.hidden = true;
   el('listing-bid-price').value = ''; // never carry a price across listings
-  const canBid = vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller);
+  // #496: with the Closet market on, a trait card takes a (slot, value) BRIX
+  // bid — escrowed, fillable by any holder — instead of the character-only
+  // native NFTokenOffer bid.
+  const traitBid = closetMarketEnabled && vm.kind === 'trait';
+  const canBid = traitBid || (vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller));
   bidBtn.hidden = !canBid;
+  el('listing-bid-price').placeholder = traitBid ? 'Bid in BRIX' : 'Bid in XRP';
+  if (traitBid && closetPure.bookLine(row.book)) {
+    bidsLine.textContent = closetPure.bookLine(row.book);
+    bidsLine.hidden = false;
+  }
   bidBtn.onclick = () => { bidForm.hidden = !bidForm.hidden; if (!bidForm.hidden) el('listing-bid-price').focus(); };
   el('listing-bid-confirm').onclick = () => {
     const price = el('listing-bid-price').value.trim();
-    const checked = marketPure.validatePrice(price);
+    const checked = traitBid ? marketPure.validateBrixPrice(price) : marketPure.validatePrice(price);
     if (!checked.ok) { showError(checked.error); return; }
-    placeBid(row, price).catch((e) => showError(e.message));
+    (traitBid ? placeClosetBid(vm.slot, vm.value, price) : placeBid(row, price)).catch((e) => showError(e.message));
   };
   el('listing-overlay').hidden = false;
   el('listing-detail-close').focus();
@@ -5233,8 +5257,10 @@ function renderMineGroups(data) {
 
   const closetEntries = data.closet_assets.map((a) => ({
     imgSrc: mineTraitImgSrc(a.slot, a.value, a.image_url),
-    label: `${a.slot}: ${a.value} ×${a.count}`,
-    payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: true },
+    label: closetPure.closetAssetLabel(a),
+    // #443: with the Closet market on, Sell posts a free off-ledger ask; the
+    // Extract -> List wizard stays reachable through Unlisted traits.
+    payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: !closetMarketEnabled, closetAsk: closetMarketEnabled },
   }));
   renderChipList(el('mine-closet'), el('mine-closet-empty'), closetEntries, 'Sell', openListForm);
 }
@@ -5267,6 +5293,7 @@ async function loadMarketMine() {
   } catch (e) {
     renderBidGroups({});
   }
+  loadClosetMine().catch((e) => showError(e.message));
 }
 
 // --- marketFlow: the single start -> QR -> poll driver (spec §Q8), reused
@@ -5321,6 +5348,8 @@ const MARKET_RESUME_RENDER = {
   bid: () => marketBidRender,
   bid_accept: () => marketBidAcceptRender,
   trait_list: () => marketTraitListRender,
+  closet_bid: () => closetBidRender,
+  closet_fill: () => closetFillRender,
 };
 
 // Re-attach to a running marketplace op (#221): render its real state
@@ -5575,6 +5604,10 @@ function applyShopFilters() {
 // so a slow or failed /api/config never routes users to a surface the server
 // will refuse to serve. Only an explicit shop_enabled:true reveals it.
 let shopEnabled = false;
+let closetMarketEnabled = false; // /api/config closet_market_enabled (fails closed)
+let closetMarketFeeBps = 0;
+let closetBidTtlDays = 7;
+let closetKeysCache = null;
 
 function applyShopVisibility(cfg) {
   shopEnabled = cfg.shop_enabled === true;
@@ -5584,6 +5617,173 @@ function applyShopVisibility(cfg) {
     const section = el('market-shop');
     if (section) section.hidden = true;
   }
+}
+
+function applyClosetMarketVisibility(cfg) {
+  closetMarketEnabled = cfg.closet_market_enabled === true;
+  closetMarketFeeBps = Number(cfg.closet_market_fee_bps || 0);
+  closetBidTtlDays = Math.round(Number(cfg.closet_bid_ttl_seconds || 604800) / 86400);
+  const chip = document.querySelector('#market-tabs [data-tab="book"]');
+  if (chip) chip.hidden = !closetMarketEnabled;
+  // Null-guarded: a cached older index.html may lack these ids (PR #502 C5).
+  for (const id of ['mine-closet-orders-section', 'mine-closet-incoming-section', 'mine-closet-fills-section']) {
+    const node = el(id);
+    if (node) node.hidden = !closetMarketEnabled;
+  }
+  const book = el('market-book');
+  if (!closetMarketEnabled && book) book.hidden = true;
+}
+
+function closetBidRender(s) {
+  if (s.state === 'awaiting_signature') {
+    return { title: '🏷️ Place bid', text: signText(s.push, 'Scan to lock your bid in escrow with Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+  }
+  if (s.state === 'pending') {
+    const waiting = s.order_state === 'cancelling' ? 'Returning your BRIX…'
+      : s.order_state === 'matched' ? `Your bid matched — settling ${s.slot}: ${s.value}…`
+      : 'Signature received — verifying your escrow on-ledger…';
+    return { title: '⏳ Confirming', text: waiting, spinner: true };
+  }
+  if (s.state === 'done') {
+    return s.order_state === 'open'
+      ? { title: '🎉 Bid live', text: `${s.price_brix} BRIX is locked in escrow for ${s.slot}: ${s.value}. Any holder can fill it; cancel any time from Mine.`, done: true }
+      : { title: '🎉 Bid filled', text: 'Your bid was filled — the trait is in your Closet.', done: true, celebrate: true };
+  }
+  return { title: '❌ Bid not placed', text: s.error || 'Something went wrong.', done: true };
+}
+
+function closetFillRender(s) {
+  if (s.state === 'awaiting_signature') {
+    const via = s.pay_with === 'XRP' ? ` (about ${s.price_xrp_quote} XRP)` : '';
+    return { title: '🛒 Buy trait', text: signText(s.push, `Scan to pay ${s.price_brix} BRIX${via} in Xaman.`), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+  }
+  if (s.state === 'pending') {
+    return { title: '⏳ Settling', text: `${closetPure.fillStateText(s.fill_state)}…`, spinner: true };
+  }
+  if (s.state === 'done') {
+    return s.role === 'buyer'
+      ? { title: '🎉 Trait is yours', text: `${s.slot}: ${s.value} is in your Closet.`, done: true, celebrate: true }
+      : { title: '🎉 Sold', text: `${s.slot}: ${s.value} sold — the BRIX is on its way to your wallet.`, done: true, celebrate: true };
+  }
+  return { title: s.fill_state === 'refunded' ? '↩️ Refunded' : '❌ Not completed', text: s.error || 'Something went wrong.', done: true };
+}
+
+async function loadClosetBook() {
+  const data = await api('/api/closet/book');
+  const rows = data.rows.map(closetPure.mapBookRow);
+  const chip = (r, label) => ({ imgSrc: mineTraitImgSrc(r.slot, r.value, null), label: `${r.title} — ${label}`, payload: r });
+  renderChipList(el('closet-book-asks'), el('closet-book-asks-empty'),
+    rows.filter((r) => r.bestAsk != null).map((r) => chip(r, r.askLabel)), 'Buy', buyBestClosetAsk);
+  renderChipList(el('closet-book-bids'), el('closet-book-bids-empty'),
+    rows.filter((r) => r.bestBid != null).map((r) => chip(r, r.bidLabel)), 'Bid', (r) => openClosetBidForm(r.slot, r.value));
+}
+
+async function buyBestClosetAsk(r) {
+  const levels = await api(`/api/closet/book?slot=${encodeURIComponent(r.slot)}&value=${encodeURIComponent(r.value)}`);
+  const ask = closetPure.bestAskFor(levels, me && me.wallet);
+  if (!ask) { showError('No listing you can buy right now.'); return; }
+  const ok = await confirmDialog({ title: `Buy ${r.title}?`, text: `${ask.price_brix} BRIX — it goes straight into your Closet.`, confirmLabel: 'Buy' });
+  if (!ok) return;
+  await marketFlow('closet_fill', `/api/closet/ask/${ask.id}/buy`, {}, closetFillRender);
+}
+
+function fillSelect(selectEl, options, selected) {
+  selectEl.replaceChildren(...options.map((o) => {
+    const opt = document.createElement('option');
+    opt.value = o;
+    opt.textContent = o;
+    opt.selected = o === selected;
+    return opt;
+  }));
+}
+
+async function openClosetBidForm(slot = null, value = null) {
+  if (!closetKeysCache) closetKeysCache = (await api('/api/closet/keys')).keys;
+  const slots = closetPure.keySlots(closetKeysCache);
+  fillSelect(el('closet-bid-slot'), slots, slot || slots[0]);
+  const refreshValues = (preferred) => fillSelect(
+    el('closet-bid-value'), closetPure.keyValues(closetKeysCache, el('closet-bid-slot').value), preferred,
+  );
+  refreshValues(value);
+  el('closet-bid-slot').onchange = () => refreshValues(null);
+  el('closet-bid-price').value = '';
+  el('closet-bid-note').textContent = closetPure.bidDisclosure(null, closetBidTtlDays);
+  showPanel('closet-bid-form-panel');
+}
+
+async function submitClosetBidForm() {
+  const price = el('closet-bid-price').value.trim();
+  const check = marketPure.validateBrixPrice(price);
+  if (!check.ok) { showError(check.error); return; }
+  const slot = el('closet-bid-slot').value;
+  const value = el('closet-bid-value').value;
+  const ok = await confirmDialog({ title: `Bid ${price} BRIX for ${slot}: ${value}?`, text: closetPure.bidDisclosure(price, closetBidTtlDays), confirmLabel: 'Lock bid' });
+  if (!ok) return;
+  await placeClosetBid(slot, value, price);
+}
+
+async function placeClosetBid(slot, value, price) {
+  closeListingDetail();
+  await marketFlow('closet_bid', '/api/closet/bid', { slot, value, price_brix: price }, closetBidRender);
+}
+
+async function postClosetAsk(item, price) {
+  const res = await api('/api/closet/ask', { method: 'POST', body: JSON.stringify({ slot: item.slot, value: item.value, price_brix: price }) });
+  if (res.fill) {
+    showFlow(closetFillRender(res.fill));
+    if (!marketPure.isMarketTerminal(res.fill.state)) pollMarketFlow('closet_fill', res.fill.id, closetFillRender);
+    return;
+  }
+  showPanel('market-panel');
+  switchMarketTab('mine');
+}
+
+async function loadClosetMine() {
+  if (!closetMarketEnabled) return;
+  const data = await api('/api/closet/orders/mine');
+  const img = (x) => mineTraitImgSrc(x.slot, x.value, null);
+  renderChipList(el('mine-closet-orders'), el('mine-closet-orders-empty'),
+    data.orders.map((o) => ({ imgSrc: img(o), label: closetPure.orderChipLabel(o), payload: o })), 'Cancel', cancelClosetOrder);
+  renderChipList(el('mine-closet-incoming'), el('mine-closet-incoming-empty'),
+    data.bids_on_my_traits.map((b) => ({ imgSrc: img(b), label: closetPure.holdingLabel(b), payload: b })), 'Fill', fillClosetBid);
+  renderChipList(el('mine-closet-fills'), el('mine-closet-fills-empty'),
+    data.fills.map((f) => ({ imgSrc: img(f), label: closetPure.fillChipLabel(f, me && me.wallet), payload: f })), 'View', viewClosetFill);
+}
+
+async function cancelClosetOrder(order) {
+  const isBid = order.side === 'bid';
+  const ok = await confirmDialog({
+    title: isBid ? 'Cancel this bid?' : 'Unlist this trait?',
+    text: isBid ? 'Your escrowed BRIX goes back to your wallet.' : 'It is free to use again right away.',
+    confirmLabel: isBid ? 'Cancel bid' : 'Unlist',
+  });
+  if (!ok) return;
+  await api(`/api/closet/${order.side}/${order.id}`, { method: 'DELETE' });
+  await loadMarketMine();
+}
+
+async function fillClosetBid(entry) {
+  const action = closetPure.holdingFillAction(entry);
+  const ok = await confirmDialog({
+    title: `Sell ${entry.slot}: ${entry.value} for ${entry.price_brix} BRIX?`,
+    text: closetPure.fillDisclosure(entry.price_brix, closetMarketFeeBps, action.needsDeposit),
+    confirmLabel: action.label,
+  });
+  if (!ok) return;
+  if (action.needsDeposit) {
+    status('Depositing trait…');
+    const res = await api('/api/deposit', { method: 'POST', body: JSON.stringify({ nft_id: action.nftId }) });
+    const final = await pollEconomyOp('deposit', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'deposit failed');
+  }
+  await marketFlow('closet_fill', `/api/closet/bid/${entry.id}/fill`, {}, closetFillRender);
+}
+
+async function viewClosetFill(fill) {
+  const s = await api(`/api/closet/fill/${fill.id}`);
+  showFlow(closetFillRender(s));
+  if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow('closet_fill', s.id, closetFillRender);
 }
 
 async function loadShopCatalog() {
@@ -5895,16 +6095,22 @@ function listFormIsTrait(item) {
 function openListForm(item) {
   marketPendingItem = item;
   showPanel('market-list-form-panel');
-  el('market-list-form-title').textContent = item.wizard ? 'Sell a trait' : 'List for sale';
+  el('market-list-form-title').textContent = item.closetAsk ? 'List in the Closet market' : item.wizard ? 'Sell a trait' : 'List for sale';
   el('market-list-form-sub').textContent = item.label;
   el('market-list-price').value = '';
-  el('market-list-price').placeholder = listFormIsTrait(item) ? 'Price in BRIX' : 'Price in XRP';
+  el('market-list-price').placeholder = item.closetAsk || listFormIsTrait(item) ? 'Price in BRIX' : 'Price in XRP';
   el('market-list-royalty').hidden = true;
 }
 
 function updateListFormRoyaltyPreview() {
   const out = el('market-list-royalty');
   const raw = el('market-list-price').value.trim();
+  if (marketPendingItem && marketPendingItem.closetAsk) {
+    const check = marketPure.validateBrixPrice(raw);
+    out.hidden = !check.ok;
+    if (check.ok) out.textContent = closetPure.askDisclosure(raw, closetMarketFeeBps);
+    return;
+  }
   const isTrait = listFormIsTrait(marketPendingItem);
   const check = isTrait ? marketPure.validateBrixPrice(raw) : marketPure.validatePrice(raw);
   if (check.ok) {
@@ -5921,6 +6127,14 @@ async function submitListForm() {
   const item = marketPendingItem;
   if (!item) return;
   const price = el('market-list-price').value.trim();
+  if (item.closetAsk) {
+    const check = marketPure.validateBrixPrice(price);
+    if (!check.ok) { showError(check.error); return; }
+    const ok = await confirmDialog({ title: 'List this trait?', text: closetPure.askDisclosure(price, closetMarketFeeBps), confirmLabel: 'List it' });
+    if (!ok) return;
+    await postClosetAsk(item, price);
+    return;
+  }
   const isTrait = listFormIsTrait(item);
   const check = isTrait ? marketPure.validateBrixPrice(price) : marketPure.validatePrice(price);
   if (!check.ok) { showError(check.error); return; }
@@ -6078,6 +6292,21 @@ async function main() {
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
   el('market-list-confirm-btn').onclick = submitListForm;
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');
+  // Null-guarded: a missing id (cached older index.html) must not abort main() (PR #502 C5).
+  const closetBidNew = el('closet-bid-new-btn');
+  if (closetBidNew) closetBidNew.onclick = () => openClosetBidForm().catch((e) => showError(e.message));
+  const closetBidConfirm = el('closet-bid-confirm-btn');
+  if (closetBidConfirm) closetBidConfirm.onclick = () => submitClosetBidForm().catch((e) => showError(e.message));
+  const closetBidCancel = el('closet-bid-cancel-btn');
+  if (closetBidCancel) closetBidCancel.onclick = () => showPanel('market-panel');
+  const closetBidPrice = el('closet-bid-price');
+  const closetBidNote = el('closet-bid-note');
+  if (closetBidPrice) {
+    closetBidPrice.oninput = () => {
+      const raw = closetBidPrice.value.trim();
+      if (closetBidNote) closetBidNote.textContent = closetPure.bidDisclosure(marketPure.validateBrixPrice(raw).ok ? raw : null, closetBidTtlDays);
+    };
+  }
 
   // Dev live-reload: runs even in degraded mode (no frame_id).
   try {
@@ -6091,6 +6320,7 @@ async function main() {
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
     setupBulkStepper(cfg);
     applyShopVisibility(cfg);
+    applyClosetMarketVisibility(cfg);
     applyShareConfig(cfg);
     applyWcVisibility();
     // Dev reload is same-origin only — never against a cross-origin API base.

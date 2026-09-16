@@ -35,12 +35,16 @@ from xrpl.models.requests import (
     AccountTx,
     AMMInfo,
     Ledger,
+    LedgerEntry,
     NFTBuyOffers,
     NFTSellOffers,
     Subscribe,
     Tx,
 )
+from xrpl.models.requests.ledger_entry import Escrow as LedgerEntryEscrow
 from xrpl.models.transactions import (
+    EscrowCancel,
+    EscrowFinish,
     Memo,
     NFTokenBurn,
     NFTokenCancelOffer,
@@ -1718,6 +1722,315 @@ async def _current_validated_ledger_index(client: JsonRpcClient) -> int | None:
         ledger = result.get("ledger")
         raw_index = ledger.get("ledger_index") if isinstance(ledger, dict) else None
     return _ledger_index(raw_index)
+
+
+# --- Closet Market (#443) ------------------------------------------------------
+#
+# Backend txs from the app wallet (config.SIGNING_ACCOUNT) with a pinned
+# LastLedgerSequence and a per-phase `lfg:closet_<phase>:<id>` memo. The
+# memo makes a tx findable; the pinned LLS makes absence decidable. The same
+# rule as BRIX claims: "unknown" is never a failure until the validated
+# ledger has passed last_ledger_seq and find_app_txs_by_memo finds nothing.
+
+
+@dataclass(frozen=True)
+class TxOutcome:
+    state: str  # "confirmed" | "failed" | "unknown"
+    tx_hash: str | None
+    last_ledger_seq: int | None
+
+
+class TxNotSubmitted(RuntimeError):
+    """Nothing reached the ledger (the validated index could not be read)."""
+
+
+def _closet_memos(action: str, tag: str) -> list[Memo]:
+    return [
+        *memos.build_memo_models(memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, action),
+        Memo(memo_data=tag.encode().hex().upper()),
+    ]
+
+
+async def _submit_app_tx(
+    build: Callable[[int], Transaction], label: str, *, max_last_ledger_seq: int | None = None
+) -> TxOutcome:
+    client = rpc_client()
+    current = await _current_validated_ledger_index(client)
+    if current is None:
+        raise TxNotSubmitted(f"{label}: could not read the validated ledger index")
+    last_ledger_seq = current + config.CLOSET_MARKET_LEDGER_MARGIN
+    if max_last_ledger_seq is not None:
+        # Never exceed a deadline the caller already durably recorded (write-ahead
+        # intent) before this submit — same rationale as send_brix_claim's clamp.
+        last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
+    tx = build(last_ledger_seq)
+    wallet = Wallet.from_seed(config.SEED)
+    try:
+        result = await _submit_and_confirm(tx, wallet, client, label)
+    except IndeterminateResultError:
+        return TxOutcome("unknown", None, last_ledger_seq)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception(f"{label}: submit raised; treating the outcome as unknown")
+        return TxOutcome("unknown", None, last_ledger_seq)
+    if result is None:
+        return TxOutcome("failed", None, last_ledger_seq)
+    tx_hash = result.get("hash")
+    return TxOutcome("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+async def app_brix_payment(
+    destination: str,
+    value: str,
+    tag: str,
+    action: str,
+    *,
+    max_last_ledger_seq: int | None = None,
+) -> TxOutcome:
+    """BRIX Payment app wallet -> destination (fill forward, overshoot or refund)."""
+    return await _submit_app_tx(
+        lambda lls: Payment(
+            account=config.SIGNING_ACCOUNT,
+            destination=destination,
+            amount=IssuedCurrencyAmount(
+                currency=config.BRIX_CURRENCY_HEX, issuer=config.BRIX_ISSUER, value=value
+            ),
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(action, tag),
+        ),
+        "app_brix_payment",
+        max_last_ledger_seq=max_last_ledger_seq,
+    )
+
+
+async def escrow_finish(
+    owner: str,
+    offer_sequence: int,
+    condition: str,
+    fulfillment: str,
+    tag: str,
+    *,
+    max_last_ledger_seq: int | None = None,
+) -> TxOutcome:
+    return await _submit_app_tx(
+        lambda lls: EscrowFinish(
+            account=config.SIGNING_ACCOUNT,
+            owner=owner,
+            offer_sequence=offer_sequence,
+            condition=condition,
+            fulfillment=fulfillment,
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(memos.ACTION_CLOSET_FILL, tag),
+        ),
+        "escrow_finish",
+        max_last_ledger_seq=max_last_ledger_seq,
+    )
+
+
+async def escrow_cancel(
+    owner: str, offer_sequence: int, tag: str, *, max_last_ledger_seq: int | None = None
+) -> TxOutcome:
+    """Return an expired bid's BRIX to its owner (valid only after CancelAfter)."""
+    return await _submit_app_tx(
+        lambda lls: EscrowCancel(
+            account=config.SIGNING_ACCOUNT,
+            owner=owner,
+            offer_sequence=offer_sequence,
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(memos.ACTION_CLOSET_REFUND, tag),
+        ),
+        "escrow_cancel",
+        max_last_ledger_seq=max_last_ledger_seq,
+    )
+
+
+async def get_escrow(owner: str, sequence: int) -> dict[str, Any] | None:
+    """The validated Escrow ledger object, or None if it does not exist
+    (finished / cancelled / never created). Raises on any other failure —
+    a failed lookup is never "absent"."""
+    client = rpc_client()
+    request = LedgerEntry(
+        escrow=LedgerEntryEscrow(owner=owner, seq=sequence), ledger_index="validated"
+    )
+    response = await asyncio.to_thread(client.request, request)
+    result = response.result
+    if (
+        response.is_successful()
+        and isinstance(result, dict)
+        and isinstance(result.get("node"), dict)
+    ):
+        return cast(dict[str, Any], result["node"])
+    if isinstance(result, dict) and result.get("error") == "entryNotFound":
+        return None
+    raise RuntimeError(f"escrow lookup failed for {owner}/{sequence}: {result!r}")
+
+
+def tx_entry_hash(entry: dict[str, Any]) -> str | None:
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    value = entry.get("hash") or tx.get("hash")
+    return value if isinstance(value, str) and value else None
+
+
+def tx_entry_result(entry: dict[str, Any]) -> str | None:
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    return meta.get("TransactionResult") if isinstance(meta, dict) else None
+
+
+async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[dict[str, Any]]:
+    """Every VALIDATED transaction SENT by the app wallet carrying `tag`.
+    Inbound transactions are ignored: memos are user-writable, so a stranger
+    could send the app wallet a tx with a guessed tag. Raises on transport
+    failure (never report a failed scan as "nothing found").
+
+    Also raises if the queried server's own reported `ledger_index_max`
+    (across every page) never reaches `min_ledger` — including when no page
+    reported one at all, which is just as untrustworthy as an insufficient
+    one: a lagging or load-balanced server can validate a tx between
+    `_phase_outcome`'s two reads and still answer this scan from a stale view
+    that predates `min_ledger`, which would otherwise report a false "absent"
+    and resubmit (double-send) a tx that already landed."""
+    account = config.SIGNING_ACCOUNT
+    client = rpc_client()
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
+    found: list[dict[str, Any]] = []
+    marker: Any = None
+    scanned_to: int | None = None
+    while True:
+        request = AccountTx(account=account, limit=200, marker=marker, ledger_index_min=scan_from)
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not response.is_successful() or not isinstance(result, dict):
+            raise RuntimeError(f"account_tx failed while scanning for {tag}: {result!r}")
+        reported_max = result.get("ledger_index_max")
+        if isinstance(reported_max, int):
+            scanned_to = reported_max if scanned_to is None else max(scanned_to, reported_max)
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if entry.get("validated") and tx.get("Account") == account and _carries_memo(tx, tag):
+                found.append(entry)
+        marker = result.get("marker")
+        if not marker:
+            break
+    if min_ledger is not None and (scanned_to is None or scanned_to < min_ledger):
+        raise RuntimeError(
+            f"account_tx scan for {tag} never reported reaching the deadline ledger "
+            f"{min_ledger} (last known: {scanned_to}) — the queried server is lagging"
+        )
+    return found
+
+
+async def find_invoice_payments(
+    invoice_id: str, min_ledger: int | None, require_ledger: int | None = None
+) -> list[dict[str, Any]]:
+    """Every VALIDATED tesSUCCESS inbound Payment to the app wallet carrying
+    `InvoiceID` (a Closet Market buy, #443), in account_tx order. The
+    reconciliation read before a buy is written off as "nothing arrived": a
+    Joey/Xaman status can report expired while the client-submitted tx
+    validated. InvoiceID is public, so anyone can add a junk entry — ALL are
+    returned and the caller picks (PR #502 G2). Raises on transport failure or
+    an unsuccessful response — a failed scan is never "not found".
+
+    With `require_ledger` (the buy Payment's pinned LastLedgerSequence, PR
+    #502 G1) it also raises unless the scan's reported `ledger_index_max`
+    (the max across pages) reaches it — a lagging server's "nothing found" is
+    not proof the payment can't still be found."""
+    account = config.SIGNING_ACCOUNT
+    want = invoice_id.upper()
+    client = rpc_client()
+    marker: Any = None
+    scanned_to: int | None = None
+    found: list[dict[str, Any]] = []
+    while True:
+        request = AccountTx(
+            account=account,
+            limit=200,
+            marker=marker,
+            ledger_index_min=min_ledger if min_ledger else -1,
+        )
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not response.is_successful() or not isinstance(result, dict):
+            raise RuntimeError(f"account_tx failed while scanning for invoice {want}: {result!r}")
+        reported_max = result.get("ledger_index_max")
+        if isinstance(reported_max, int):
+            scanned_to = reported_max if scanned_to is None else max(scanned_to, reported_max)
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if (
+                entry.get("validated")
+                and tx.get("TransactionType") == "Payment"
+                and tx.get("Destination") == account
+                and str(tx.get("InvoiceID", "")).upper() == want
+                and tx_entry_result(entry) == "tesSUCCESS"
+            ):
+                found.append(cast(dict[str, Any], entry))
+        marker = result.get("marker")
+        if not marker:
+            break
+    if require_ledger is not None and (scanned_to is None or scanned_to < require_ledger):
+        raise RuntimeError(
+            f"account_tx scan for invoice {want} never reported reaching ledger "
+            f"{require_ledger} (last known: {scanned_to}) — the queried server is lagging"
+        )
+    return found
+
+
+async def find_escrow_by_condition(
+    owner: str, condition: str, require_ledger: int | None = None
+) -> dict[str, Any] | None:
+    """The validated Escrow object owned by `owner` whose `Condition` matches,
+    or None (including an unfunded / unknown owner, `actNotFound`). Used to
+    find a bid escrow whose signing status was lost. Raises on any other
+    failure.
+
+    With `require_ledger` (the bid EscrowCreate's pinned LastLedgerSequence,
+    PR #502 G1) every response — `actNotFound` included — must report a
+    validated `ledger_index` at or past it, or this raises: an answer from a
+    ledger before the deadline can't rule out the escrow still landing.
+    (`ledger_current_index` describes an open, unvalidated ledger and never
+    counts.)"""
+    want = condition.upper()
+
+    def check_coverage(result: dict[str, Any]) -> None:
+        if require_ledger is None:
+            return
+        seen = result.get("ledger_index")
+        if not isinstance(seen, int) or seen < require_ledger:
+            raise RuntimeError(
+                f"account_objects for {owner} answered from ledger {seen!r}, "
+                f"before the required ledger {require_ledger}"
+            )
+
+    client = rpc_client()
+    marker: Any = None
+    while True:
+        request = AccountObjects(
+            account=owner,
+            type=AccountObjectType.ESCROW,
+            ledger_index="validated",
+            limit=200,
+            marker=marker,
+        )
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not isinstance(result, dict):
+            raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
+        if not response.is_successful():
+            if result.get("error") == "actNotFound":
+                check_coverage(result)
+                return None
+            raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
+        check_coverage(result)
+        for node in result.get("account_objects", []):
+            if isinstance(node, dict) and str(node.get("Condition") or "").upper() == want:
+                return cast(dict[str, Any], node)
+        marker = result.get("marker")
+        if not marker:
+            return None
 
 
 async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:

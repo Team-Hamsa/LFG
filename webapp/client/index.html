@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v31.css">
+  <link rel="stylesheet" href="style.v32.css">
 </head>
 <body>
   <main id="app">
@@ -237,6 +237,7 @@
         <button class="lb-chip active" role="tab" aria-selected="true" data-tab="browse">Browse</button>
         <button class="lb-chip" role="tab" aria-selected="false" data-tab="mine">Mine</button>
         <button class="lb-chip" role="tab" aria-selected="false" data-tab="shop" hidden>Shop</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-tab="book" hidden>Wanted</button>
       </div>
 
       <div id="market-shop" class="market-section" hidden>
@@ -311,6 +312,35 @@
           <div id="mine-closet" class="trait-strip"></div>
           <p id="mine-closet-empty" class="trait-strip-empty" hidden>Your Closet has no loose traits.</p>
         </div>
+        <div id="mine-closet-orders-section" class="trait-strip-section" hidden>
+          <h4 class="trait-strip-heading">My Closet market orders</h4>
+          <div id="mine-closet-orders" class="trait-strip"></div>
+          <p id="mine-closet-orders-empty" class="trait-strip-empty" hidden>No open asks or bids.</p>
+        </div>
+        <div id="mine-closet-incoming-section" class="trait-strip-section" hidden>
+          <h4 class="trait-strip-heading">Bids on my traits</h4>
+          <div id="mine-closet-incoming" class="trait-strip"></div>
+          <p id="mine-closet-incoming-empty" class="trait-strip-empty" hidden>Nobody is bidding on traits you hold.</p>
+        </div>
+        <div id="mine-closet-fills-section" class="trait-strip-section" hidden>
+          <h4 class="trait-strip-heading">Recent Closet trades</h4>
+          <div id="mine-closet-fills" class="trait-strip"></div>
+          <p id="mine-closet-fills-empty" class="trait-strip-empty" hidden>No trades yet.</p>
+        </div>
+      </div>
+
+      <div id="market-book" class="market-section" hidden>
+        <p><button id="closet-bid-new-btn" class="primary">Place a bid</button></p>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Closet listings</h4>
+          <div id="closet-book-asks" class="trait-strip"></div>
+          <p id="closet-book-asks-empty" class="trait-strip-empty" hidden>No Closet listings yet.</p>
+        </div>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Wanted</h4>
+          <div id="closet-book-bids" class="trait-strip"></div>
+          <p id="closet-book-bids-empty" class="trait-strip-empty" hidden>No open bids yet — be the first.</p>
+        </div>
       </div>
 
       <p class="row-links">
@@ -325,6 +355,19 @@
       <p id="market-list-royalty" class="cost"></p>
       <button id="market-list-confirm-btn" class="primary big">List it</button>
       <p><button id="market-list-cancel-btn" class="back">← Cancel</button></p>
+    </section>
+
+    <section id="closet-bid-form-panel" class="card" hidden>
+      <h2>Place a bid</h2>
+      <p class="card-sub">Name the trait and your price — no listing needs to exist. Any holder can fill it.</p>
+      <label class="card-sub" for="closet-bid-slot">Slot</label>
+      <select id="closet-bid-slot"></select>
+      <label class="card-sub" for="closet-bid-value">Trait</label>
+      <select id="closet-bid-value"></select>
+      <input id="closet-bid-price" type="text" inputmode="decimal" placeholder="Bid in BRIX">
+      <p id="closet-bid-note" class="cost"></p>
+      <button id="closet-bid-confirm-btn" class="primary big">Lock bid</button>
+      <p><button id="closet-bid-cancel-btn" class="back">← Cancel</button></p>
     </section>
 
     <section id="flow-panel" class="card" hidden>
@@ -481,6 +524,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=91"></script>
+  <script type="module" src="app.js?v=92"></script>
 </body>
 </html>

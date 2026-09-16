@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -68,7 +70,9 @@ def _hex(url: str) -> str:
     return url.encode("utf-8").hex().upper()
 
 
-def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) -> dict[str, Any]:
+def build_closet_metadata(
+    owner: str, assets: list[Asset], bodies: list[int], orders: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """The Closet NFToken metadata JSON. `lfg_closet` enumerates the loose
     contents deterministically (assets sorted by (slot, value)) so the same
     state always produces byte-identical metadata.
@@ -78,8 +82,12 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
     written empty. It carries integer editions only when a caller explicitly
     passes UNRESOLVED legacy editions (ones not yet convertible via the frozen
     genesis) — those must stay on the authoritative token until resolvable
-    rather than be dropped."""
-    return {
+    rather than be dropped.
+
+    `orders` (#443) is an optional display-only block of the owner's open
+    Closet Market orders — never parsed back (parse_closet_metadata ignores
+    it) and omitted entirely when empty, so existing metadata is unchanged."""
+    meta: dict[str, Any] = {
         "schema": config.NFT_SCHEMA_URL,
         "name": f"LFG Closet — {owner}",
         "description": f"Loose traits and bodies held by {owner}.",
@@ -95,6 +103,11 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
             "bodies": sorted(b for b in bodies if type(b) is int),
         },
     }
+    if orders:
+        # #443: open Closet Market orders, display-only. parse_closet_metadata
+        # ignores this key; closet_orders in the DB stays authoritative.
+        meta["lfg_closet"]["orders"] = orders
+    return meta
 
 
 def parse_closet_metadata(
@@ -263,6 +276,18 @@ async def confirm_accept(conn: Any, owner: str, *, owner_fn: OwnerFn) -> str:
     return status
 
 
+def _orders_for_meta(conn: Any, owner: str) -> list[dict[str, Any]] | None:
+    """Best-effort: the orders block is display-only, so a read failure (a
+    test double conn, a DB without the table) must never block a Closet sync."""
+    from lfg_core import closet_market_store  # local: closet_market_store must stay import-light
+
+    try:
+        return closet_market_store.open_orders_for_meta(conn, owner)
+    except (sqlite3.Error, AttributeError, TypeError):
+        logging.warning(f"closet orders unreadable for {owner}; syncing without an orders block")
+        return None
+
+
 async def sync_closet(
     conn: Any,
     owner: str,
@@ -289,7 +314,9 @@ async def sync_closet(
     if record is None:
         raise ClosetError(f"no Closet NFToken on record for {owner}")
     nft_id, _uri_hex, status, offer_id = record
-    url = await upload_fn(build_closet_metadata(owner, assets, bodies))
+    url = await upload_fn(
+        build_closet_metadata(owner, assets, bodies, _orders_for_meta(conn, owner))
+    )
     try:
         tx_hash = await modify_fn(nft_id, owner, url)
     except Exception as e:

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -352,6 +353,9 @@ async def start_equip(
         assets = {
             (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
         }
+        listed = economy_flow._listed_error(conn, owner, Counter(changes), assets)
+        if listed:
+            raise EconomyError(f"cannot equip: {listed}")
         # Mirror run_equip's running working copy so an over-spending batch is
         # rejected up front, with the same message the flow would produce —
         # including its duplicate-slot guard. A repeated slot would otherwise
