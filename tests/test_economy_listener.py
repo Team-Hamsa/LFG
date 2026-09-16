@@ -707,3 +707,70 @@ def test_genuine_issuer_named_mint_still_logs_growth():
     rows = es.read_supply_changes(conn)
     assert len(rows) == 1
     assert rows[0]["kind"] == "mint" and rows[0]["edition"] == 9999
+
+
+def _accept_tx(nft_id: str, *, account: str, deleted: list[dict]) -> dict:
+    return {
+        "TransactionType": "NFTokenAcceptOffer",
+        "Account": account,
+        "meta": {
+            "TransactionResult": "tesSUCCESS",
+            "nftoken_id": nft_id,
+            "AffectedNodes": [
+                {"DeletedNode": {"LedgerEntryType": "NFTokenOffer", **w}} for w in deleted
+            ],
+        },
+    }
+
+
+def _offer(nft_id: str, owner: str, *, sell: bool) -> dict:
+    return {
+        "LedgerIndex": f"{owner}-{'S' if sell else 'B'}",
+        "FinalFields": {"NFTokenID": nft_id, "Owner": owner, "Flags": 1 if sell else 0},
+    }
+
+
+def _apply_accept(conn, tx, clio_owner: str) -> None:
+    async def fetch_token(nft_id):
+        return _trait_token_dict(nft_id, clio_owner)
+
+    async def fetch_meta(uri_hex):
+        return _trait_meta("Background", "Pastel Green")
+
+    _run(
+        nft_listener.apply_economy_tx(
+            conn, tx, fetch_token_fn=fetch_token, fetch_meta_fn=fetch_meta, genesis=None
+        )
+    )
+
+
+def test_trait_accept_owner_comes_from_tx_not_stale_nft_info():
+    """Extract delivery: the user accepts the issuer's sell offer while clio
+    nft_info still reports the issuer. The row must record the accepting user."""
+    conn = _conn()
+    issuer = config.SWAP_ISSUER_ADDRESS
+    es.upsert_trait_token(conn, "TRAITX", issuer, "Background", "Pastel Green")
+    tx = _accept_tx("TRAITX", account="rUser", deleted=[_offer("TRAITX", issuer, sell=True)])
+    _apply_accept(conn, tx, clio_owner=issuer)
+    assert es.read_trait_tokens(conn) == [("TRAITX", "rUser", "Background", "Pastel Green")]
+
+
+def test_trait_brokered_accept_owner_is_buy_offer_owner():
+    conn = _conn()
+    es.upsert_trait_token(conn, "TRAITB", "rSeller", "Hat", "Cap")
+    tx = _accept_tx(
+        "TRAITB",
+        account="rBroker",
+        deleted=[_offer("TRAITB", "rSeller", sell=True), _offer("TRAITB", "rBuyer", sell=False)],
+    )
+    _apply_accept(conn, tx, clio_owner="rSeller")
+    assert es.read_trait_tokens(conn)[0][1] == "rBuyer"
+
+
+def test_trait_bid_accept_owner_is_bidder():
+    """The holder accepts a buy offer directly: tx.Account is the SELLER."""
+    conn = _conn()
+    es.upsert_trait_token(conn, "TRAITD", "rHolder", "Hat", "Cap")
+    tx = _accept_tx("TRAITD", account="rHolder", deleted=[_offer("TRAITD", "rBidder", sell=False)])
+    _apply_accept(conn, tx, clio_owner="rHolder")
+    assert es.read_trait_tokens(conn)[0][1] == "rBidder"
