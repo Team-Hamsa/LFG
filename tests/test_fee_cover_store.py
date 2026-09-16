@@ -655,3 +655,54 @@ def test_pending_quotes_rotate_by_last_attempt_so_old_ones_cannot_starve_new(con
     assert batch(2001) == ["Q2", "Q3"]
     assert batch(2002) == ["Q4", "Q0"]  # never-attempted first, then least recent
     assert store.get_quote(conn, "Q0")["last_attempt_at"] == 2002
+
+
+def test_connect_migrates_a_db_created_by_an_earlier_build(tmp_path):
+    """CREATE TABLE IF NOT EXISTS never alters an existing table: a DB from a
+    build before claim_ledger / bid_expires_at / last_attempt_at must gain the
+    columns (idempotently), and a pre-existing pending quote must get an expiry
+    that can't abandon it while its bid could still fill."""
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE fee_cover_refunds (
+          accept_tx_hash TEXT PRIMARY KEY, offer_index TEXT NOT NULL UNIQUE,
+          campaign_id INTEGER NOT NULL, network TEXT NOT NULL, bidder TEXT NOT NULL,
+          seller TEXT, broker TEXT, observed_fee_drops INTEGER, observed_royalty_drops INTEGER,
+          refund_drops INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, reason TEXT,
+          payout_tx_hash TEXT, last_ledger_seq INTEGER,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE fee_cover_quotes (
+          session_id TEXT PRIMARY KEY, network TEXT NOT NULL, payload_uuid TEXT NOT NULL,
+          txid TEXT, nft_id TEXT NOT NULL, owner TEXT NOT NULL, bidder TEXT NOT NULL,
+          bid_drops INTEGER NOT NULL, listing_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending','closed')), outcome TEXT,
+          offer_index TEXT, created_at INTEGER NOT NULL, closed_at INTEGER
+        );
+        CREATE INDEX idx_fee_cover_quotes_pending ON fee_cover_quotes(network, state, created_at);
+        INSERT INTO fee_cover_quotes (session_id, network, payload_uuid, nft_id, owner, bidder,
+          bid_drops, listing_json, state, created_at)
+          VALUES ('OLD', 'testnet', 'U1', 'NFT1', 'rOwner', 'rBidder', 1, '{}', 'pending', 1000);
+        """
+    )
+    old.commit()
+    old.close()
+    for _ in range(2):  # idempotent
+        conn = store.connect(path)
+        conn.close()
+    conn = store.connect(path)
+    try:
+        refund_cols = {r[1] for r in conn.execute("PRAGMA table_info(fee_cover_refunds)")}
+        quote_cols = {r[1] for r in conn.execute("PRAGMA table_info(fee_cover_quotes)")}
+        assert "claim_ledger" in refund_cols
+        assert {"bid_expires_at", "last_attempt_at"} <= quote_cols
+        [quote] = store.pending_quotes(conn, "testnet", created_before=2000, limit=5)
+        assert quote.bid_expires_at == 1000 + 30 * 86_400
+        store.touch_quote(conn, "OLD", now=1500)
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(fee_cover_quotes)")}
+        assert "idx_fee_cover_quotes_rotation" in indexes
+        assert "idx_fee_cover_quotes_pending" not in indexes
+    finally:
+        conn.close()

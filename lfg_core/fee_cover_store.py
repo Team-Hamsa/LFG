@@ -106,9 +106,6 @@ CREATE TABLE IF NOT EXISTS fee_cover_quotes (
   offer_index TEXT,
   created_at INTEGER NOT NULL, closed_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_pending
-  ON fee_cover_quotes(network, state, last_attempt_at, created_at);
-
 CREATE TABLE IF NOT EXISTS fee_cover_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
@@ -165,7 +162,44 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+# Columns added after a table's first shape. CREATE TABLE IF NOT EXISTS never
+# alters an existing table, so a DB initialised by an earlier build needs each
+# one added explicitly; every add is idempotent.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("fee_cover_refunds", "claim_ledger", "INTEGER"),
+    ("fee_cover_quotes", "bid_expires_at", "INTEGER"),
+    ("fee_cover_quotes", "last_attempt_at", "INTEGER"),
+)
+# The expiry assumed for a quote recorded before bid_expires_at existed.
+# Deliberately longer than any bid TTL this code sets (7 days by default), so
+# a migrated quote is never abandoned while its bid could still fill.
+_MIGRATED_QUOTE_EXPIRY_SECONDS = 30 * 86_400
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    # A refund left without a claim_ledger scans all history in recovery,
+    # which is slower but never misses a payout. A quote without an expiry
+    # gets the conservative assumed one.
+    conn.execute(
+        "UPDATE fee_cover_quotes SET bid_expires_at = created_at + ? WHERE bid_expires_at IS NULL",
+        (_MIGRATED_QUOTE_EXPIRY_SECONDS,),
+    )
+    # Built here, after its columns are guaranteed to exist. The earlier index
+    # (without last_attempt_at) is replaced.
+    conn.execute("DROP INDEX IF EXISTS idx_fee_cover_quotes_pending")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_rotation"
+        " ON fee_cover_quotes(network, state, last_attempt_at, created_at)"
+    )
+    conn.commit()
 
 
 def _now(now: int | None) -> int:
