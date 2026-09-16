@@ -68,7 +68,8 @@ quiet, THEN:
 - Push a trivial commit to main → `pm2 logs stg-deployer` shows the
   fast-forward; a doc-only commit advances without restarts.
 - `scripts/promote.sh` → `pm2 logs lfg-deployer` shows drain + restart.
-  Partial promotion: `scripts/promote.sh --list`, then `--pick 508 509`
+  Partial promotion: `scripts/promote.sh --list`, then
+  `scripts/promote.sh --pick 508 509`
   (see `scripts/promote.py` docstring).
 - `curl -s localhost:8177/api/health` and `:8176/api/health` both OK.
 

@@ -167,7 +167,15 @@ def _setup_prs(tmp_path):
 
 
 def _run_gated(work, *args, gate="true", stdin=""):
-    env = {**_scrubbed_env(), "PROMOTE_GATE_CMD": gate}
+    # promote.py has no gate override; shadow pre-commit on PATH instead (the
+    # tmp repo has no .venv, so it falls back to PATH lookup).
+    bindir = work.parent / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "pre-commit"
+    fake.write_text(f"#!/usr/bin/env bash\n{gate}\n")
+    fake.chmod(0o755)
+    base = _scrubbed_env()
+    env = {**base, "PATH": f"{bindir}{os.pathsep}{base.get('PATH', '')}"}
     return subprocess.run(
         ["bash", PROMOTE, *args], cwd=work, text=True, input=stdin, capture_output=True, env=env
     )
@@ -189,9 +197,9 @@ def test_pick_skipping_middle_cherry_picks_and_gates(tmp_path):
     _, work, shas = _setup_prs(tmp_path)
     old_deploy = _git(work, "rev-parse", "origin/deploy")
     marker = tmp_path / "gate-ran"
-    r = _run_gated(work, "--pick", "13", "11", "--yes", gate=f"touch {marker}")
+    r = _run_gated(work, "--pick", "13", "11", "--yes", gate=f'echo "$@" > {marker}')
     assert r.returncode == 0, r.stderr
-    assert marker.exists()  # the gate ran on the pick build
+    assert marker.read_text().split() == ["run", "--hook-stage", "pre-push", "--all-files"]
     files = _deploy_files(work)
     assert {"eleven.py", "thirteen.py"} <= files
     assert "twelve.py" not in files

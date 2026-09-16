@@ -187,9 +187,8 @@ def push(new: str, deploy: str) -> None:
 
 
 def gate_command() -> list[str]:
-    override = os.environ.get("PROMOTE_GATE_CMD")
-    if override:
-        return ["bash", "-c", override]
+    # Deliberately no env override: nothing in the operator's environment may
+    # swap the gate for another command. Tests put a fake pre-commit on PATH.
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     venv_pc = os.path.join(os.path.dirname(common), ".venv", "bin", "pre-commit")
     exe = venv_pc if os.access(venv_pc, os.X_OK) else shutil.which("pre-commit")
@@ -205,8 +204,8 @@ def build_picks(deploy: str, picks: list[Commit]) -> str:
     gate = gate_command()
     tmp = tempfile.mkdtemp(prefix="promote-pick-")
     wt = os.path.join(tmp, "wt")
-    git("worktree", "add", "--detach", wt, deploy)
     try:
+        git("worktree", "add", "--detach", wt, deploy)
         for c in picks:
             args = ["cherry-pick", "-x", "--allow-empty", "--keep-redundant-commits"]
             if c.parents > 1:
@@ -227,6 +226,7 @@ def build_picks(deploy: str, picks: list[Commit]) -> str:
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", wt], capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
+        subprocess.run(["git", "worktree", "prune"], capture_output=True)  # half-added wt
 
 
 def promote_all(deploy: str, main: str, yes: bool) -> None:
