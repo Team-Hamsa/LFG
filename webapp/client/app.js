@@ -4826,7 +4826,8 @@ function switchMarketTab(tab) {
   el('market-browse').hidden = tab !== 'browse';
   el('market-mine').hidden = tab !== 'mine';
   el('market-shop').hidden = tab !== 'shop';
-  el('market-book').hidden = tab !== 'book';
+  const book = el('market-book');
+  if (book) book.hidden = tab !== 'book';
   if (tab === 'browse') loadMarketBrowse();
   else if (tab === 'mine') loadMarketMine();
   else if (tab === 'book') loadClosetBook().catch((e) => showError(e.message));

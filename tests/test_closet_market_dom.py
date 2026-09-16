@@ -91,6 +91,7 @@ def test_closet_market_dom_lookups_are_null_guarded():
     ]
     assert "el(id).hidden" not in body
     assert "el('market-book').hidden" not in body
+    assert "el('market-book').hidden" not in js  # switchMarketTab too
     for element_id in (
         "closet-bid-new-btn",
         "closet-bid-confirm-btn",
