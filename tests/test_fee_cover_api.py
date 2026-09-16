@@ -997,13 +997,39 @@ def test_reconcile_skips_a_fresh_quote_and_a_live_unfinished_session(env, monkey
     assert _quote_row(env["app_db"], session.id)["state"] == "pending"
 
 
-def test_reconcile_abandons_a_quote_past_its_max_age(env, monkeypatch):
+def test_reconcile_abandons_only_an_unresolvable_quote_past_the_bid_lifetime(env, monkeypatch):
     session = _start_quoted_bid(env, monkeypatch)
     server.market_sessions.clear()
-    _age_quote(env["app_db"], session.id, server._FEE_COVER_QUOTE_MAX_AGE_SECONDS + 1)
-    calls = _wallet_status(monkeypatch, _signed())
+    monkeypatch.setattr(server.config, "MARKET_BID_TTL_SECONDS", 604_800)
+    assert server._fee_cover_quote_max_age_seconds() == 604_800 + 86_400
+    _wallet_status(monkeypatch, {"signed": False, "expired": False})  # never resolves
+    _age_quote(env["app_db"], session.id, 3 * 86_400)  # older than a day, bid still live
     _run(server._reconcile_fee_cover_quotes())
-    assert calls == []
+    assert _quote_row(env["app_db"], session.id)["state"] == "pending"
+    _age_quote(env["app_db"], session.id, 604_800)  # now past the bid lifetime + margin
+    _run(server._reconcile_fee_cover_quotes())
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "abandoned"
+
+
+def test_an_old_quote_with_a_validated_bid_is_promised_not_abandoned(env, monkeypatch):
+    """Age never beats the ledger: a quote whose persisted tx has validated is
+    promised on the attempt, however old the quote is."""
+    session = _start_quoted_bid(env, monkeypatch)
+    server._fee_cover_note_txid(session.id, "TXHASH")
+    server.market_sessions.clear()
+    _age_quote(env["app_db"], session.id, server._fee_cover_quote_max_age_seconds() + 1)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    _run(server._reconcile_fee_cover_quotes())
+    assert _quote_row(env["app_db"], session.id)["outcome"] == "promised"
+    assert _promise_row(env["app_db"])["state"] == "open"
+
+
+def test_a_quote_whose_reconcile_raises_is_still_aged_out(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    server.market_sessions.clear()
+    _wallet_status(monkeypatch, RuntimeError("provider exploded"))
+    _age_quote(env["app_db"], session.id, server._fee_cover_quote_max_age_seconds() + 1)
+    _run(server._reconcile_fee_cover_quotes())
     assert _quote_row(env["app_db"], session.id)["outcome"] == "abandoned"
 
 

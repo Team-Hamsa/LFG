@@ -368,7 +368,10 @@ promise.
       the promise via the same `_fee_cover_record_promise`. That call is
       idempotent on `offer_index`, so racing the poll path is safe.
     - It closes the quote `promised` / `uncovered` / `expired` / `failed`, or
-      `abandoned` past 24 h. Anything unresolved retries next sweep.
+      `abandoned`. Anything unresolved retries next sweep. Every pass tries the
+      ledger first, and only a quote still unresolved and older than
+      `MARKET_BID_TTL_SECONDS` + 1 day is abandoned. The bid can fill until
+      its own on-ledger expiry, and the quote is its only recovery record.
 - **Primary trigger.** The bid status poll. In `_advance_market_session`'s
   `bid` branch, after computing `session.fill`: when `fill == "accepted"` and a
   promise exists, call `fee_cover.settle_promise(network, offer_index)`. This

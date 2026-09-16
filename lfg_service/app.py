@@ -5505,11 +5505,19 @@ async def _advance_quoted_bid_sessions() -> None:
 # A fresh quote belongs to its live session first; the reconciler only steps
 # in after this grace period.
 _FEE_COVER_QUOTE_GRACE_SECONDS = 60
-# A covered bid resolves in minutes (payload lifetime + validation). Past this
-# age a still-unresolvable quote is closed `abandoned` and logged, rather than
-# re-asked every sweep forever.
-_FEE_COVER_QUOTE_MAX_AGE_SECONDS = 86_400
+# Margin past the bid's own on-ledger lifetime before an unresolved quote is
+# given up on.
+_FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS = 86_400
 _FEE_COVER_QUOTE_BATCH = 25
+
+
+def _fee_cover_quote_max_age_seconds() -> int:
+    """How long an UNRESOLVED quote is retried before it's closed `abandoned`.
+    Never shorter than the bid's on-ledger lifetime (MARKET_BID_TTL_SECONDS):
+    a covered bid can still fill until then, and the quote is its only
+    durable recovery record. The margin covers listener and archive lag past
+    the expiry."""
+    return int(config.MARKET_BID_TTL_SECONDS) + _FEE_COVER_QUOTE_ABANDON_MARGIN_SECONDS
 
 
 async def _reconcile_fee_cover_quotes() -> None:
@@ -5529,47 +5537,58 @@ async def _reconcile_fee_cover_quotes() -> None:
         if live is not None and live.state not in market_flow.TERMINAL_STATES:
             continue  # its poll, or _advance_quoted_bid_sessions, owns it
         try:
-            await _reconcile_fee_cover_quote(quote, live, loop, now)
+            resolved = await _reconcile_fee_cover_quote(quote, live, loop)
         except Exception:
             logging.warning(
                 "fee cover: reconciling quote %s failed; retrying next sweep",
                 quote.session_id,
                 exc_info=True,
             )
+            resolved = False
+        # Age only ever ends a quote the ledger could NOT resolve this pass: a
+        # quote whose bid has validated is promised however old it is.
+        max_age = _fee_cover_quote_max_age_seconds()
+        if not resolved and now - quote.created_at > max_age:
+            logging.warning(
+                "fee cover: quote %s (bid by %s on %s) unresolved after %ss; abandoned",
+                quote.session_id,
+                quote.bidder,
+                quote.nft_id,
+                max_age,
+            )
+            try:
+                await loop.run_in_executor(
+                    None, _fee_cover_close_quote, quote.session_id, "abandoned"
+                )
+            except Exception:
+                logging.warning(
+                    "fee cover: abandoning quote %s failed", quote.session_id, exc_info=True
+                )
 
 
-async def _reconcile_fee_cover_quote(
-    quote: fee_cover_store.Quote, live: Any, loop: Any, now: int
-) -> None:
-    if now - quote.created_at > _FEE_COVER_QUOTE_MAX_AGE_SECONDS:
-        logging.warning(
-            "fee cover: quote %s (bid by %s on %s) unresolved after %ss; abandoned",
-            quote.session_id,
-            quote.bidder,
-            quote.nft_id,
-            _FEE_COVER_QUOTE_MAX_AGE_SECONDS,
-        )
-        await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "abandoned")
-        return
+async def _reconcile_fee_cover_quote(quote: fee_cover_store.Quote, live: Any, loop: Any) -> bool:
+    """One attempt to resolve a pending quote. True once it has an outcome
+    (closed, or its promise written); False when it's still unresolved and
+    should be retried."""
     txid = quote.txid
     if txid is None:
         status = await xumm_ops.get_payload_status(quote.payload_uuid)
         if status is None:
-            return  # provider unreachable: retry
+            return False  # provider unreachable: retry
         if status.get("signed"):
             # Same fail-closed signer check as advance_bid_session.
             if status.get("account") != quote.bidder:
                 await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "failed")
-                return
+                return True
             txid = status.get("txid")
             if not txid:
-                return
+                return False
             await loop.run_in_executor(None, _fee_cover_note_txid, quote.session_id, txid)
         elif status.get("expired"):
             await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "expired")
-            return
+            return True
         else:
-            return  # not signed yet
+            return False  # not signed yet
     session = market_flow.BidSession(
         discord_id="",
         wallet_address=quote.bidder,
@@ -5586,7 +5605,8 @@ async def _reconcile_fee_cover_quote(
     if bid_row is None:
         if session.state == market_flow.FAILED:
             await loop.run_in_executor(None, _fee_cover_close_quote, quote.session_id, "failed")
-        return  # not validated yet, or the lookup failed: retry next sweep
+            return True
+        return False  # not validated yet, or the lookup failed: retry next sweep
     try:
         await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
     except Exception:
@@ -5597,6 +5617,7 @@ async def _reconcile_fee_cover_quote(
     view = await loop.run_in_executor(None, _fee_cover_record_promise, session, bid_row)
     if live is not None:
         live.fee_cover = view
+    return True
 
 
 async def sweep_fee_cover() -> None:
