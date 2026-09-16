@@ -452,10 +452,10 @@ collection (not a general tool). Full rationale per row in
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
-- [ ] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
 - [x] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48) (closed 2026-08-24)
 - [x] [#354 — Skeleton body cannot wear the pirate outfit ("Swashbuckler") — missing skeleton art](../../issues/354) (closed 2026-08-24)
 - [x] [#332 — ops(sponsored-mint): execute the staging rehearsal before any production activation of the SourceTag free mint](../../issues/332) (closed 2026-08-23)
