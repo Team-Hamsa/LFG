@@ -226,6 +226,7 @@ _STORE_NAMES = frozenset(
     }
 )
 _STORE_DIR_PREFIX = "images_"  # image_archive.archive_dir: images_<network>
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 
 # Audit event -> (path arg index, dir_fd arg index or None) per path it names.
 # A dir_fd-relative path (shutil.rmtree walks that way) can't be resolved from
@@ -301,15 +302,13 @@ class _CheckoutStoreGuard:
         """Where `path` lands if it names a store inside a checkout root, else None.
 
         Checks the literal absolute path and its realpath, so a symlink into the
-        checkout counts. Only paths with a store-like component are resolved
-        (realpath stats every component, and this runs for every open() in
-        the suite), so a symlink with an unrelated name aimed straight at a
-        store file is the one shape this can miss.
+        checkout counts whatever it is named (file or directory alias). The
+        realpath stat per component costs ~1% of a full suite run.
         """
         abspath = os.path.abspath(path)
-        if not _may_name_store(abspath):
-            return None
         for candidate in dict.fromkeys((abspath, os.path.realpath(abspath))):
+            if not _may_name_store(candidate):
+                continue
             rel = self.inside_roots(candidate)
             if rel is not None and _is_store_name(rel.split(os.sep, 1)[0]):
                 return candidate
@@ -366,7 +365,12 @@ class _CheckoutStoreGuard:
                     continue  # an fd, or os.listdir() of the CWD itself
                 path = os.fsdecode(raw)  # type: ignore[arg-type]
                 if event == "open" and args[1] is None and not os.path.isabs(path):
-                    continue  # os.open(): its event omits dir_fd, so ambiguous
+                    # os.open(): its event omits dir_fd, so a relative path may be
+                    # fd-relative — shutil.rmtree's walk opens subdirs that way,
+                    # read-only. Resolve against the CWD only an open that writes.
+                    flags = args[2]
+                    if not isinstance(flags, int) or not flags & _WRITE_FLAGS:
+                        continue
                 if event == "sqlite3.connect":
                     if path in ("", ":memory:"):
                         continue

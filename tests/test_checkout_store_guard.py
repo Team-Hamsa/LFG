@@ -159,6 +159,28 @@ def test_guard_resolves_symlinks_into_the_checkout(tmp_path):
         checkout / "lfg_nfts.db"
     )
     assert guard.store_path(str(tmp_path / "alias" / "trait_config.yaml")) is None
+    # Aliases whose own names look nothing like a store.
+    (tmp_path / "plain").symlink_to(checkout / "lfg_nfts.db")
+    (tmp_path / "j").symlink_to(checkout / "bulk_mint_jobs", target_is_directory=True)
+    assert guard.store_path(str(tmp_path / "plain")) == str(checkout / "lfg_nfts.db")
+    assert guard.store_path(str(tmp_path / "j" / "x.json")) == str(
+        checkout / "bulk_mint_jobs" / "x.json"
+    )
+
+
+def test_guard_resolves_writing_relative_os_open(tmp_path, monkeypatch):
+    # os.open()'s audit event carries no dir_fd. A read-only relative open is
+    # left alone (shutil.rmtree walks subdirs that way, fd-relative); one that
+    # writes is resolved against the CWD.
+    monkeypatch.chdir(tmp_path)
+    guard = conftest._CheckoutStoreGuard((str(tmp_path),))
+    guard.audit("open", ("reports", None, os.O_RDONLY | os.O_CLOEXEC))
+    guard.audit("open", ("lfg_nfts.db", None, os.O_RDWR))
+    guard.audit("open", ("history_testnet.db", None, os.O_WRONLY | os.O_CREAT))
+    assert [path for _, _, path in guard.hits] == [
+        str(tmp_path / "lfg_nfts.db"),
+        str(tmp_path / "history_testnet.db"),
+    ]
 
 
 @pytest.mark.parametrize(
