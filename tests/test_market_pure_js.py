@@ -503,13 +503,33 @@ def test_buy_now_label():
     # #426: primary action text for an external card; empty when the row
     # carries no clearing price (no rate measured) or isn't external.
     ext = '{external: true, marketplace: "xrp.cafe", clearingXrp: "5.070572", amountXrp: "4.99"}'
-    assert run_js(f"M.buyNowLabel({ext})") == "Buy now — 5.070572 XRP via xrp.cafe"
+    # The label rounds the drop-exact clearing price UP for display
+    # (test_display_xrp); the bid still carries the exact amount.
+    assert run_js(f"M.buyNowLabel({ext})") == "Buy now — 5.08 XRP via xrp.cafe"
     no_rate = '{external: true, marketplace: "bidds", clearingXrp: null, amountXrp: "4.99"}'
     assert run_js(f"M.buyNowLabel({no_rate})") == ""
     own = '{external: false, marketplace: null, clearingXrp: "5.070572", amountXrp: "4.99"}'
     assert run_js(f"M.buyNowLabel({own})") == ""
     no_name = '{external: true, marketplace: null, clearingXrp: "5.070572"}'
-    assert run_js(f"M.buyNowLabel({no_name})") == "Buy now — 5.070572 XRP"
+    assert run_js(f"M.buyNowLabel({no_name})") == "Buy now — 5.08 XRP"
+
+
+def test_display_xrp():
+    # Display-only rounding, always UP: what the button shows may never be
+    # LESS than the amount the buyer actually signs for (and a bid one drop
+    # under the clearing price never fills).
+    assert run_js('M.displayXrp("4.064587")') == "4.07"
+    assert run_js('M.displayXrp("5.070572")') == "5.08"
+    assert run_js('M.displayXrp("4")') == "4"
+    assert run_js('M.displayXrp("4.2")') == "4.2"
+    assert run_js('M.displayXrp("4.06")') == "4.06"  # already short: unchanged
+    # Under 1 XRP, 2dp would overstate several-fold — 4dp there, still up.
+    assert run_js('M.displayXrp("0.003121")') == "0.0032"
+    assert run_js('M.displayXrp("0.0031")') == "0.0031"
+    # Non-amounts pass through rather than throwing into a render.
+    assert run_js("M.displayXrp(null)") == ""
+    assert run_js('M.displayXrp("0")') == "0"
+    assert run_js('M.displayXrp("nope")') == "nope"
 
 
 def test_external_fee_note():

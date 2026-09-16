@@ -18,10 +18,12 @@ rewritten when the generated block changes).
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 from scripts.readme_dashboard import count_tests
 
@@ -34,6 +36,25 @@ END_MARK = "<!-- badges:end -->"
 
 REPO = "Team-Hamsa/LFG"
 
+BADGE_ICON_DIR = Path("assets/badges")
+
+
+def custom_logo(filename: str) -> str:
+    """shields.io `logo=` value for a small icon committed under assets/badges/.
+
+    shields has no simple-icons entry for Xaman or Joey (and no plain globe), so
+    those badges carry the icon inline as a base64 data URI — PNG for the app
+    icons (28px, ~2 KB each), SVG for the globe. Read at generation time so the
+    source stays readable; stdlib only, because CI runs this with bare python3.
+    """
+    path = BADGE_ICON_DIR / filename
+    mime = "image/svg+xml" if path.suffix == ".svg" else "image/png"
+    data = base64.b64encode(path.read_bytes()).decode()
+    return quote(f"data:{mime};base64,{data}", safe="")
+
+
+# Logos in place of the wordy label: simple-icons slugs (xrp / discord /
+# telegram) where shields has them, custom data-URI icons otherwise.
 STATIC_BADGES = [
     (
         "https://img.shields.io/badge/mainnet-live-2ea043?style=flat-square",
@@ -41,24 +62,37 @@ STATIC_BADGES = [
         None,
     ),
     (
-        "https://img.shields.io/badge/web_app-live-D89030?style=flat-square",
-        "Web app live at build.letseffinggo.com",
-        "https://build.letseffinggo.com",
-    ),
-    (
-        "https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square",
+        "https://img.shields.io/badge/-NFTs-3E8DE3?style=flat-square&logo=xrp&logoColor=white",
         "Built on the XRP Ledger",
         None,
     ),
     (
-        "https://img.shields.io/badge/signing-Xaman%20%C2%B7%20Joey-F76B1C?style=flat-square",
-        "Signed in Xaman or Joey Wallet",
+        "https://img.shields.io/badge/-push%20%C2%B7%20QR%20signing-2F5BE0?style=flat-square"
+        f"&logo={custom_logo('xaman.png')}",
+        "Signed in Xaman — push delivery with QR fallback",
         None,
     ),
     (
-        "https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square",
-        "Surfaces: Discord, Telegram, Web",
+        "https://img.shields.io/badge/-WalletConnect%20signing-F66E19?style=flat-square"
+        f"&logo={custom_logo('joey.png')}",
+        "Signed in Joey Wallet over WalletConnect (web)",
         None,
+    ),
+    (
+        "https://img.shields.io/badge/-bot%20%C2%B7%20Activity-5865F2?style=flat-square&logo=discord&logoColor=white",
+        "Discord bot + Discord Activity",
+        None,
+    ),
+    (
+        "https://img.shields.io/badge/-bot%20%C2%B7%20Mini%20App-26A5E4?style=flat-square&logo=telegram&logoColor=white",
+        "Telegram bot + Telegram Mini App",
+        None,
+    ),
+    (
+        "https://img.shields.io/badge/-web%20app%20%C2%B7%20live-D89030?style=flat-square&logoColor=white"
+        f"&logo={custom_logo('globe.svg')}",
+        "Web app live at build.letseffinggo.com",
+        "https://build.letseffinggo.com",
     ),
     (
         "https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white",

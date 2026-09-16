@@ -204,7 +204,7 @@ export function priceLabel(row) {
   // collapsed into one card) prices from its floor.
   if (row.count > 1 && row.floor_brix != null) return `from ${row.floor_brix} BRIX`;
   if (row.amount_brix != null) return `${row.amount_brix} BRIX`;
-  if (row.amount_xrp != null) return `${row.amount_xrp} XRP`;
+  if (row.amount_xrp != null) return `${displayXrp(row.amount_xrp)} XRP`;
   return '';
 }
 
@@ -285,6 +285,29 @@ export function externalLabel(vm) {
 }
 
 /**
+ * Display-only XRP rounding. A brokered clearing price is computed to the
+ * drop (4.064587 XRP) and is unreadable in a button. Rounds UP — never down
+ * — to 2 decimals at/above 1 XRP, 4 below it (where 2dp would overstate a
+ * sub-XRP price several-fold). The bid still carries the exact amount: a
+ * displayed price BELOW what the buyer signs for would be a lie, and one
+ * drop short of the clearing price never fills, so down is not an option.
+ */
+export function displayXrp(xrp) {
+  if (xrp == null) return '';
+  const s = typeof xrp === 'string' ? xrp.trim() : String(xrp);
+  if (!XRP_RE.test(s)) return s; // not a plain decimal amount — leave it alone
+  let drops;
+  try {
+    drops = BigInt(xrpToDropsStr(s));
+  } catch {
+    return s; // out of range / too fine to be an amount; show it verbatim
+  }
+  const step = drops < DROPS_PER_XRP ? 100n : 10000n; // 4dp under 1 XRP, else 2dp
+  const rounded = ((drops + step - 1n) / step) * step;
+  return dropsToXrpStr(rounded.toString());
+}
+
+/**
  * #426: primary-action text for an external card that carries a clearing
  * price — "Buy now — <clearing> XRP via <marketplace>". Empty string for a
  * non-external row or one with no clearing price (unmeasured broker), so
@@ -293,7 +316,7 @@ export function externalLabel(vm) {
 export function buyNowLabel(vm) {
   if (!vm.external || vm.clearingXrp == null) return '';
   const via = vm.marketplace ? ` via ${vm.marketplace}` : '';
-  return `Buy now — ${vm.clearingXrp} XRP${via}`;
+  return `Buy now — ${displayXrp(vm.clearingXrp)} XRP${via}`;
 }
 
 /**
@@ -306,7 +329,7 @@ export function externalFeeNote(vm) {
   if (!vm.external || vm.clearingXrp == null) return '';
   const who = vm.marketplace ? `${vm.marketplace}'s` : "the marketplace's";
   const pct = vm.brokerRate != null ? `${(vm.brokerRate * 100).toFixed(2)}% ` : '';
-  const ask = vm.amountXrp != null ? `Listed at ${vm.amountXrp} XRP — the extra` : 'The premium over the ask';
+  const ask = vm.amountXrp != null ? `Listed at ${displayXrp(vm.amountXrp)} XRP — the extra` : 'The premium over the ask';
   return `${ask} covers ${who} ${pct}broker fee; the seller receives everything after that fee.`;
 }
 

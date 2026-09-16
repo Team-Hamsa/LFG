@@ -5,6 +5,7 @@ import logging
 import os
 
 from lfg_core.envload import load_dotenv_unless_skipped
+from lfg_core.log_hygiene import quiet_http_client_loggers
 
 # Gated on LFG_SKIP_DOTENV so the pytest suite never inherits the deployed .env (#323).
 load_dotenv_unless_skipped()
@@ -58,3 +59,5 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],
 )
+# Per-request httpx lines would log secret-bearing URLs (lfg_core/log_hygiene.py).
+quiet_http_client_loggers()

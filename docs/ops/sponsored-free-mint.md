@@ -99,6 +99,34 @@ until the archive is re-certified. Historically that meant re-running Step 0a
 by hand before every campaign; **that manual re-run is now automatic — see
 Step 0b, below.**
 
+### Discord-independent switch — `scripts/sponsored_mint_admin.py`
+
+The `/admin` buttons reach the service through the Discord gateway, so a
+Discord outage (2026-09-15, "Session Unavailability": every gateway connect
+returned 503 for hours while the service and Activity were healthy) locks the
+operator out of Start / Stop even though the campaign machinery itself does
+not depend on Discord. The shell fallback runs on the deploy box and calls the
+same `lfg_core.sponsored_mint` functions the handlers do, against the same
+box-local DBs:
+
+```bash
+.venv/bin/python scripts/sponsored_mint_admin.py status --network mainnet
+.venv/bin/python scripts/sponsored_mint_admin.py start  --network mainnet
+.venv/bin/python scripts/sponsored_mint_admin.py stop   --network mainnet --note "why"
+```
+
+`start` also runs the Step 0b archive re-verification synchronously and
+reports the result in its exit code (`0` usable, `3` campaign active but
+admission still fail-closed — fix the archive and `start` again; `4` started
+with `--skip-reverify`, usability unknown; `5` archive usable but the audit
+row could not be written — record the run by hand; `2` the `--network` flag
+does not match the box's `XRPL_NETWORK`; `1` refused by the library). Audit
+rows are written with actor `cli:<os-login>` (the process owner resolved from
+the real UID, not `$USER` or a flag; `--note` appends a label) so they are
+distinguishable from Discord-driven flips. The script exposes nothing over
+the network and needs the box's `.env` and DB files, so a checkout of the
+public repo alone cannot operate the campaign.
+
 ### Step 0b — automatic re-verification (no action needed)
 
 Every time an operator starts a campaign (`/admin` → Start Sponsored Mint, or

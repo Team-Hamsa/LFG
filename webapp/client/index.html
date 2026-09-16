@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v29.css">
+  <link rel="stylesheet" href="style.v31.css">
 </head>
 <body>
   <main id="app">
@@ -411,27 +411,33 @@
   <div id="listing-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
        aria-labelledby="listing-detail-title" hidden>
     <div class="confirm-box card listing-detail">
-      <img id="listing-detail-img" class="listing-detail-img" alt="">
-      <h3 id="listing-detail-title"></h3>
-      <p id="listing-detail-price" class="market-card-price"></p>
-      <p id="listing-detail-sub" class="card-sub"></p>
-      <div id="listing-detail-attrs" class="listing-attrs"></div>
-      <div id="listing-detail-offers" class="listing-offers" hidden></div>
-      <p id="listing-detail-bids" class="card-sub" hidden></p>
-      <p id="listing-detail-fee" class="card-sub" hidden></p>
-      <div id="listing-bid-form" class="listing-bid-form" hidden>
-        <input id="listing-bid-price" type="text" inputmode="decimal" placeholder="Bid in XRP">
-        <button id="listing-bid-confirm" class="secondary">Confirm bid</button>
+      <button id="listing-detail-close" class="listing-detail-close" aria-label="Close">&times;</button>
+      <div class="listing-detail-body">
+        <div class="listing-detail-media">
+          <img id="listing-detail-img" class="listing-detail-img" alt="">
+        </div>
+        <div class="listing-detail-info">
+          <h3 id="listing-detail-title"></h3>
+          <p id="listing-detail-price" class="market-card-price"></p>
+          <p id="listing-detail-sub" class="card-sub"></p>
+          <div id="listing-detail-attrs" class="listing-attrs"></div>
+          <div id="listing-detail-offers" class="listing-offers" hidden></div>
+          <p id="listing-detail-bids" class="card-sub" hidden></p>
+          <p id="listing-detail-fee" class="card-sub" hidden></p>
+          <div id="listing-bid-form" class="listing-bid-form" hidden>
+            <input id="listing-bid-price" type="text" inputmode="decimal" placeholder="Bid in XRP">
+            <button id="listing-bid-confirm" class="secondary">Confirm bid</button>
+          </div>
+          <div class="listing-history-wrap">
+            <p id="listing-history-title" class="card-sub" hidden>Sale history</p>
+            <ul id="listing-detail-history" class="listing-history"></ul>
+          </div>
+        </div>
       </div>
-      <div class="listing-history-wrap">
-        <p id="listing-history-title" class="card-sub" hidden>Sale history</p>
-        <ul id="listing-detail-history" class="listing-history"></ul>
-      </div>
-      <div class="confirm-actions">
+      <div class="listing-detail-actions">
         <button id="listing-detail-bid" class="secondary" hidden>Place bid</button>
         <button id="listing-detail-external" class="secondary" hidden></button>
         <button id="listing-detail-action" class="primary"></button>
-        <button id="listing-detail-close" class="secondary">Close</button>
       </div>
     </div>
   </div>
@@ -475,6 +481,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=90"></script>
+  <script type="module" src="app.js?v=91"></script>
 </body>
 </html>
