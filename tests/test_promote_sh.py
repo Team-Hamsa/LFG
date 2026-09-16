@@ -294,3 +294,20 @@ def _run_ok(cwd, *args):
         subprocess.run(["git", *args], cwd=cwd, capture_output=True, env=_scrubbed_env()).returncode
         == 0
     )
+
+
+def test_hand_commit_on_top_of_main_is_refused(tmp_path):
+    origin, work = _setup(tmp_path)
+    assert _run(work, "--yes").returncode == 0  # deploy == main
+    second = tmp_path / "second"
+    _git(tmp_path, "clone", str(origin), str(second))
+    _git(second, "checkout", "-B", "deploy", "origin/deploy")
+    (second / "hand.py").write_text("z = 1\n")
+    _git(second, "add", ".")
+    _git(second, "commit", "-m", "direct commit to deploy")
+    _git(second, "push", "origin", "deploy")
+
+    for args in (("--yes",), ("--list",)):
+        r = _run(work, *args)
+        assert r.returncode == 1, args
+        assert "NOT an ancestor" in r.stderr

@@ -308,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
             for c in todo:
                 print(c.label())
             return 0
+        # Validate deploy-only commits BEFORE any early return: a hand commit
+        # sitting on top of main makes main an ancestor of deploy, and must be
+        # refused, not reported as "up to date".
+        already_picked(deploy_sha, main_sha)
         if main_sha == deploy_sha or is_ancestor(main_sha, deploy_sha):
             print(f"deploy is already up to date with main ({main_sha}). Nothing to promote.")
             return 0
