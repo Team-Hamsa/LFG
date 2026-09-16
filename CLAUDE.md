@@ -215,8 +215,14 @@ when its branch moves, pip-installs on requirements changes, and
 drain-restarts the stack (prod refuses to restart if sessions won't drain —
 manual `pm2 restart ... --update-env` then). Merging a PR to `main`
 auto-deploys STAGING ONLY. Promote to prod with `scripts/promote.sh`
-(confirmed fast-forward of `deploy` to `main`). The old post-merge
-auto-restart hook is retired.
+(confirmed fast-forward of `deploy` to `main`). To ship only some merges,
+`scripts/promote.sh --list` then `--pick <PR#|sha>...`: a prefix
+fast-forwards; any other subset is cherry-picked (`-x`) onto `deploy` in a
+throwaway worktree and pushed only if the pre-push gate passes on that build
+(CI never runs on `deploy`, and staging never ran that mix). A later plain
+`promote.sh` pushes a sync commit carrying `main`'s exact tree, so `deploy`
+always moves forward and never conflicts. Hand commits on `deploy` are still
+refused. The old post-merge auto-restart hook is retired.
 
 | prod (`~/LFG`, deploy, mainnet) | staging (`~/LFG-staging`, main, testnet) |
 |---|---|
