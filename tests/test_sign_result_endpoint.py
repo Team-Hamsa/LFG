@@ -4,6 +4,7 @@
 # back; a claimed hash is only believed once it is VERIFIED on-ledger against
 # the txjson we asked for.
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -906,20 +907,84 @@ def test_matched_payment_past_the_grace_is_recorded(monkeypatch, tmp_path, caplo
 
 @pytest.mark.parametrize("lookup", ["not_found", "pending"])
 def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, caplog, lookup):
-    """Never validated within the re-check's bound: no record, and the
-    re-check ends on its own. The hash is still logged when we answer, so a
-    payment we could not confirm is never silent."""
+    """A hash that has not validated is re-checked and never recorded on what
+    the re-check sees. The hash is still logged when we answer, so a payment
+    we could not confirm is never silent."""
     row = _cancelled_payment_row()
-    calls = _fake_tx_sequence(monkeypatch, _not_validated(lookup))
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)  # ended by the test, not a timer
+    calls = []
+    gate: dict = {}
+
+    async def _get_tx(tx_hash):
+        calls.append(tx_hash)
+        polled = gate.get("polled")
+        if polled is not None and len(calls) > 1:
+            polled.set()  # the re-check has issued a poll of its own
+        return _not_validated(lookup)
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+
+    async def go():
+        gate["polled"] = asyncio.Event()
+        response = await _late_post(row["id"])
+        (recheck,) = app._late_signature_rechecks.values()
+        await asyncio.wait_for(gate["polled"].wait(), 10)
+        recheck.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await recheck
+        return response
+
     with caplog.at_level(logging.ERROR):
-        r = _post_and_settle(row["id"])
+        r = _run(go())
     assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
-    assert len(calls) > 1  # the post's own lookup, then the re-check's polls
-    assert app._late_signature_rechecks == {}
+    assert len(calls) > 1  # the post's own lookup, then the re-check's poll
     assert _late_records(tmp_path, row["id"], HASH) == []
     assert _error_logs_naming(caplog, row["id"], HASH)  # logged, not silent
     assert _error_logs_naming(caplog, "LATE SIGNATURE:") == []  # but not a refund alarm
     _assert_row_untouched(row["id"])
+
+
+def test_late_recheck_gives_up_at_its_cap(monkeypatch, tmp_path):
+    """A transaction that never validates must not leave a poller running: the
+    re-check ends by itself and records nothing."""
+    row = _cancelled_payment_row()
+    _fake_tx_sequence(monkeypatch, _not_validated())  # cap 0.2 s from the fixture
+    r = _post_and_settle(row["id"])  # settles by waiting the re-check out
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert app._late_signature_rechecks == {}
+    assert _late_records(tmp_path, row["id"], HASH) == []
+
+
+def test_late_rechecks_are_capped(monkeypatch, tmp_path, caplog):
+    """POST /api/sign/{id}/result is unmetered per-request work, and each
+    re-check polls the ledger for minutes. One caller posting distinct hashes
+    must not be able to fan out pollers without limit."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_INFLIGHT", 2)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx(monkeypatch, result=_not_validated())
+
+    async def go():
+        responses = [
+            await app.handle_sign_result(_Req(body={"hash": h}, match={"request_id": row["id"]}))
+            for h in ("B" * 64, "C" * 64, "D" * 64)
+        ]
+        inflight = list(app._late_signature_rechecks.values())
+        for recheck in inflight:
+            recheck.cancel()
+        for recheck in inflight:
+            with contextlib.suppress(asyncio.CancelledError):
+                await recheck
+        return responses, len(inflight)
+
+    with caplog.at_level(logging.WARNING):
+        responses, inflight = _run(go())
+    assert [r.status for r in responses] == [409, 409, 409]  # the answer never changes
+    assert inflight == 2
+    assert any(
+        "in flight" in rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING
+    )
+    assert _late_records_for_hash(tmp_path, "D" * 64) == []
 
 
 def test_late_hash_validated_on_a_later_poll_is_recorded(monkeypatch, tmp_path, caplog):
@@ -968,17 +1033,20 @@ def test_duplicate_late_posts_share_one_recheck(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
     started = []
     real_recheck = app._recheck_late_signature
+    gate: dict = {}
 
     async def _counted_recheck(*args):
         started.append(asyncio.current_task())
+        gate["running"].set()
         await real_recheck(*args)
 
     monkeypatch.setattr(app, "_recheck_late_signature", _counted_recheck)
 
     async def go():
+        gate["running"] = asyncio.Event()
         for _ in range(3):
             assert (await _late_post(row["id"])).status == 409
-        await asyncio.sleep(0.05)  # let every spawned re-check start polling
+        await asyncio.wait_for(gate["running"].wait(), 10)  # every spawn has run
         landed["validated"] = True
         await asyncio.wait_for(asyncio.gather(*started), 5)
 

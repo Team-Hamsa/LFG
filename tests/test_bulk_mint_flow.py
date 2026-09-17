@@ -240,9 +240,9 @@ def test_prepare_payment_multiplies_price_xrp(monkeypatch):
 
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
     monkeypatch.setattr(config, "MINT_PRICE_XRP", "10")
-    monkeypatch.setattr(
-        bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None)
-    )  # no LFGO -> XRP path
+    # The tri-state lookup prepare_payment actually calls: a real one opens a
+    # websocket to config.WS_URL, which no test may do.
+    _stub_trustline(monkeypatch, xrpl_ops.TrustlineState.ABSENT)  # no LFGO -> XRP path
     monkeypatch.setattr(
         bulk_mint_flow.xumm_ops,
         "create_payment_payload",
@@ -268,7 +268,7 @@ def test_prepare_payment_pins_signing_account(monkeypatch):
         return {"xumm_url": "x", "uuid": "u"}
 
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
-    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None))
+    _stub_trustline(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
     monkeypatch.setattr(bulk_mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     j = _job(2)
     j.clamp_to_headroom()

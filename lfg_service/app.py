@@ -9716,6 +9716,12 @@ async def handle_sign_request(request):
 # background re-check per (request, hash) (#513).
 _LATE_RECHECK_INTERVAL_SECONDS = 4.0
 _LATE_RECHECK_MAX_SECONDS = 180.0
+# Ceiling on re-checks in flight at once. Posting a result is ordinary
+# per-request work with no rate limit of its own, and one caller with a
+# resolved row of their own could otherwise post N distinct hashes and leave
+# N pollers running for minutes, each spending ledger lookups. Past the
+# ceiling a late hash is still logged and answered; it just is not re-checked.
+_LATE_RECHECK_MAX_INFLIGHT = 32
 _late_signature_rechecks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
 
@@ -9826,6 +9832,12 @@ def _spawn_late_signature_recheck(
     Tracked so it is never GC'd mid-poll and on_cleanup can cancel it."""
     key = (row["id"], tx_hash)
     if key in _late_signature_rechecks:
+        return
+    if len(_late_signature_rechecks) >= _LATE_RECHECK_MAX_INFLIGHT:
+        logging.warning(
+            f"late signature re-check for {tx_hash} not scheduled: "
+            f"{len(_late_signature_rechecks)} already in flight"
+        )
         return
     task = asyncio.create_task(_recheck_late_signature(row, tx_hash, first_result))
     _late_signature_rechecks[key] = task
