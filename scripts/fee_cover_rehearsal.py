@@ -55,7 +55,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from xrpl.asyncio.wallet import generate_faucet_wallet  # noqa: E402
 from xrpl.models import TransactionMetadata  # noqa: E402
-from xrpl.models.requests import AccountNFTs, LedgerEntry, ServerInfo  # noqa: E402
+from xrpl.models.requests import AccountNFTs, Ledger, LedgerEntry, ServerInfo  # noqa: E402
 from xrpl.models.transactions import (  # noqa: E402
     Memo,
     NFTokenAcceptOffer,
@@ -126,9 +126,15 @@ class Chain(Protocol):
 
     async def submit(self, tx: Transaction, wallet: Wallet, label: str) -> dict[str, Any]: ...
 
-    async def ledger_entry(self, index: str) -> dict[str, Any] | None: ...
+    async def validated_ledger_index(self) -> int: ...
 
-    async def holds_nft(self, address: str, nft_id: str) -> bool: ...
+    async def ledger_entry(
+        self, index: str, ledger_index: int | str = "validated"
+    ) -> dict[str, Any] | None: ...
+
+    async def holds_nft(
+        self, address: str, nft_id: str, ledger_index: int | str = "validated"
+    ) -> bool: ...
 
 
 class XrplChain:
@@ -215,9 +221,19 @@ class XrplChain:
             raise RehearsalError(f"{label}: failed on-ledger (its result is in the warning above)")
         return result
 
-    async def ledger_entry(self, index: str) -> dict[str, Any] | None:
+    async def validated_ledger_index(self) -> int:
+        """The latest validated ledger, so two reads can be pinned to one view."""
+        response = await asyncio.to_thread(self.client.request, Ledger(ledger_index="validated"))
+        index = response.result.get("ledger_index") if response.is_successful() else None
+        if not isinstance(index, int):
+            raise RehearsalError(f"could not read the validated ledger index: {response.result}")
+        return index
+
+    async def ledger_entry(
+        self, index: str, ledger_index: int | str = "validated"
+    ) -> dict[str, Any] | None:
         response = await asyncio.to_thread(
-            self.client.request, LedgerEntry(index=index, ledger_index="validated")
+            self.client.request, LedgerEntry(index=index, ledger_index=ledger_index)
         )
         if response.is_successful():
             node = response.result.get("node")
@@ -226,8 +242,10 @@ class XrplChain:
             return None
         raise RehearsalError(f"ledger_entry {index} failed: {response.result.get('error')}")
 
-    async def holds_nft(self, address: str, nft_id: str) -> bool:
-        """Whether `address` holds `nft_id` on the validated ledger.
+    async def holds_nft(
+        self, address: str, nft_id: str, ledger_index: int | str = "validated"
+    ) -> bool:
+        """Whether `address` holds `nft_id` at `ledger_index`.
 
         `account_nfts`, not `nft_info`: the latter is clio-only, and
         CLIO_WS_URL is a separate endpoint this harness never verified as
@@ -236,7 +254,7 @@ class XrplChain:
         for _ in range(ACCOUNT_NFTS_MAX_PAGES):
             response = await asyncio.to_thread(
                 self.client.request,
-                AccountNFTs(account=address, ledger_index="validated", limit=400, marker=marker),
+                AccountNFTs(account=address, ledger_index=ledger_index, limit=400, marker=marker),
             )
             if not response.is_successful():
                 if response.result.get("error") == "actNotFound":
@@ -495,12 +513,21 @@ async def _resume_delivery(chain: Chain, path: str, state: dict[str, Any], selle
     Still there → nothing to settle, the accept below runs. Gone AND the
     seller holds the character → the accept landed. Gone and it does not →
     the offer was cancelled (the issuer can cancel its own), so forget it and
-    make a new one rather than record a delivery that never happened."""
+    make a new one rather than record a delivery that never happened.
+
+    Both reads are pinned to ONE validated ledger. They are separate requests
+    over a failover client, so unpinned they could describe different
+    instants: an endpoint lagging the accept would report the seller as not
+    holding a character it does have, and this would clear the offer and
+    leave the issuer re-offering a token it no longer owns. Pinned, such an
+    endpoint answers lgrNotFound instead, which raises and leaves the state
+    untouched for a later re-run."""
+    ledger = await chain.validated_ledger_index()
     offer = str(state["transfer_offer"])
-    if await chain.ledger_entry(offer) is not None:
+    if await chain.ledger_entry(offer, ledger_index=ledger) is not None:
         return
     nft_id = str(state["nft_id"])
-    if await chain.holds_nft(seller.address, nft_id):
+    if await chain.holds_nft(seller.address, nft_id, ledger_index=ledger):
         print(f"transfer offer {offer} was accepted before it could be recorded")
         state["seller_holds_nft"] = True
     else:

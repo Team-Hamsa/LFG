@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from xrpl.models.requests import AccountNFTs
+from xrpl.models.requests import AccountNFTs, Ledger
 from xrpl.models.response import Response, ResponseStatus
 from xrpl.models.transactions import NFTokenAcceptOffer, NFTokenCreateOffer, NFTokenMint, Payment
 from xrpl.wallet import Wallet
@@ -53,6 +53,8 @@ class FakeChain:
         self.lookups: list[str] = []
         self.owned: set[tuple[str, str]] = set()
         self.ownership_checks: list[tuple[str, str]] = []
+        self.pinned: list[object] = []
+        self.lagging = False
 
     async def ensure_testnet(self):
         if self.network != "testnet":
@@ -95,12 +97,19 @@ class FakeChain:
         self.results.append(result)
         return result
 
-    async def ledger_entry(self, index):
+    async def validated_ledger_index(self):
+        return 900
+
+    async def ledger_entry(self, index, ledger_index="validated"):
         self.lookups.append(index)
+        self.pinned.append(ledger_index)
         return self.entries.get(index)
 
-    async def holds_nft(self, address, nft_id):
+    async def holds_nft(self, address, nft_id, ledger_index="validated"):
         self.ownership_checks.append((address, nft_id))
+        self.pinned.append(ledger_index)
+        if self.lagging:
+            raise rehearsal.RehearsalError(f"account_nfts for {address} failed: lgrNotFound")
         return (address, nft_id) in self.owned
 
     def txs(self, kind):
@@ -370,6 +379,24 @@ def test_mint_to_seller_re_offers_a_transfer_offer_that_was_cancelled(testnet, s
     after = _state(state_path)
     assert accept.nftoken_sell_offer == after["transfer_offer"] != stale_offer
     assert after["seller_holds_nft"] is True and after["nft_id"] == state["nft_id"]
+    # both reads were pinned to one ledger, so they describe the same instant
+    assert retry.pinned == [900, 900]
+
+
+def test_mint_to_seller_leaves_the_state_alone_when_a_read_cannot_answer(testnet, state_path):
+    """The offer read and the ownership read are separate requests over a
+    failover client. An endpoint that lags the accept cannot serve the pinned
+    ledger and errors; concluding "cancelled" from that would clear the offer
+    and leave the issuer re-offering a character it no longer owns, wedged
+    until someone edited the state file."""
+    state = _crashed_before_recording_the_accept(state_path)
+    retry = FakeChain()
+    retry.lagging = True
+    assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=retry) == 1
+    after = _state(state_path)
+    assert after["transfer_offer"] == state["transfer_offer"]
+    assert "seller_holds_nft" not in after
+    assert retry.txs(NFTokenCreateOffer) == [] and retry.txs(NFTokenAcceptOffer) == []
 
 
 def _mint_meta(nft_id):
@@ -665,6 +692,8 @@ class _Client:
 
     def request(self, req):
         self.requests.append(req)
+        if isinstance(req, Ledger):
+            return Response(status=ResponseStatus.SUCCESS, result={"ledger_index": 4242})
         if isinstance(req, AccountNFTs):
             if req.marker is None:
                 page = [{"NFTokenID": "00081388" + "D" * 56}]
@@ -825,13 +854,16 @@ def test_the_real_chain_sends_everything_through_rpc_client(endpoints, monkeypat
     assert _run(chain.ledger_entry(BUY_OFFER)) == {"LedgerEntryType": "NFTokenOffer"}
     assert _run(chain.ledger_entry("C" * 64)) is None
     # account_nfts, over the same verified endpoints, and it follows markers
-    assert _run(chain.holds_nft(wallet.address, HELD_NFT)) is True
+    assert _run(chain.validated_ledger_index()) == 4242
+    assert _run(chain.holds_nft(wallet.address, HELD_NFT, ledger_index=4242)) is True
     assert _run(chain.holds_nft(wallet.address, "00081388" + "E" * 56)) is False
+    assert [r.ledger_index for r in client.requests if isinstance(r, AccountNFTs)][0] == 4242
     assert endpoints.submitted == [(client, "ok"), (client, "refused")]
     assert endpoints.funded == [(client, wallet.address)]
     assert [type(r).__name__ for r in client.requests] == [
         "LedgerEntry",
         "LedgerEntry",
+        "Ledger",
         "AccountNFTs",
         "AccountNFTs",
         "AccountNFTs",
