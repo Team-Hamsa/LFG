@@ -137,6 +137,34 @@ def test_create_ask_allows_body_asset():
     assert (ask["slot"], ask["value"]) == ("Body", "Skeleton")
 
 
+def test_create_pending_bid_refuses_none_value():
+    """(#516 task-review finding) create_ask checks this, but a bid doesn't
+    hold the asset it targets, so nothing forced create_pending_bid through
+    the same gate — and it is called directly by scripts/closet_market_e2e.py,
+    outside the guarded handle_closet_bid_create HTTP path. A persisted
+    "None" bid could later be filled for BRIX out of the real positive-count
+    (<Slot>, "None") rows harvested blanks leave in closet_assets."""
+    c = _conn()
+    with pytest.raises(cms.OrderError) as e:
+        cms.create_pending_bid(
+            c,
+            owner=BUYER,
+            slot="Head",
+            value="None",
+            price_brix="1",
+            platform=None,
+            condition="C",
+            fulfillment_enc="S",
+            cancel_after=9,
+            payload_uuid=None,
+            xumm_url=None,
+            qr_url=None,
+            push=None,
+        )
+    assert e.value.code == "invalid_asset"
+    assert c.execute("SELECT COUNT(*) FROM closet_orders").fetchone()[0] == 0
+
+
 # --- #516: ensure_schema races another process's identical ALTER on an older
 # DB — mirrors fee_cover_store._migrate's tolerance of the same shape of
 # failure. ---------------------------------------------------------------

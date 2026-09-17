@@ -507,6 +507,16 @@ def create_pending_bid(
     user_lls: int | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
+    if value == "None":
+        # (#516 D5, task-review finding) A bid never holds the asset it
+        # targets, so nothing else here would ever refuse "None" — mirror
+        # create_ask's guard, checked before any DB work, so every caller
+        # (the HTTP handler AND scripts/closet_market_e2e.py, which calls
+        # this directly) is covered, not just the handler's own duplicate
+        # check. Without this a persisted "None" bid could be filled for
+        # BRIX out of the real positive-count (<Slot>, "None") rows a
+        # harvested blank leaves in closet_assets.
+        raise OrderError("invalid_asset", "an empty slot can't be traded")
     ts = now if now is not None else _now()
     oid = new_id()
     try:
