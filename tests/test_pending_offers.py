@@ -463,6 +463,72 @@ def test_accept_priced_offer_missing_trustline_409(monkeypatch):
     assert json.loads(response.body)["code"] == "trustline_required"
 
 
+def test_accept_priced_offer_missing_swap_offer_trustline_is_not_auto_recoverable(monkeypatch):
+    # Greptile P1 on the fix above (PR #457, re-review on 8833c62): the
+    # client's recovery flow for `trustline_required` (startBrixTrustline)
+    # always sets the BRIX_* line specifically. If a deployment configures
+    # BRIX_* and SWAP_OFFER_* independently and the offer is priced in the
+    # SWAP_OFFER_* pair, auto-routing that case to `trustline_required` would
+    # have the client set the WRONG asset, the retry would 409 the same way
+    # forever, and the user would be trapped in an infinite loop — never
+    # reaching the accept that unsticks the NFT. The code must therefore
+    # differ from the safely-auto-recoverable BRIX_* case above, so the
+    # client falls back to its generic (non-looping) error display instead
+    # of invoking a recovery flow that can't fix this specific asset.
+    from lfg_service import app
+
+    brix_currency = "4252495800000000000000000000000000000000"
+    brix_issuer = "rBRIXISSUER"
+    swap_currency = "ABABABABABABABABABABABABABABABABABABABAB"
+    swap_issuer = "rSWAPOFFERISSUER"
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_CURRENCY_HEX", brix_currency)
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_ISSUER", brix_issuer)
+    monkeypatch.setattr(app.xrpl_ops.config, "SWAP_OFFER_CURRENCY_HEX", swap_currency)
+    monkeypatch.setattr(app.xrpl_ops.config, "SWAP_OFFER_ISSUER", swap_issuer)
+
+    class _Request(dict):
+        headers = {"Authorization": "Bearer test"}
+
+        async def json(self):
+            return {"offer_index": "OFFswap"}
+
+    priced_offer = _offer(
+        offer_index="swap",
+        amount={"currency": swap_currency, "issuer": swap_issuer, "value": "10"},
+    )
+
+    async def _offers(_wallet):
+        return [priced_offer]
+
+    async def _absent_trustline(_wallet, _currency, _issuer):
+        return xrpl_ops.TrustlineState.ABSENT, None
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("no payload may be built when the caller has no trustline")
+
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setattr(
+        app, "verify_session_token", lambda _token: {"id": "user", "platform": "web"}
+    )
+    monkeypatch.setattr(
+        app, "_resolve_wallet", lambda _platform, _user: asyncio.sleep(0, result=WALLET)
+    )
+    monkeypatch.setattr(app.xrpl_ops, "bot_wallet_address", lambda: "rISSUER")
+    monkeypatch.setattr(app.xrpl_ops, "get_account_nft_offers", _offers)
+    monkeypatch.setattr(app.xrpl_ops, "get_trustline_state", _absent_trustline)
+    monkeypatch.setattr(app, "_request_return_url", _must_not_be_called)
+    monkeypatch.setattr(app.xumm_ops, "create_accept_offer_payload", _must_not_be_called)
+
+    response = asyncio.get_event_loop().run_until_complete(
+        app.handle_pending_offer_accept(_Request())
+    )
+
+    assert response.status == 409
+    # NOT trustline_required — that code is reserved for a missing BRIX_*
+    # line specifically, the one the client's recovery flow can actually set.
+    assert json.loads(response.body)["code"] != "trustline_required"
+
+
 def test_accept_priced_offer_unknown_trustline_proceeds(monkeypatch):
     # UNKNOWN (the lookup itself failed) must fail OPEN, unlike ABSENT or a
     # confirmed-low balance: a transient RPC blip must never block a legitimate

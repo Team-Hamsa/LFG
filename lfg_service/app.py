@@ -7750,10 +7750,29 @@ async def handle_pending_offer_accept(request):
             if state == xrpl_ops.TrustlineState.ABSENT:
                 # No line at all — not merely short. The stranded editions
                 # this endpoint exists to unstick are exactly the population
-                # likely to have never set one; same code + message the
-                # mint/market flows already use for this precondition.
+                # likely to have never set one.
+                if (currency, issuer) == (config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER):
+                    # Safely auto-recoverable: the client's trustline_required
+                    # handler (startBrixTrustline) always sets THIS specific
+                    # pair, same code + message the mint/market flows already
+                    # use for this precondition.
+                    return web.json_response(
+                        {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                        status=409,
+                    )
+                # The offer is priced in the SWAP_OFFER_* pair specifically,
+                # and (per the branch above) it differs from BRIX_* in this
+                # deployment. The client's ONE recovery flow always sets
+                # BRIX_*, so routing this through trustline_required would
+                # set the wrong asset and trap the caller in an infinite
+                # retry loop (Greptile P1, PR #457 re-review). A different
+                # code — no client auto-recovery is offered for it.
                 return web.json_response(
-                    {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                    {
+                        "error": "this offer needs a trustline the app can't set for you"
+                        " automatically",
+                        "code": "offer_trustline_required",
+                    },
                     status=409,
                 )
             if state == xrpl_ops.TrustlineState.PRESENT and balance is not None and balance < price:
