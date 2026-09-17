@@ -9710,29 +9710,38 @@ async def handle_sign_request(request):
     )
 
 
+# A late hash posted before its transaction validated gets one bounded
+# background re-check per (request, hash) (#513).
+_LATE_RECHECK_INTERVAL_SECONDS = 4.0
+_LATE_RECHECK_MAX_SECONDS = 180.0
+_late_signature_rechecks: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+
 def _save_late_signature_record(record: dict[str, Any]) -> tuple[str, bool]:
     """Journal a late signature (#513) in ECONOMY_RECORDS_DIR, next to the
-    other records an admin reconciles by hand. One file per (request, hash),
-    written atomically, so a repost of the same hash never adds a second
-    record. Returns `(path, created)`; `created` is False when the pair is
-    already on record. Raises on a disk failure."""
+    other records an admin reconciles by hand. One file per (request, hash):
+    the complete record goes to a temp file that is then hard-linked into
+    place, and a link never replaces an existing file, so concurrent or
+    repeated posts create the record exactly once. Returns `(path, created)`;
+    `created` is False when the pair is already on record. Raises on a disk
+    failure."""
     records_dir = config.ECONOMY_RECORDS_DIR
     os.makedirs(records_dir, exist_ok=True)
     path = os.path.join(
         records_dir, f"late-signature-{record['request_id']}-{record['tx_hash']}.json"
     )
-    if os.path.exists(path):
-        return path, False
     fd, tmp = tempfile.mkstemp(dir=records_dir, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(record, f, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return path, False
+        return path, True
+    finally:
         with contextlib.suppress(OSError):
             os.remove(tmp)
-        raise
-    return path, True
 
 
 async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
@@ -9745,20 +9754,111 @@ async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
     means the wallet paid for nothing. Record it for a manual refund. Never
     raises and never touches the row; the caller answers 409 either way.
     """
-    request_id, wallet = row["id"], row["wallet"]
     try:
         result = await xrpl_ops.get_tx(tx_hash)
-        if not (result or {}).get("validated"):
+    except Exception as exc:
+        _log_unverifiable_late_hash(row, tx_hash, exc)
+        return
+    if (result or {}).get("validated"):
+        await _record_late_signature(row, tx_hash, result)
+    else:
+        # Joey returns the hash right after submitting, so the post usually
+        # beats validation. Keep checking in the background.
+        _spawn_late_signature_recheck(row, tx_hash, result)
+
+
+def _log_unverifiable_late_hash(row: dict[str, Any], tx_hash: str, exc: Exception) -> None:
+    logging.error(
+        f"late signature check: could not verify tx {tx_hash} posted by {row['wallet']} for "
+        f"{row['state']} sign request {row['id']} — check it on-ledger",
+        exc_info=exc,
+    )
+
+
+def _spawn_late_signature_recheck(
+    row: dict[str, Any], tx_hash: str, first_result: dict[str, Any] | None
+) -> None:
+    """Start the bounded background re-check for a late hash that had not
+    validated when it was posted. One per (request, hash): reposts share it.
+    Tracked so it is never GC'd mid-poll and on_cleanup can cancel it."""
+    key = (row["id"], tx_hash)
+    if key in _late_signature_rechecks:
+        return
+    task = asyncio.create_task(_recheck_late_signature(row, tx_hash, first_result))
+    _late_signature_rechecks[key] = task
+
+    def _forget(done: asyncio.Task[None]) -> None:
+        if _late_signature_rechecks.get(key) is done:
+            del _late_signature_rechecks[key]
+
+    task.add_done_callback(_forget)
+
+
+def _last_ledger_sequence(result: dict[str, Any] | None) -> int | None:
+    tx = (result or {}).get("tx_json") or result or {}
+    last_ledger = tx.get("LastLedgerSequence")
+    return last_ledger if isinstance(last_ledger, int) else None
+
+
+async def _recheck_late_signature(
+    row: dict[str, Any], tx_hash: str, first_result: dict[str, Any] | None
+) -> None:
+    """Poll a late hash every _LATE_RECHECK_INTERVAL_SECONDS. Stop when it
+    validates (then record it like any late signature), when the validated
+    ledger has passed its LastLedgerSequence (it can never validate), or after
+    _LATE_RECHECK_MAX_SECONDS."""
+    deadline = time.monotonic() + _LATE_RECHECK_MAX_SECONDS
+    last_ledger = _last_ledger_sequence(first_result)
+    lookup_error: Exception | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_LATE_RECHECK_INTERVAL_SECONDS)
+        # Read the validated index BEFORE the lookup: if it was already past
+        # LastLedgerSequence and the lookup still finds no validated tx, the
+        # tx was not in any ledger it could have been in.
+        closed: int | None = None
+        if last_ledger is not None:
+            try:
+                closed = await xrpl_ops.current_validated_ledger_index()
+            except Exception:
+                closed = None
+        try:
+            result = await xrpl_ops.get_tx(tx_hash)
+        except Exception as exc:
+            lookup_error = exc
+            continue
+        lookup_error = None
+        if (result or {}).get("validated"):
+            await _record_late_signature(row, tx_hash, result)
             return
+        last_ledger = _last_ledger_sequence(result) or last_ledger
+        if last_ledger is not None and closed is not None and closed > last_ledger:
+            return
+    if lookup_error is not None:
+        _log_unverifiable_late_hash(row, tx_hash, lookup_error)
+
+
+async def _stop_late_signature_rechecks(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: cancel late-signature re-checks still polling
+    (#513). A re-check only reads the ledger and writes a journal file, so
+    cancelling one costs that record at most (the #517 sweep's case)."""
+    rechecks = list(_late_signature_rechecks.values())
+    for task in rechecks:
+        task.cancel()
+    for task in rechecks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _record_late_signature(row: dict[str, Any], tx_hash: str, result: dict[str, Any]) -> None:
+    """Journal a VALIDATED late transaction and raise the refund alarm, if it
+    is a successful, exact match for the row. Never raises."""
+    request_id, wallet = row["id"], row["wallet"]
+    try:
         tx, matched, _reused = await _verify_request_tx(row, tx_hash, result)
-        if not matched or (result.get("meta") or {}).get("TransactionResult") != "tesSUCCESS":
-            return
-    except Exception:
-        logging.error(
-            f"late signature check: could not verify tx {tx_hash} posted by {wallet} for "
-            f"{row['state']} sign request {request_id} — check it on-ledger",
-            exc_info=True,
-        )
+    except Exception as exc:
+        _log_unverifiable_late_hash(row, tx_hash, exc)
+        return
+    if not matched or (result.get("meta") or {}).get("TransactionResult") != "tesSUCCESS":
         return
     amount, destination = tx.get("Amount"), tx.get("Destination")
     record = {
@@ -11360,6 +11460,7 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)
     app.on_cleanup.append(_stop_sponsored_burn_worker)
+    app.on_cleanup.append(_stop_late_signature_rechecks)
     return app
 
 

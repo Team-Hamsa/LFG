@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 
 import pytest
@@ -58,6 +59,17 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "DATABASE", str(tmp_path / "sign.db"))
     # Late-signature journal records (#513) land in a per-test directory.
     monkeypatch.setattr(app.config, "ECONOMY_RECORDS_DIR", str(tmp_path / "records"))
+    # A late hash posted before it validates gets one bounded background
+    # re-check: poll fast, cap it short, keep the task registry per-test, and
+    # never ask a real ledger for its index.
+    monkeypatch.setattr(app, "_late_signature_rechecks", {})
+    monkeypatch.setattr(app, "_LATE_RECHECK_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 0.2)
+
+    async def _no_ledger_index():
+        return None
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _no_ledger_index)
     store.ensure_table()
 
 
@@ -698,6 +710,48 @@ def _assert_row_untouched(request_id):
     assert got["txid"] is None
 
 
+def _not_validated(kind="pending"):
+    """What `tx` answers before a submitted transaction validates."""
+    if kind == "not_found":
+        return {"error": "txnNotFound"}
+    result = _rippled_shape(_mint_payment())  # LastLedgerSequence 99
+    result["validated"] = False
+    result["tx_json"]["validated"] = False
+    result.pop("meta")
+    return result
+
+
+def _fake_tx_sequence(monkeypatch, *results):
+    """get_tx answers each call with the next result; the last one repeats.
+    Returns the list of hashes looked up."""
+    calls = []
+
+    async def _get_tx(tx_hash):
+        calls.append(tx_hash)
+        return results[min(len(calls), len(results)) - 1]
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+    return calls
+
+
+def _late_post(rid):
+    return app.handle_sign_result(_Req(body={"hash": HASH}, match={"request_id": rid}))
+
+
+def _post_and_settle(rid, timeout=5):
+    """POST a hash, then wait out every late-signature re-check it scheduled,
+    on the same loop (a re-check left pending would die with the loop)."""
+
+    async def go():
+        response = await _late_post(rid)
+        pending = list(app._late_signature_rechecks.values())
+        if pending:
+            await asyncio.wait_for(asyncio.gather(*pending), timeout)
+        return response
+
+    return _run(go())
+
+
 def test_late_hash_on_cancelled_row_is_recorded(monkeypatch, tmp_path, caplog):
     row = _cancelled_payment_row()
     _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
@@ -714,20 +768,128 @@ def test_late_hash_on_cancelled_row_is_recorded(monkeypatch, tmp_path, caplog):
     _assert_row_untouched(row["id"])
 
 
-@pytest.mark.parametrize("lookup", ["not_found", "unvalidated"])
+@pytest.mark.parametrize("lookup", ["not_found", "pending"])
 def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, lookup):
+    """Never validated within the re-check's bound: no record, and the
+    re-check ends on its own."""
     row = _cancelled_payment_row()
-    if lookup == "not_found":
-        result = {"error": "txnNotFound"}
-    else:
-        result = _rippled_shape(_mint_payment())
-        result["validated"] = False
-        result["tx_json"]["validated"] = False
-    _fake_tx(monkeypatch, result=result)
-    r = _post(row["id"], {"hash": HASH})
+    calls = _fake_tx_sequence(monkeypatch, _not_validated(lookup))
+    r = _post_and_settle(row["id"])
     assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert len(calls) > 1  # the post's own lookup, then the re-check's polls
+    assert app._late_signature_rechecks == {}
     assert _late_records(tmp_path, row["id"], HASH) == []
     _assert_row_untouched(row["id"])
+
+
+def test_late_hash_validated_on_a_later_poll_is_recorded(monkeypatch, tmp_path, caplog):
+    """Joey returns the hash right after submitting, so the post usually beats
+    validation. The bounded re-check records the payment once it validates."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 10)
+    calls = _fake_tx_sequence(
+        monkeypatch, _not_validated(), _not_validated(), _rippled_shape(_mint_payment())
+    )
+    with caplog.at_level(logging.ERROR):
+        r = _post_and_settle(row["id"])
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert len(calls) == 3
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, row["id"], DEV_OWNER, HASH)) == 1
+    _assert_row_untouched(row["id"])
+
+
+def test_late_recheck_stops_once_the_ledger_passes_last_ledger_sequence(monkeypatch, tmp_path):
+    """Past its LastLedgerSequence an unvalidated transaction can never
+    validate, so the re-check ends there instead of polling out its cap."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx_sequence(monkeypatch, _not_validated())  # LastLedgerSequence 99
+
+    async def _ledger_index():
+        return 100
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger_index)
+    r = _post_and_settle(row["id"], timeout=2)  # far inside the 30 s cap
+    assert r.status == 409
+    assert app._late_signature_rechecks == {}
+    assert _late_records(tmp_path, row["id"], HASH) == []
+
+
+def test_duplicate_late_posts_share_one_recheck(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 10)
+    landed = {"validated": False}
+    pending, validated = _not_validated(), _rippled_shape(_mint_payment())
+
+    async def _get_tx(_tx_hash):
+        return validated if landed["validated"] else pending
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+    started = []
+    real_recheck = app._recheck_late_signature
+
+    async def _counted_recheck(*args):
+        started.append(asyncio.current_task())
+        await real_recheck(*args)
+
+    monkeypatch.setattr(app, "_recheck_late_signature", _counted_recheck)
+
+    async def go():
+        for _ in range(3):
+            assert (await _late_post(row["id"])).status == 409
+        await asyncio.sleep(0.05)  # let every spawned re-check start polling
+        landed["validated"] = True
+        await asyncio.wait_for(asyncio.gather(*started), 5)
+
+    with caplog.at_level(logging.ERROR):
+        _run(go())
+    assert len(started) == 1
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, HASH)) == 1
+
+
+def test_concurrent_late_posts_record_and_alarm_once(monkeypatch, tmp_path, caplog):
+    """Two posts of one validated late hash racing into the journal: exactly
+    one creates the record, so the refund alarm fires once."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    # Hold both writers inside the write until both have got that far, so
+    # their creates really race instead of running one after the other.
+    barrier = threading.Barrier(2, timeout=5)
+    real_dump = json.dump
+
+    def _racing_dump(obj, fp, **kwargs):
+        barrier.wait()
+        return real_dump(obj, fp, **kwargs)
+
+    monkeypatch.setattr(app.json, "dump", _racing_dump)
+
+    async def go():
+        return await asyncio.gather(_late_post(row["id"]), _late_post(row["id"]))
+
+    with caplog.at_level(logging.ERROR):
+        responses = _run(go())
+    assert [r.status for r in responses] == [409, 409]
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE", HASH)) == 1
+
+
+def test_cleanup_cancels_pending_late_rechecks(monkeypatch):
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 60)
+    _fake_tx_sequence(monkeypatch, _not_validated())
+
+    async def go():
+        await _late_post(row["id"])
+        (recheck,) = app._late_signature_rechecks.values()
+        await app._stop_late_signature_rechecks(None)
+        return recheck
+
+    recheck = _run(go())
+    assert recheck.cancelled()
+    assert app._late_signature_rechecks == {}
+    assert app._stop_late_signature_rechecks in app.create_app().on_cleanup
 
 
 @pytest.mark.parametrize(
