@@ -41,6 +41,14 @@ carries SourceTag `2606160021` and provenance memos with campaign
 `fee-cover-rehearsal`. `setup` and `mint-to-seller` skip the steps they already
 recorded, so one that failed part-way can simply be run again.
 
+`XRPL_NETWORK` alone is not trusted, because an explicit `XRPL_JSON_RPC_URL`
+wins over the network's defaults and an exported shell variable beats `.env`.
+So before it touches the ledger, every subcommand asks each configured
+JSON-RPC endpoint what it is: `server_info` must report `network_id` 1, and the
+ledger-32570 anchor must match once the testnet archive has recorded one. Any
+endpoint that is not testnet exits 2 with nothing signed; one that cannot
+answer is excluded for that run.
+
 ## 1. Stage the listing (ops)
 
 ```bash
@@ -108,13 +116,21 @@ A listing only indexes once its character does; `scripts/backfill_market.py
 1. **Owner.** Sign in to staging with the bidder wallet. Open the rehearsal
    character's external listing and press **Buy now**; the confirm dialog
    shows the fee-cover note. Sign the bid.
-2. **Ops.** Wait until the bid's quote is `promised`, and note its session id
-   and offer index:
+2. **Ops.** Wait for the bid's promise and note its offer index. Every bid that
+   validates gets a promise row, whether it was covered or declined, so this
+   query is the one that always answers:
+   ```bash
+   sqlite3 lfg_nfts_testnet.db "SELECT offer_index, bidder, state, reason, promised_drops FROM fee_cover_promises WHERE nft_id = '$NFT' ORDER BY created_at DESC LIMIT 3"
+   ```
+   The promise must be `open` to go on. A `declined` one carries its reason
+   (§4) and there is nothing left to settle.
+
+   A bid that was quoted as covered also has a `fee_cover_quotes` row, which is
+   where its session id lives. A bid declined when it started
+   (`system_wallet`, `below_clearing`, `below_min_bid`) has **no** quote row:
    ```bash
    sqlite3 lfg_nfts_testnet.db "SELECT session_id, state, outcome, offer_index FROM fee_cover_quotes ORDER BY created_at DESC LIMIT 3"
-   sqlite3 lfg_nfts_testnet.db "SELECT state, reason, promised_drops FROM fee_cover_promises WHERE offer_index = '<offer_index>'"
    ```
-   The promise must be `open`. A `declined` promise already has its reason (§4).
 3. **Ops.** The broker settles the bid, as cafe's bot would:
    ```bash
    .venv/bin/python scripts/fee_cover_rehearsal.py broker-accept --state $STATE --buy-offer <offer_index>
@@ -124,8 +140,11 @@ A listing only indexes once its character does; `scripts/backfill_market.py
    broker would never fill one.
 4. **Ops.** Wait for the refund and audit it:
    ```bash
-   .venv/bin/python scripts/fee_cover_rehearsal.py verify --bid <session_id>
+   .venv/bin/python scripts/fee_cover_rehearsal.py verify --offer-index <offer_index>
    ```
+   `--offer-index` follows any bid, including one declined at its start.
+   `--bid <session_id>` is the alternative for a bid that was quoted as
+   covered.
    `verify` polls every 15 s (`--timeout`, default 1800 s) until the fee cover
    leaves `quoted`/`open`/`owed`/`submitted`. It prints the outcome, runs
    `scripts/fee_cover_report.py --network testnet --audit`, and exits 0 only on a
@@ -145,7 +164,9 @@ fresh `--state` file: the character now belongs to the bidder.
 
 ## 4. Why a rehearsal refund gets declined
 
-`verify` prints the reason; `fee_cover_report.py` counts them under
+`verify --offer-index <index>` prints the reason for any of these, including
+the three decided when the bid starts, which have no quote and so cannot be
+reached by `--bid`. `fee_cover_report.py` counts them under
 `declines by reason`.
 
 | What happened | State · reason | Decided at |
@@ -159,8 +180,9 @@ fresh `--state` file: the character now belongs to the bidder.
 | The bid is below the campaign's minimum bid | quote + promise `declined` · `below_min_bid` | bid |
 
 A promise declined at bid time never reaches settlement: `broker-accept` still
-fills the bid, but no refund is owed. Other ends also stop `verify` without a
-refund:
+fills the bid, but no refund is owed. Those three rows are also the ones the
+bid start records no quote for, so look them up by offer index (§3 step 2).
+Other ends also stop `verify` without a refund:
 
 - `released`: the bid was cancelled, or expired unfilled once the archive had
   certified past its expiry.
@@ -169,4 +191,8 @@ refund:
 - `quote_expired`, `quote_failed`, `quote_abandoned`: the bid never validated
   (its payload expired unsigned, it was signed by another wallet or failed
   on-ledger, or it stayed unresolved past its own expiry).
-- `no_quote`: no covered quote exists for that session id.
+- `no_quote` (`--bid` only): no covered quote exists for that session id —
+  every bid declined at its start looks like this. Use `--offer-index`.
+- `no_promise` (`--offer-index` only): no promise for that offer index. Either
+  the bid's promise has not been written yet (the bidder's status poll writes
+  it), or the bid was an ordinary one the campaign never covered.

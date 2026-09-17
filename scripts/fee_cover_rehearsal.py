@@ -13,22 +13,26 @@ docs/ops/fee-cover-rehearsal.md.
   .venv/bin/python scripts/fee_cover_rehearsal.py list --state <state> --price-xrp 5
   .venv/bin/python scripts/fee_cover_rehearsal.py print-allowlist --state <state>
   .venv/bin/python scripts/fee_cover_rehearsal.py broker-accept --state <state> --buy-offer <index>
-  .venv/bin/python scripts/fee_cover_rehearsal.py verify --bid <session_id>
+  .venv/bin/python scripts/fee_cover_rehearsal.py verify --offer-index <index>   (or --bid <session_id>)
 
-Testnet only: every subcommand exits 2 unless XRPL_NETWORK=testnet. Every
-transaction carries SourceTag and provenance memos (campaign
-`fee-cover-rehearsal`) and is signed once and submitted through
-xrpl_ops.rpc_client(), via xrpl_ops._submit_and_confirm, which also serializes
-the issuer's sequence with the running staging service. The wallet seeds this
-creates are written ONLY to the --state file, owner-only (0600); a --state path
-inside this repository is refused (exit 2).
+Testnet only: every subcommand exits 2 unless XRPL_NETWORK=testnet, and every
+subcommand that touches the ledger first asks each configured JSON-RPC endpoint
+what it is (server_info network_id 1, plus the ledger-32570 anchor once the
+testnet archive has recorded one): any endpoint that isn't testnet exits 2
+before a single request is signed. Every transaction carries SourceTag and
+provenance memos (campaign `fee-cover-rehearsal`) and is signed once and
+submitted through xrpl_ops.rpc_client(), via xrpl_ops._submit_and_confirm, which
+also serializes the issuer's sequence with the running staging service. The
+wallet seeds this creates are written ONLY to the --state file, owner-only
+(0600); a --state path inside this repository is refused (exit 2).
 
 `setup` and `mint-to-seller` record each step in the state file and skip it on
 a re-run, so one that failed part-way can simply be run again. `list` and
 `broker-accept` act every time they run.
 
-Exit codes: 0 ok · 1 a step failed, a bid was refused, or verify ended without
-a confirmed refund · 2 refused (network, state path, usage).
+Exit codes: 0 ok · 1 a step failed, a bid was refused, no endpoint could be
+verified, or verify ended without a confirmed refund · 2 refused (network or
+endpoint not testnet, state path, usage).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import os
 import sys
@@ -49,7 +54,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from xrpl.asyncio.wallet import generate_faucet_wallet  # noqa: E402
-from xrpl.models.requests import LedgerEntry  # noqa: E402
+from xrpl.models.requests import LedgerEntry, ServerInfo  # noqa: E402
 from xrpl.models.transactions import (  # noqa: E402
     Memo,
     NFTokenAcceptOffer,
@@ -62,13 +67,16 @@ from xrpl.models.transactions.transaction import Transaction  # noqa: E402
 from xrpl.wallet import Wallet  # noqa: E402
 
 from lfg_core import (  # noqa: E402
+    brix_drip,
     brokers,
     config,
     db_path,
     fee_cover_store,
+    history_store,
     market_ops,
     memos,
     xrpl_ops,
+    xrpl_rpc,
 )
 from scripts import fee_cover_report  # noqa: E402
 
@@ -87,6 +95,9 @@ SELLER_FUNDING_DROPS = 25_000_000
 REHEARSAL_URI = "lfg:fee-cover-rehearsal"
 POLL_SECONDS = 15
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 1800
+# What a testnet server reports as server_info.info.network_id (mainnet omits it).
+TESTNET_NETWORK_ID = 1
+ENDPOINT_CHECK_TIMEOUT_SECONDS = 30.0
 # fee-cover states that are still moving: anything else ends a verify poll.
 _WAITING = frozenset({"quoted", "open", "owed", "submitted"})
 _LSF_SELL_NFTOKEN = 0x00000001
@@ -100,7 +111,14 @@ class RehearsalError(Exception):
     """A step that could not complete: printed, exit 1."""
 
 
+class WrongNetwork(RehearsalError):
+    """A JSON-RPC endpoint the harness could submit through is not testnet:
+    refused, exit 2."""
+
+
 class Chain(Protocol):
+    async def ensure_testnet(self) -> None: ...
+
     async def fund_from_faucet(self, wallet: Wallet) -> None: ...
 
     async def submit(self, tx: Transaction, wallet: Wallet, label: str) -> dict[str, Any]: ...
@@ -110,10 +128,74 @@ class Chain(Protocol):
 
 class XrplChain:
     """The testnet ledger, over one xrpl_ops.rpc_client(): the failover
-    client every backend JSON-RPC call uses."""
+    client every backend JSON-RPC call uses, built by ensure_testnet() from
+    the endpoints it verified. Nothing reaches the ledger before that."""
 
     def __init__(self) -> None:
-        self.client = xrpl_ops.rpc_client()
+        self._client: Any = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            raise RehearsalError("the endpoints were not verified as testnet (ensure_testnet)")
+        return self._client
+
+    async def ensure_testnet(self) -> None:
+        """Refuse unless every JSON-RPC endpoint a submit could reach is testnet.
+
+        XRPL_NETWORK=testnet proves nothing about the endpoint: an explicit
+        XRPL_JSON_RPC_URL (or fallback list) wins over the network's defaults,
+        and an exported shell variable beats .env, so a mainnet endpoint under
+        XRPL_NETWORK=testnet would sign real mainnet transactions with the
+        environment's key. Failover can route any request to any configured
+        endpoint, so each one is asked on its own:
+
+        - its ledger-32570 anchor, against the testnet archive's recorded
+          identity (brix_drip.verify_endpoint_chain; a no-op while the archive
+          has recorded none);
+        - its server_info network_id, which must be TESTNET_NETWORK_ID.
+          Missing or different is WrongNetwork.
+
+        An endpoint that can't answer is excluded for this run
+        (xrpl_rpc.restrict_to), and the submit client is built from the
+        verified ones only."""
+        hconn = history_store.init_history_db(history_store.history_db_path(TESTNET))
+        try:
+            problem = await brix_drip.verify_endpoint_chain(hconn, TESTNET)
+        except Exception as exc:
+            raise RehearsalError(f"could not verify any endpoint's chain: {exc}") from exc
+        finally:
+            hconn.close()
+        if problem is not None:
+            raise WrongNetwork(problem)
+        verified: list[str] = []
+        for url in xrpl_rpc.default_urls(config.JSON_RPC_URLS):
+            endpoint = xrpl_ops.rpc_client(urls=[url])
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(endpoint.request, ServerInfo()),
+                    timeout=ENDPOINT_CHECK_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logging.warning("rehearsal: %s did not answer server_info (excluded): %s", url, exc)
+                continue
+            if not response.is_successful():
+                logging.warning(
+                    "rehearsal: %s server_info failed (excluded): %s", url, response.result
+                )
+                continue
+            info = response.result.get("info")
+            network_id = info.get("network_id") if isinstance(info, dict) else None
+            if network_id != TESTNET_NETWORK_ID:
+                raise WrongNetwork(
+                    f"endpoint {url} reports network_id {network_id!r}, not testnet "
+                    f"({TESTNET_NETWORK_ID}): check XRPL_JSON_RPC_URL / XRPL_JSON_RPC_FALLBACK_URLS"
+                )
+            verified.append(url)
+        if not verified:
+            raise RehearsalError("no JSON-RPC endpoint answered server_info: nothing to verify")
+        xrpl_rpc.restrict_to(verified)
+        self._client = xrpl_ops.rpc_client()
 
     async def fund_from_faucet(self, wallet: Wallet) -> None:
         await generate_faucet_wallet(self.client, wallet)
@@ -122,7 +204,8 @@ class XrplChain:
         """Sign once, submit, confirm (pre-submit simulate and the per-account
         submission lock included). A definitive failure raises RehearsalError;
         an unknown outcome raises xrpl_ops.IndeterminateResultError."""
-        result = await xrpl_ops._submit_and_confirm(tx, wallet, self.client, label)
+        client = self.client
+        result = await xrpl_ops._submit_and_confirm(tx, wallet, client, label)
         if result is None:
             raise RehearsalError(f"{label}: failed on-ledger (its result is in the warning above)")
         return result
@@ -434,12 +517,28 @@ def bid_fee_cover(app_db: str, session_id: str) -> dict[str, Any]:
     return {"state": f"quote_{quote['outcome']}"}
 
 
-def verify(session_id: str, timeout_seconds: float) -> int:
+def offer_fee_cover(app_db: str, offer_index: str) -> dict[str, Any]:
+    """The fee-cover state of the bid with ledger index `offer_index`: its
+    promise/refund view. Unlike a session's quote, this exists for every bid
+    whose promise was written — including one declined when it started
+    (system_wallet, below_clearing, below_min_bid), which gets no quote."""
+    conn = fee_cover_store.connect(app_db)
+    try:
+        view = fee_cover_store.view_for_offer(conn, offer_index)
+    finally:
+        conn.close()
+    return {"state": "no_promise"} if view is None else {**view, "offer_index": offer_index}
+
+
+def verify(timeout_seconds: float, *, session_id: str | None, offer_index: str | None) -> int:
     app_db = db_path.app_db_path(TESTNET)
     deadline = time.monotonic() + timeout_seconds
     last: str | None = None
     while True:
-        cover = bid_fee_cover(app_db, session_id)
+        if offer_index is not None:
+            cover = offer_fee_cover(app_db, offer_index)
+        else:
+            cover = bid_fee_cover(app_db, str(session_id))
         state = str(cover["state"])
         if state != last:
             print(f"fee cover: {state}")
@@ -454,6 +553,14 @@ def verify(session_id: str, timeout_seconds: float) -> int:
         print(f"refunded {cover['xrp']} XRP, refund tx {cover['payout_tx_hash']}")
     elif cover.get("reason"):
         print(f"{state}: {cover['reason']}")
+    elif state == "no_quote":
+        print(
+            "that session has no covered quote: a bid declined when it started (system_wallet, "
+            "below_clearing, below_min_bid) gets none. Pass --offer-index <index> from "
+            "fee_cover_promises instead."
+        )
+    elif state == "no_promise":
+        print("no fee-cover promise for that offer index (yet)")
     print("audit:")
     audit_code = fee_cover_report.main(["--network", TESTNET, "--audit"])
     return EXIT_OK if state == "confirmed" and audit_code == 0 else EXIT_FAILED
@@ -470,6 +577,20 @@ def _run(coro: Coroutine[Any, Any, T]) -> T:
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+async def _on_testnet(ledger: Chain, args: argparse.Namespace, path: str) -> None:
+    """Run a ledger subcommand once the endpoints have proved they're testnet:
+    no funding, lookup or transaction happens before that."""
+    await ledger.ensure_testnet()
+    if args.command == "setup":
+        await setup(ledger, path)
+    elif args.command == "mint-to-seller":
+        await mint_to_seller(ledger, path)
+    elif args.command == "list":
+        await list_character(ledger, path, args.price_xrp)
+    else:
+        await broker_accept(ledger, path, args.buy_offer)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -492,7 +613,14 @@ def _parser() -> argparse.ArgumentParser:
     accept.add_argument("--state", required=True, help=state_help)
     accept.add_argument("--buy-offer", required=True, metavar="INDEX")
     check = sub.add_parser("verify", help="wait for a bid's fee cover to settle, then audit")
-    check.add_argument("--bid", required=True, metavar="SESSION_ID")
+    target = check.add_mutually_exclusive_group(required=True)
+    target.add_argument(
+        "--offer-index",
+        metavar="INDEX",
+        help="the bid's offer index (fee_cover_promises): finds every bid, "
+        "including one declined when it started",
+    )
+    target.add_argument("--bid", metavar="SESSION_ID", help="a bid session id with a covered quote")
     check.add_argument(
         "--timeout",
         type=float,
@@ -520,21 +648,16 @@ def main(argv: list[str] | None = None, *, chain: Chain | None = None) -> int:
         return EXIT_REFUSED
     try:
         if args.command == "verify":
-            return verify(args.bid, args.timeout)
+            return verify(args.timeout, session_id=args.bid, offer_index=args.offer_index)
         path = str(state_path)  # every other subcommand requires --state
         if args.command == "print-allowlist":
             print_allowlist(path)
             return EXIT_OK
-        ledger = chain if chain is not None else XrplChain()
-        if args.command == "setup":
-            _run(setup(ledger, path))
-        elif args.command == "mint-to-seller":
-            _run(mint_to_seller(ledger, path))
-        elif args.command == "list":
-            _run(list_character(ledger, path, args.price_xrp))
-        else:
-            _run(broker_accept(ledger, path, args.buy_offer))
+        _run(_on_testnet(chain if chain is not None else XrplChain(), args, path))
         return EXIT_OK
+    except WrongNetwork as exc:
+        print(f"refusing: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
     except RehearsalError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILED

@@ -10,13 +10,15 @@ import json
 import math
 import os
 import stat
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from xrpl.models.response import Response, ResponseStatus
 from xrpl.models.transactions import NFTokenAcceptOffer, NFTokenCreateOffer, NFTokenMint, Payment
 from xrpl.wallet import Wallet
 
-from lfg_core import brokers, config, db_path, memos, xrpl_ops
+from lfg_core import brokers, config, db_path, history_store, memos, xrpl_ops, xrpl_rpc
 from lfg_core import fee_cover_store as store
 from scripts import fee_cover_rehearsal as rehearsal
 
@@ -39,12 +41,18 @@ class FakeChain:
     transaction with the address that signed it, and answers validated results
     shaped like rippled's (meta `nftoken_id` / `offer_id`)."""
 
-    def __init__(self, fail: type | None = None):
+    def __init__(self, fail: type | None = None, network: str = "testnet"):
         self.fail = fail
+        self.network = network
         self.faucet_funded: list[str] = []
         self.submitted: list[tuple[object, str, str]] = []  # (tx, signer, label)
         self.results: list[dict] = []
         self.entries: dict[str, dict] = {}
+        self.lookups: list[str] = []
+
+    async def ensure_testnet(self):
+        if self.network != "testnet":
+            raise rehearsal.WrongNetwork(f"endpoint is on {self.network}")
 
     async def fund_from_faucet(self, wallet):
         self.faucet_funded.append(wallet.address)
@@ -64,6 +72,7 @@ class FakeChain:
         return result
 
     async def ledger_entry(self, index):
+        self.lookups.append(index)
         return self.entries.get(index)
 
     def txs(self, kind):
@@ -124,6 +133,7 @@ def _broker_accept(chain, state_path):
         ["print-allowlist", "--state", "STATE"],
         ["broker-accept", "--state", "STATE", "--buy-offer", BUY_OFFER],
         ["verify", "--bid", "S1"],
+        ["verify", "--offer-index", "BID1"],
     ],
 )
 def test_main_exits_2_unless_the_network_is_testnet(monkeypatch, tmp_path, argv):
@@ -133,6 +143,28 @@ def test_main_exits_2_unless_the_network_is_testnet(monkeypatch, tmp_path, argv)
     assert rehearsal.main([state if a == "STATE" else a for a in argv], chain=chain) == 2
     assert chain.faucet_funded == [] and chain.submitted == []
     assert not os.path.exists(state)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["setup", "--state", "STATE"],
+        ["mint-to-seller", "--state", "STATE"],
+        ["list", "--state", "STATE", "--price-xrp", "5"],
+        ["broker-accept", "--state", "STATE", "--buy-offer", BUY_OFFER],
+    ],
+)
+def test_ledger_subcommands_check_the_endpoint_before_acting(testnet, state_path, argv):
+    """XRPL_NETWORK=testnet is not proof: every subcommand that touches the
+    ledger asks the endpoint first, and one that isn't testnet stops the run
+    (exit 2) before any funding, lookup or transaction."""
+    staged = FakeChain()
+    state = _staged(staged, state_path)
+    staged.entries[BUY_OFFER] = _bid(state["nft_id"], 5_075_000)
+    wrong = FakeChain(network="mainnet")
+    wrong.entries = staged.entries
+    assert rehearsal.main([state_path if a == "STATE" else a for a in argv], chain=wrong) == 2
+    assert wrong.faucet_funded == [] and wrong.submitted == [] and wrong.lookups == []
 
 
 # --- every transaction ----------------------------------------------------------
@@ -285,13 +317,15 @@ def test_print_allowlist_emits_an_overlay_the_app_loads(
 def test_broker_fee_is_ceil_of_bid_times_rate(testnet, state_path):
     chain = FakeChain()
     state = _staged(chain, state_path, price="4.99")
-    chain.entries[BUY_OFFER] = _bid(state["nft_id"], 5_075_000)
+    # 5_075_020 x 0.01589 = 80_642.07: ceil takes 80_643 where rounding would
+    # take 80_642, so this bid tells the two apart (a .75 fraction would not).
+    chain.entries[BUY_OFFER] = _bid(state["nft_id"], 5_075_020)
     assert _broker_accept(chain, state_path) == 0
     [(accept, signer)] = [
         (tx, s) for tx, s in chain.txs(NFTokenAcceptOffer) if tx.nftoken_broker_fee is not None
     ]
-    # ceil(5_075_000 x 0.01589) = ceil(80_641.75): cafe's verified fee on this bid
-    assert accept.nftoken_broker_fee == str(math.ceil(5_075_000 * 0.01589)) == "80642"
+    assert round(5_075_020 * 0.01589) == 80_642
+    assert accept.nftoken_broker_fee == str(math.ceil(5_075_020 * 0.01589)) == "80643"
     assert (accept.nftoken_buy_offer, accept.nftoken_sell_offer) == (BUY_OFFER, state["sell_offer"])
     assert signer == accept.account == state["wallets"]["broker"]["address"]
 
@@ -324,16 +358,59 @@ def app_db(tmp_path, monkeypatch):
     return path
 
 
+def _campaign(conn, min_bid=0):
+    knobs = store.Knobs(
+        coverage_bps=10_000,
+        budget_drops=1_000_000,
+        wallet_cap_drops=1_000_000,
+        min_bid_drops=min_bid,
+    )
+    campaign, _ = store.start_campaign(
+        conn, network="testnet", actor="t", knobs=knobs, duration_seconds=None, now=1000
+    )
+    return campaign
+
+
+def _bid_promise(conn, campaign, decline_reason=None):
+    store.record_promise(
+        conn,
+        campaign,
+        store.PromiseInput(
+            offer_index="BID1",
+            network="testnet",
+            nft_id="NFT1",
+            bidder=BIDDER,
+            bid_drops=5_075_000,
+            ask_drops=4_990_000,
+            broker=CAFE,
+            broker_rate=0.01589,
+            bid_expiration=None,
+        ),
+        decline_reason=decline_reason,
+        now=1001,
+    )
+
+
+def _declined_when_the_bid_started(app_db, reason):
+    """A bid the quote already declined: the bid start records NO quote for
+    it, but finalize still writes its promise, `declined` with the reason."""
+    conn = store.connect(app_db)
+    try:
+        # below_min_bid is the one verdict record_promise re-decides from the
+        # campaign, so that campaign must really set a minimum above the bid.
+        min_bid = 9_000_000 if reason == "below_min_bid" else 0
+        _bid_promise(conn, _campaign(conn, min_bid=min_bid), decline_reason=reason)
+        promise = store.get_promise(conn, "BID1")
+        assert (promise["state"], promise["reason"]) == ("declined", reason)
+    finally:
+        conn.close()
+
+
 def _covered_bid(app_db, outcome):
     """Quote S1 -> promise on BID1 -> an accept settled `outcome`."""
     conn = store.connect(app_db)
     try:
-        knobs = store.Knobs(
-            coverage_bps=10_000, budget_drops=1_000_000, wallet_cap_drops=1_000_000, min_bid_drops=0
-        )
-        campaign, _ = store.start_campaign(
-            conn, network="testnet", actor="t", knobs=knobs, duration_seconds=None, now=1000
-        )
+        campaign = _campaign(conn)
         store.record_quote(
             conn,
             store.Quote(
@@ -352,23 +429,7 @@ def _covered_bid(app_db, outcome):
         )
         if outcome is None:
             return
-        store.record_promise(
-            conn,
-            campaign,
-            store.PromiseInput(
-                offer_index="BID1",
-                network="testnet",
-                nft_id="NFT1",
-                bidder=BIDDER,
-                bid_drops=5_075_000,
-                ask_drops=4_990_000,
-                broker=CAFE,
-                broker_rate=0.01589,
-                bid_expiration=None,
-            ),
-            decline_reason=None,
-            now=1001,
-        )
+        _bid_promise(conn, campaign)
         store.close_quote(conn, "S1", "promised", offer_index="BID1", now=1001)
         if outcome == "confirmed":
             decision = store.RefundDecision("ACC1", "rSeller", CAFE, 80_642, 349_605, 80_642, None)
@@ -406,13 +467,64 @@ def test_verify_gives_up_at_its_timeout(testnet, app_db, capsys):
     assert "timed out" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("reason", ["below_clearing", "below_min_bid", "system_wallet"])
+def test_verify_reports_a_decline_decided_when_the_bid_started(testnet, app_db, capsys, reason):
+    """A bid declined at its start has no quote, only a declined promise, so
+    only its offer index finds it: verify must still print the reason."""
+    _declined_when_the_bid_started(app_db, reason)
+    # --timeout 0: a decline is terminal on the first read, so a state that
+    # is anything else must fail the test instead of polling for 30 minutes.
+    assert rehearsal.main(["verify", "--offer-index", "BID1", "--timeout", "0"]) == 1
+    out = capsys.readouterr().out
+    assert f"declined: {reason}" in out
+    assert "AUDIT PASS" in out
+
+
+def test_verify_by_session_points_a_quoteless_bid_at_its_offer_index(testnet, app_db, capsys):
+    _declined_when_the_bid_started(app_db, "below_clearing")
+    assert rehearsal.main(["verify", "--bid", "S1", "--timeout", "0"]) == 1
+    out = capsys.readouterr().out
+    assert "no_quote" in out and "--offer-index" in out
+
+
+def test_verify_by_offer_index_follows_a_covered_bid_too(testnet, app_db, capsys):
+    _covered_bid(app_db, "confirmed")
+    assert rehearsal.main(["verify", "--offer-index", "BID1", "--timeout", "0"]) == 0
+    assert "PAYOUTHASH" in capsys.readouterr().out
+
+
 # --- the real chain ---------------------------------------------------------------
 
 
-class _Client:
-    """A fake XRPL JSON-RPC client: answers ledger_entry only."""
+TESTNET_URL = "https://testnet.example/"
+MAINNET_URL = "https://mainnet.example/"
+NO_ID_URL = "https://no-network-id.example/"
+DOWN_URL = "https://down.example/"
 
-    def __init__(self):
+
+class _Endpoint:
+    """One fake JSON-RPC endpoint, as xrpl_ops.rpc_client(urls=[url]) returns
+    it: answers server_info with its network_id (omitted when None)."""
+
+    def __init__(self, network_id=None, down=False):
+        self.network_id = network_id
+        self.down = down
+
+    def request(self, req):
+        if self.down:
+            raise httpx.ConnectError("connection refused")
+        info = {"build_version": "2.4.0"}
+        if self.network_id is not None:
+            info["network_id"] = self.network_id
+        return Response(status=ResponseStatus.SUCCESS, result={"info": info})
+
+
+class _Client:
+    """The failover client xrpl_ops.rpc_client() returns: remembers the
+    endpoints it may use and answers ledger_entry."""
+
+    def __init__(self, urls):
+        self.urls = list(urls)
         self.requests = []
 
     def request(self, req):
@@ -424,32 +536,99 @@ class _Client:
         return Response(status=ResponseStatus.ERROR, result={"error": "entryNotFound"})
 
 
-def test_the_real_chain_sends_everything_through_rpc_client(monkeypatch):
-    client = _Client()
-    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda urls=None: client)
-    submitted = []
+@pytest.fixture
+def endpoints(monkeypatch, tmp_path):
+    table = {
+        TESTNET_URL: _Endpoint(network_id=1),
+        MAINNET_URL: _Endpoint(network_id=0),
+        NO_ID_URL: _Endpoint(network_id=None),
+        DOWN_URL: _Endpoint(down=True),
+    }
+    seen = SimpleNamespace(clients=[], submitted=[], funded=[])
 
-    async def fake_submit(tx, wallet, used_client, label, **kwargs):
-        submitted.append(used_client)
-        return None if label == "refused" else {"hash": "H", "validated": True, "meta": {}}
+    def rpc_client(urls=None):
+        if urls is not None:
+            [url] = urls
+            return table[url]
+        client = _Client(xrpl_rpc.default_urls(config.JSON_RPC_URLS))
+        seen.clients.append(client)
+        return client
 
-    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit)
-    funded = []
+    async def submit(tx, wallet, client, label, **kwargs):
+        seen.submitted.append((client, label))
+        if label == "refused":
+            return None  # a definitive, validated failure
+        meta = {"TransactionResult": "tesSUCCESS", "nftoken_id": "A" * 64, "offer_id": "B" * 64}
+        return {"hash": "H", "validated": True, "meta": meta}
 
-    async def fake_faucet(used_client, wallet):
-        funded.append((used_client, wallet.address))
+    async def faucet(client, wallet):
+        seen.funded.append((client, wallet.address))
         return wallet
 
-    monkeypatch.setattr(rehearsal, "generate_faucet_wallet", fake_faucet)
+    monkeypatch.setattr(xrpl_ops, "rpc_client", rpc_client)
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", submit)
+    monkeypatch.setattr(rehearsal, "generate_faucet_wallet", faucet)
+    # An archive with no recorded testnet genesis: the ledger-32570 anchor
+    # check has nothing to compare against, so network_id decides alone.
+    history = str(tmp_path / "history.db")
+    monkeypatch.setattr(history_store, "history_db_path", lambda network=None: history)
+    return seen
+
+
+def test_a_mainnet_endpoint_is_refused_before_any_submit(
+    testnet, state_path, endpoints, monkeypatch
+):
+    """XRPL_NETWORK=testnet proves nothing about the endpoint: an explicit
+    XRPL_JSON_RPC_URL wins over the network's defaults, and an exported shell
+    variable beats .env. On a mainnet endpoint, mint-to-seller would sign a
+    real mainnet mint with the environment's key."""
+    assert rehearsal.main(["setup", "--state", state_path], chain=FakeChain()) == 0
+    monkeypatch.setattr(config, "JSON_RPC_URLS", [MAINNET_URL])
+    assert rehearsal.main(["mint-to-seller", "--state", state_path]) == 2
+    assert endpoints.submitted == [] and endpoints.funded == []
+    assert "nft_id" not in _state(state_path)
+
+
+@pytest.mark.parametrize(
+    ("urls", "code", "verified"),
+    [
+        # a submit can fail over to any configured endpoint, so each is asked
+        ([TESTNET_URL, MAINNET_URL], 2, None),
+        ([MAINNET_URL, TESTNET_URL], 2, None),
+        ([NO_ID_URL], 2, None),  # an endpoint that can't say it is testnet isn't trusted
+        ([DOWN_URL, TESTNET_URL], 0, [TESTNET_URL]),  # unreachable: excluded for the run
+        ([DOWN_URL], 1, None),  # nothing verified: nothing to submit through
+    ],
+)
+def test_every_endpoint_a_submit_can_reach_must_be_testnet(
+    testnet, state_path, endpoints, monkeypatch, urls, code, verified
+):
+    assert rehearsal.main(["setup", "--state", state_path], chain=FakeChain()) == 0
+    monkeypatch.setattr(config, "JSON_RPC_URLS", urls)
+    assert rehearsal.main(["mint-to-seller", "--state", state_path]) == code
+    if verified is None:
+        assert endpoints.submitted == []
+    else:
+        assert len(endpoints.submitted) == 3  # mint, offer, accept
+        assert all(client.urls == verified for client, _ in endpoints.submitted)
+
+
+def test_the_real_chain_sends_everything_through_rpc_client(endpoints, monkeypatch):
+    monkeypatch.setattr(config, "JSON_RPC_URLS", [TESTNET_URL])
     chain = rehearsal.XrplChain()
     wallet = Wallet.create()
     tx = Payment(account=wallet.address, destination=CAFE, amount="1")
+    with pytest.raises(rehearsal.RehearsalError):  # nothing is sent before the check
+        _run(chain.submit(tx, wallet, "ok"))
+    _run(chain.ensure_testnet())
+    [client] = endpoints.clients
+    assert client.urls == [TESTNET_URL]
     assert _run(chain.submit(tx, wallet, "ok"))["hash"] == "H"
     with pytest.raises(rehearsal.RehearsalError):  # a definitive, validated failure
         _run(chain.submit(tx, wallet, "refused"))
     _run(chain.fund_from_faucet(wallet))
     assert _run(chain.ledger_entry(BUY_OFFER)) == {"LedgerEntryType": "NFTokenOffer"}
     assert _run(chain.ledger_entry("C" * 64)) is None
-    assert submitted == [client, client]
-    assert funded == [(client, wallet.address)]
+    assert endpoints.submitted == [(client, "ok"), (client, "refused")]
+    assert endpoints.funded == [(client, wallet.address)]
     assert len(client.requests) == 2

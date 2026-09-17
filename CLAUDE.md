@@ -1297,8 +1297,12 @@ Report/audit: `scripts/fee_cover_report.py --network <net> --audit` (pm2
 `lfg-fee-cover-audit` / `stg-fee-cover-audit`, 03:40 UTC — registering it is an
 ops step: `pm2 start ecosystem.prod.config.js --only lfg-fee-cover-audit && pm2 save`).
 Staging rehearsal before any mainnet Start: `scripts/fee_cover_rehearsal.py`
-(testnet only, exit 2 elsewhere; script-held broker/intermediate/seller wallets
-whose seeds live only in its `--state` file, refused inside the repo) — runbook
+(script-held broker/intermediate/seller wallets whose seeds live only in its
+`--state` file, refused inside the repo). Testnet only, and `XRPL_NETWORK` is
+not trusted for that — an explicit `XRPL_JSON_RPC_URL` wins over the network's
+defaults — so before touching the ledger it asks every configured endpoint for
+`server_info.network_id` (must be 1) plus the ledger-32570 anchor
+(`brix_drip.verify_endpoint_chain`), and exits 2 on anything else. Runbook:
 `docs/ops/fee-cover-rehearsal.md`.
 Refund Payments count in `sourcetag_metrics` `xrp_payment_volume.out_drops`;
 they are not marketplace volume. Ships with no campaign active.
