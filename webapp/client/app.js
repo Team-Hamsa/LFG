@@ -3983,8 +3983,6 @@ function renderCloset() {
     // available — extraction does not depend on equip compatibility.
     const item = document.createElement('div');
     item.className = 'closet-item';
-    item.setAttribute('role', 'button');
-    item.tabIndex = 0;
     // Compatibility: only allow equip when this asset can go on the active
     // character. Client mirrors the server precheck (server re-verifies on
     // commit). Blanks are refused there (#523) — see equipCompatible's comment
@@ -3992,6 +3990,14 @@ function renderCloset() {
     // (dimmed, .incompatible) because Extract must keep working.
     const compatible = buildPure.equipCompatible(char, asset, economyState.slots);
     if (!compatible) item.classList.add('incompatible');
+    // role=button announces the tile as the equip control it is; closetTileA11y
+    // keeps that announcement honest when no handler is wired below — an
+    // incompatible tile is announced disabled and drops out of the tab order
+    // instead of being a focus stop that does nothing.
+    const a11y = buildPure.closetTileA11y(compatible);
+    item.setAttribute('role', 'button');
+    item.tabIndex = a11y.tabIndex;
+    if (a11y.ariaDisabled) item.setAttribute('aria-disabled', 'true');
     // With a GO selected, a trait that can't render on its body is hidden
     // entirely (it reappears on a GO whose body has the art). With no GO
     // selected — and for the always-visible "None" asset — keep a blank
@@ -4044,7 +4050,18 @@ function renderCloset() {
     // Equip is wired only when the asset is compatible with the active character;
     // the tile still renders (and Extract still works) when it isn't.
     // Staging only — nothing goes on-ledger until Save.
-    if (compatible) item.onclick = () => stagePendingEquip(asset.slot, asset.value);
+    if (compatible) {
+      item.onclick = () => stagePendingEquip(asset.slot, asset.value);
+      // A <div role="button"> synthesizes no click from Enter/Space, so without
+      // this the tile is announced as a button a keyboard or screen-reader user
+      // can focus but never activate — staging an equip is unreachable for them.
+      item.onkeydown = (e) => {
+        if (e.target !== item) return;   // the nested Extract button owns its own keys
+        if (!buildPure.isActivationKey(e.key)) return;
+        e.preventDefault();              // Space would otherwise scroll the panel
+        stagePendingEquip(asset.slot, asset.value);
+      };
+    }
     grid.appendChild(item);
   }
   renderSaveBar();

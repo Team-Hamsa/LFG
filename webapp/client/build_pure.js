@@ -147,6 +147,27 @@ export function closetTileState(asset, char) {
   return { visible: true, art: 'layer', label: '' };
 }
 
+// The keyboard equivalent of a click. A <div role="button"> — which is what a
+// Closet tile has to be, since it wraps the nested Extract <button> — gets
+// none of a native button's behavior for free: no Enter/Space activation, and
+// the client has no global key delegation (every keydown listener in app.js
+// closes an overlay on Escape). So the tile has to recognize these itself.
+export function isActivationKey(key) {
+  return key === 'Enter' || key === ' ';
+}
+
+// Focus and announcement state for one Closet tile, given whether its asset
+// can be equipped on the selected GO. An incompatible tile wires no equip
+// handler, so it must not be a Tab stop that silently does nothing; it keeps
+// role="button" + aria-disabled so a screen reader still announces it as an
+// equip control that is currently unavailable, and the nested Extract button
+// — which works whatever the equip compatibility — stays focusable on its own.
+export function closetTileA11y(compatible) {
+  return compatible
+    ? { tabIndex: 0, ariaDisabled: false }
+    : { tabIndex: -1, ariaDisabled: true };
+}
+
 // First legal value per slot from an options map — mirrors the server's old
 // first-match prefill so one-tap assemble still works.
 export function defaultChosen(slots, slotOptions) {
