@@ -6,6 +6,7 @@
 # No lfg_core import at module top -> no env-guard preamble needed.
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -504,3 +505,18 @@ def test_closet_tile_equip_delegates_to_equip_compatible():
     body = _render_closet_src()
     assert "buildPure.equipCompatible(char, asset, economyState.slots)" in body
     assert "if (compatible) item.onclick = () => stagePendingEquip(" in body
+
+
+def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
+    """A module and its caller must move in lockstep, but browser caches evict
+    them independently. equipCompatible was ADDED at v30: a browser holding the
+    old build_pure.js?v=29 alongside a fresh app.js would get a module without
+    that export, and renderCloset()'s call would TypeError and leave the Closet
+    unrendered. A floor (not an equality) so later bumps don't fight this test.
+    """
+    m = re.search(r"build_pure\.js\?v=(\d+)", _app_js())
+    assert m, "app.js no longer imports build_pure.js with a cache key"
+    assert int(m.group(1)) >= 30, (
+        "build_pure.js?v= regressed below the version that first exported "
+        "equipCompatible — a cached older module breaks the Closet"
+    )
