@@ -73,6 +73,18 @@ def drip(monkeypatch, tmp_path):
         return xrpl_ops.ClaimPayment("confirmed", "TXHASH", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", paid)
+
+    async def default_ledger_index():
+        # Hermetic (#524): _claim_one_wallet reads this BEFORE any claim row
+        # is opened (see its docstring), on every path where the trustline
+        # check passes — including refusal/error paths that mock
+        # send_brix_claim but not this. Unpatched it is a real JSON-RPC call;
+        # under a throttled/unreachable node it returns None, which trips
+        # claim_unavailable before the wallet's own mock ever runs. A test
+        # here needing a specific value still overrides this afterward.
+        return 100000
+
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", default_ledger_index)
     return conn
 
 
