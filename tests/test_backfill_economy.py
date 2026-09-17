@@ -31,6 +31,7 @@ from lfg_core import closet_token as ct  # noqa: E402
 from lfg_core import config  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
 from lfg_core import trait_token as tt  # noqa: E402
+from tests.closet_archive_helpers import closet_archive, closet_uri  # noqa: E402
 
 ISSUER = config.SWAP_ISSUER_ADDRESS
 OWNER = "rOwnerAddr0000000000000000000000000"
@@ -280,3 +281,60 @@ def test_network_bad_env_requires_flag(monkeypatch):
     with pytest.raises(SystemExit):
         be._build_parser().parse_args([])
     assert be._build_parser().parse_args(["--network", "mainnet"]).network == "mainnet"
+
+
+# --- #522: a rebuild must not claim a version it cannot date ----------------
+
+
+def test_lagging_snapshot_rebuild_does_not_claim_the_newer_version(tmp_path):
+    """This script rebuilds from a clio snapshot — the very source that lags a
+    just-validated modify. Rewriting the mirror one version back while KEEPING
+    the newer ledger stamp would tell the flows' stale-mirror guard the mirror is
+    current, and the next flow would erase the newer version on-chain: the
+    original bug, reached through the guard."""
+    conn = _conn(tmp_path)
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    # The listener mirrored version C (ledger 1005); the archive holds both.
+    es.set_closet_token(
+        conn, OWNER, "CLOSET1", version_c, status=ct.ACTIVE, applied_ledger_index=1005
+    )
+    es.set_closet_contents(conn, OWNER, [("Hat", "Cap", 2), ("Body", "Ape Xray", 1)], [])
+    archive = closet_archive(
+        tmp_path, "CLOSET1", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+    )
+
+    # clio still serves version B, so the rebuild writes B's contents back.
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_b)]})
+    fetch = _meta({version_b: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+
+    with pytest.raises(ct.ClosetError) as ei:
+        ct.ensure_mirror_current(conn, OWNER, history_db_path=archive)
+    assert ei.value.code == ct.CLOSET_MIRROR_BEHIND
+    assert es.get_closet_applied_ledger(conn, OWNER) is None  # dates nothing it rebuilt
+
+
+def test_rebuild_from_the_newest_version_lets_flows_run_again(tmp_path):
+    """The recovery path stays open: once clio serves the newest version, the
+    rebuild's own URI dates the mirror through the archive and the guard passes."""
+    conn = _conn(tmp_path)
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    es.set_closet_token(conn, OWNER, "CLOSET1", version_b, status=ct.ACTIVE)
+    es.set_closet_contents(conn, OWNER, [("Hat", "Cap", 2)], [])
+    archive = closet_archive(
+        tmp_path, "CLOSET1", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+    )
+
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta(
+        {
+            version_c: ct.build_closet_metadata(
+                OWNER, [("Hat", "Cap", 2), ("Body", "Ape Xray", 1)], []
+            )
+        }
+    )
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+
+    ct.ensure_mirror_current(conn, OWNER, history_db_path=archive)
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
+    assert assets[("Body", "Ape Xray")] == 1

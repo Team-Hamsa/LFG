@@ -121,19 +121,35 @@ def _migrate_bucket_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_ADDED_CLOSET_COLUMNS = (
+    ("mirror_pending", "INTEGER DEFAULT 0"),
+    ("applied_ledger_index", "INTEGER"),
+)
+
+
 def _migrate_closet_columns(conn: sqlite3.Connection) -> None:
     """Self-migrate closet_tokens columns added after the table first shipped.
     `mirror_pending` (#184) flags an owner whose on-chain Closet was modified
     but whose local mirror write failed (`complete_pending_mirror`); an index DB
     created before this column needs it added. `applied_ledger_index` (#522) is
     the validated ledger of the Closet version the mirror holds; NULL (every row
-    written before it existed) means unknown. ADD COLUMN is idempotent-guarded
-    by the PRAGMA check."""
+    written before it existed) means unknown.
+
+    The PRAGMA check makes ADD COLUMN idempotent, and a lost race on it is
+    tolerated: the service, the listener and the crons each open this index, so
+    on the FIRST open of an older DB two of them can see the column missing and
+    both ALTER. The loser's "duplicate column name" is the outcome we wanted —
+    same posture as fee_cover_store/shop_store/nft_index — while any other
+    OperationalError still surfaces."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(closet_tokens)")}
-    if "mirror_pending" not in cols:
-        conn.execute("ALTER TABLE closet_tokens ADD COLUMN mirror_pending INTEGER DEFAULT 0")
-    if "applied_ledger_index" not in cols:
-        conn.execute("ALTER TABLE closet_tokens ADD COLUMN applied_ledger_index INTEGER")
+    for column, decl in _ADDED_CLOSET_COLUMNS:
+        if column in cols:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE closet_tokens ADD COLUMN {column} {decl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.commit()
 
 
@@ -388,6 +404,19 @@ def set_closet_token(
         """,
         (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index),
     )
+    conn.commit()
+
+
+def clear_closet_applied_ledger(conn: sqlite3.Connection, owner: str) -> None:
+    """Forget which Closet version the owner's mirror holds (#522).
+
+    For a writer that rebuilt the contents from a source it cannot date — the
+    clio snapshot `scripts/backfill_economy.py` reads, which lags a
+    just-validated modify. Keeping the previous stamp would claim the mirror
+    sits at a version NEWER than the contents just written, and
+    `closet_token.ensure_mirror_current` would then read a behind mirror as
+    current and let the next flow overwrite the newer version away."""
+    conn.execute("UPDATE closet_tokens SET applied_ledger_index = NULL WHERE owner = ?", (owner,))
     conn.commit()
 
 

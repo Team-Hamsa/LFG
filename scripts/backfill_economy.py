@@ -27,6 +27,16 @@ Idempotent: safe to re-run. Same posture/conventions as scripts/backfill_market.
 and scripts/backfill_onchain.py (per-network onchain_<network>.db,
 --network testnet|mainnet).
 
+THE SNAPSHOT IS ONLY AS FRESH AS CLIO (#522). clio can still serve the PREVIOUS
+Closet URI for a while after a modify validates, so a run started too soon after
+economy traffic rebuilds a Closet one version back. That is why every Closet this
+run rebuilds has its `applied_ledger_index` stamp CLEARED: the mirror then dates
+itself only by what the history archive knows about the URI written here, so the
+flows' stale-mirror guard can still tell the mirror is behind and refuse
+(`closet_mirror_behind`) instead of erasing the newer version on-chain. An owner
+refused that way is repaired by re-running this script once clio serves the
+newest version again.
+
   python scripts/backfill_economy.py --network testnet
 """
 
@@ -87,7 +97,11 @@ def _reconcile_closet(
         it on accept (#190).
       * unreadable metadata (transient fetch failure / missing uri): forward-only,
         never treat a failed read as an empty closet — set_closet_contents([], [])
-        would wipe the owner's real rows and clear mirror_pending (#190)."""
+        would wipe the owner's real rows and clear mirror_pending (#190).
+
+    A rebuilt Closet loses its `applied_ledger_index` stamp: this snapshot comes
+    from clio, which lags a just-validated modify, and nothing here can date the
+    version it wrote (#522 — see the module docstring)."""
     owner = token.get("owner")
     if not owner:
         return False
@@ -106,6 +120,13 @@ def _reconcile_closet(
     else:
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
         economy_store.set_closet_contents(conn, owner, assets, bodies)
+        # #522: this snapshot comes from clio, the source that can still serve
+        # the PREVIOUS Closet URI right after a modify validates, and nothing
+        # here can date the version it just rebuilt. Drop the ledger stamp
+        # rather than let it keep claiming a newer version than these contents:
+        # the flows' stale-mirror guard would read the mirror as current and
+        # the next flow would overwrite the newer version away.
+        economy_store.clear_closet_applied_ledger(conn, owner)
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
@@ -217,7 +238,15 @@ async def backfill_economy(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Reconcile the trait-economy tables from chain.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Reconcile the trait-economy tables from chain. The snapshot is read from clio, "
+            "which can still serve the previous Closet URI right after a modify validates, so "
+            "every rebuilt Closet loses its applied-ledger stamp (#522): the flows then refuse "
+            "with closet_mirror_behind rather than overwrite a newer version. Re-run once clio "
+            "serves the newest version to clear that refusal."
+        )
+    )
     # Default parity with scripts/backfill_market.py: omitting --network runs
     # against the ECONOMY network (economy tables live in onchain_<net>.db and
     # the economy resolves reads via ECONOMY_NETWORK). argparse never validates a
