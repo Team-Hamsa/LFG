@@ -1048,3 +1048,18 @@ def test_sweep_defers_while_the_buyers_closet_mirror_is_behind(onchain_env, monk
 
     assert server._sweep_attempts.get("K" * 64, 0) == 0
     assert not (tmp_path / f"trait-settlement-giveup-{'K' * 64}.json").exists()
+
+
+def test_mirror_behind_check_failure_answers_false(onchain_env, monkeypatch):
+    """The sweeps' deferral check is a convenience, not a gate: if it fails
+    unexpectedly (locked DB, malformed archive) it must answer "not behind" so
+    the pass carries on for every remaining row, instead of raising out of the
+    sweep loop. The flow's own guard still refuses if the mirror really is
+    behind."""
+
+    def boom(*a, **k):
+        raise RuntimeError("history archive is a directory")
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    assert server._closet_mirror_behind("testnet", BUYER) is False

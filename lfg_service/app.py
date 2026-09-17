@@ -5065,9 +5065,13 @@ def _closet_mirror_behind(network: str, owner: str) -> bool:
     Same treatment the sweeps already give an unresolvable buyer.
 
     Any other error answers False: only this refusal is deferrable, everything
-    else is a real settlement failure the budget exists for."""
-    conn = nft_index.init_db(nft_index.index_db_path(network))
+    else is a real settlement failure the budget exists for. A check that fails
+    unexpectedly (locked DB, malformed archive) also answers False — it is a
+    convenience, not a gate, and must never abort a sweep pass for every
+    remaining row; the flow's own guard still refuses if the mirror is behind."""
+    conn = None
     try:
+        conn = nft_index.init_db(nft_index.index_db_path(network))
         economy_store.init_economy_schema(conn)
         closet_token.ensure_mirror_current(
             conn, owner, history_db_path=history_store.history_db_path(network)
@@ -5075,8 +5079,14 @@ def _closet_mirror_behind(network: str, owner: str) -> bool:
         return False
     except closet_token.ClosetError as e:
         return bool(e.code == closet_token.CLOSET_MIRROR_BEHIND)
+    except Exception:
+        logging.warning(
+            f"stale-mirror check failed for {owner}; settling as usual: {traceback.format_exc()}"
+        )
+        return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _sweep_giveup_recorded(offer_index: str) -> bool:
