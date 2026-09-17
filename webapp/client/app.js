@@ -747,6 +747,10 @@ async function wcSign(id) {
         : { error: String((e && e.message) || e) };
     }
     await wcReportOutcome(id, outcome, r.expires_at);
+    // #514: a wallet-side failure used to end silently while the pay screen
+    // just came back. Say what Joey said. (Not wcSignFailed: the outcome is
+    // already recorded, so its "Retry Joey" would have nothing to retry.)
+    if (outcome.error) showError(`Joey Wallet: ${outcome.error}`);
   } catch (e) {
     // Nothing was signed and nothing posted: the row is still pending and the
     // poller will call back next tick, so park it until the user retries.
@@ -2043,6 +2047,7 @@ function signWalletName(link) {
 
 function mintPayView(s) {
   const xrp = s.pay_with === 'XRP';
+  livePayLink = s.payment_link; // the pay view renders the live request (joeyPayWarning)
   const pill = { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` };
   const wname = signWalletName(s.payment_link);
   const joeyPay = signDeliveryPure.isWcLink(s.payment_link);
@@ -2181,6 +2186,26 @@ let currentMintId = null;
 let bulkCfg = { enabled: false, max: 1 };
 let mintQty = 1;              // selected quantity on the pay-page stepper
 let liveQty = null;           // quantity the live session/job was built for; null = none
+let livePayLink = null;       // delivery link of the live payment request; null = none
+
+// #513: cancelling a Joey payment only retires OUR sign request. The request
+// stays open in Joey, and approving it there later still takes the money. The
+// warning to show before a pay-screen action supersedes the live request, or
+// null (Xaman, no live request, or Joey has already answered it).
+function joeyPayWarning() {
+  const rid = signDeliveryPure.wcRequestId(livePayLink);
+  return signDeliveryPure.joeyCancelWarning({
+    deliveryUrl: livePayLink,
+    resolved: !!rid && (wcDone.has(rid) || wcPendingResults.has(rid)),
+  });
+}
+
+// Ask first (in-page: window.confirm is a no-op in the Discord iframe) when
+// that warning applies. Resolves true when the action may go ahead.
+async function confirmJoeyPaySupersede(title, confirmLabel) {
+  const text = joeyPayWarning();
+  return !text || confirmDialog({ title, text, confirmLabel });
+}
 
 function renderFlowQty() {
   el('flow-qty-value').textContent = String(mintQty);
@@ -2194,7 +2219,7 @@ function setupBulkStepper(cfg) {
   // Surface any swallowed handler exception as a toast: a stale-cached
   // module (the 2026-07-21 dead-stepper bug) otherwise fails silently.
   const tap = (delta) => {
-    try { onQtyChange(delta); } catch (e) { showError(`qty: ${e.message}`); }
+    onQtyChange(delta).catch((e) => showError(`qty: ${e.message}`));
   };
   el('flow-qty-minus').onclick = () => tap(-1);
   el('flow-qty-plus').onclick = () => tap(1);
@@ -2203,9 +2228,15 @@ function setupBulkStepper(cfg) {
 // Pay-page stepper press. Changing quantity invalidates the shown QR: cancel
 // the live payload immediately (frees the XUMM slot), dim the QR, and pulse
 // Regenerate — a new QR is built only when the user taps it.
-function onQtyChange(delta) {
+async function onQtyChange(delta) {
   const next = mintPure.clampQty(mintQty + delta, bulkCfg.max);
   if (next === mintQty) return;
+  if (mintPure.qtyStale(next, liveQty)) {
+    if (!(await confirmJoeyPaySupersede('Change quantity?', 'Change quantity'))) return;
+    // The payment may have landed while the dialog was open: the stepper is
+    // gone from a flow that moved past the pay screen, so leave it alone.
+    if (el('flow-qty').hidden) return;
+  }
   mintQty = next;
   renderFlowQty();
   if (mintPure.qtyStale(mintQty, liveQty)) {
@@ -2227,6 +2258,7 @@ async function cancelLiveMintSilently() {
   currentMintId = null;
   currentBulkId = null;
   liveQty = null;
+  livePayLink = null;
   clearTimeout(pollTimer); ++pollGen;             // stop single-mint poll
   clearTimeout(bulkPollTimer); ++bulkPollGen;     // stop bulk poll
   if (singleId) {
@@ -2250,6 +2282,8 @@ async function cancelLiveMintSilently() {
 // change (liveQty null) -> build a fresh session on the endpoint the selected
 // quantity targets.
 async function onFlowRegen() {
+  // A fresh request replaces the live one, which Joey keeps open (#513).
+  if (!(await confirmJoeyPaySupersede('Regenerate the payment request?', 'Regenerate'))) return;
   if (!mintPure.qtyStale(mintQty, liveQty) && liveQty === 1 && currentMintId) {
     return regeneratePaymentQr(); // classic same-session expired-QR refresh, has its own disable guard
   }
@@ -2275,6 +2309,7 @@ let bulkPollGen = 0;
 
 function bulkPayView(j) {
   const xrp = j.pay_with === 'XRP';
+  livePayLink = j.payment_link; // the pay view renders the live request (joeyPayWarning)
   return {
     title: `💰 Pay for ${j.quantity} builds`,
     text: j.payment_link
@@ -2314,6 +2349,7 @@ async function startBulkMint(quantity) {
 
 async function cancelBulkMint() {
   if (!currentBulkId) { showMintHome(); return; }
+  if (!(await confirmJoeyPaySupersede('Cancel this mint?', 'Cancel mint'))) return;
   const btn = el('flow-cancel-btn');
   btn.disabled = true;
   try {
@@ -2323,6 +2359,7 @@ async function cancelBulkMint() {
     clearTimeout(bulkPollTimer);
     bulkPollGen++;
     currentBulkId = null;
+    livePayLink = null;
     showMintHome();
   } catch (e) {
     // 409 = already paid: fulfillment must run — keep polling, don't dump home.
@@ -2751,10 +2788,14 @@ async function regeneratePaymentQr() {
 // already be approved in Xaman: warn before backing out.
 async function cancelMint(maybeSigned) {
   if (!currentMintId) { showMintHome(); return; }
-  if (maybeSigned) {
+  // An unanswered Joey request stays open in the wallet after the cancel
+  // (#513); that warning outranks the generic "may already be approved" one.
+  const joeyWarning = joeyPayWarning();
+  if (joeyWarning || maybeSigned) {
     const ok = await confirmDialog({
       title: 'Cancel this mint?',
-      text: 'If you already approved the payment in Xaman, it may still go through. Cancel anyway?',
+      text: joeyWarning
+        || 'If you already approved the payment in Xaman, it may still go through. Cancel anyway?',
       confirmLabel: 'Cancel mint',
     });
     if (!ok) return;
@@ -2782,6 +2823,7 @@ async function cancelMint(maybeSigned) {
   }
   clearTimeout(pollTimer);
   currentMintId = null;
+  livePayLink = null;
   showMintHome();
 }
 
