@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS fee_cover_quotes (
   offer_index TEXT,
   created_at INTEGER NOT NULL, closed_at INTEGER
 );
+-- bid_created_at: settlement links each open promise to its quote every sweep.
+CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_offer
+  ON fee_cover_quotes(offer_index);
 CREATE TABLE IF NOT EXISTS fee_cover_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
@@ -905,6 +908,20 @@ def record_quote(conn: sqlite3.Connection, quote: Quote) -> None:
         ),
     )
     conn.commit()
+
+
+def bid_created_at(conn: sqlite3.Connection, offer_index: str) -> int | None:
+    """When the bid behind `offer_index` was created, as far as the store can
+    link it: the creation time of the quote closed with that offer index. The
+    quote is written with its bid session, before the buyer signs, so this is
+    the bid's own start — unlike the promise's `created_at`, which is when the
+    promise row was WRITTEN and can trail the fill by hours (a reconciled
+    quote, a late poll). None when no quote carries the index: a promise made
+    without one (no campaign when its bid started) has no linkable start."""
+    row = conn.execute(
+        "SELECT MIN(created_at) FROM fee_cover_quotes WHERE offer_index = ?", (offer_index,)
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
 
 
 def get_quote(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:

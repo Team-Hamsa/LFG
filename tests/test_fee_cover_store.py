@@ -625,6 +625,17 @@ def test_quote_lifecycle(conn):
     assert store.pending_quotes(conn, NET, created_before=2000, limit=10) == []
 
 
+def test_bid_created_at_links_an_offer_index_to_its_quote(conn):
+    """The quote is written when the bid session is created, before its offer
+    index exists; closing it records the index. That is the only durable link
+    from a promise to its bid's creation time."""
+    store.record_quote(conn, _quote("S1", created_at=1000))
+    assert store.bid_created_at(conn, "BID1") is None  # pending: no offer index yet
+    store.close_quote(conn, "S1", "promised", offer_index="BID1", now=5000)
+    assert store.bid_created_at(conn, "BID1") == 1000  # the quote's creation, not its close
+    assert store.bid_created_at(conn, "UNLINKED") is None
+
+
 def test_pending_quotes_respects_the_grace_period_network_and_limit(conn):
     store.record_quote(conn, _quote("OLD1", created_at=1000))
     store.record_quote(conn, _quote("OLD2", created_at=1001))
