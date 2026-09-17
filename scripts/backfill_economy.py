@@ -35,10 +35,12 @@ mirror before the rewrite: the ledger history archive (read-only) is asked which
 ledger set the URI just written, and the mirror is stamped with that — or with
 nothing, when the archive cannot date it.
 
-So a rebuild one version back cannot pretend to be current: the flows' guard
-still refuses (`closet_mirror_behind`), and the listener still skips an OLDER
-modify that would undo a good rebuild. An owner refused that way is repaired by
-re-running this script once clio serves the newest version again.
+So a rebuild one version back cannot pretend to be current: as long as the
+archive is readable, the flows' guard refuses (`closet_mirror_behind`) and the
+listener skips an OLDER modify that would undo a good rebuild. An owner refused
+that way is repaired by re-running this script once clio serves the newest
+version again. If the archive cannot be read, nothing dates these mirrors and
+nothing refuses them — this run says so, and it is worth re-running afterwards.
 
   python scripts/backfill_economy.py --network testnet
 """
@@ -211,7 +213,9 @@ async def backfill_economy(
         except (OSError, sqlite3.Error) as e:
             print(
                 f"history archive {history_db_path} unavailable ({e}); rebuilt Closets carry no "
-                "version stamp, so their owners' flows refuse until a later rebuild dates them"
+                "version stamp, and stale-mirror protection is UNAVAILABLE while the archive "
+                "cannot be read — an undated mirror is not refused, so re-run once the archive "
+                "is readable if this run may have rebuilt stale contents"
             )
     sem = asyncio.Semaphore(concurrency)
 
@@ -282,9 +286,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Reconcile the trait-economy tables from chain. The snapshot is read from clio, "
             "which can still serve the previous Closet URI right after a modify validates, so "
             "every rebuilt Closet is re-dated from the ledger history archive instead of "
-            "keeping its old stamp (#522): a rebuild one version back then refuses flows with "
-            "closet_mirror_behind rather than overwriting a newer version. Re-run once clio "
-            "serves the newest version to clear that refusal."
+            "keeping its old stamp (#522): while the archive is readable, a rebuild one version "
+            "back then refuses flows with closet_mirror_behind rather than overwriting a newer "
+            "version. Re-run once clio serves the newest version to clear that refusal."
         )
     )
     # Default parity with scripts/backfill_market.py: omitting --network runs
