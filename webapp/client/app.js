@@ -2680,6 +2680,9 @@ function attachMintResume(session) {
   currentMintId = id;
   mintQty = 1;
   liveQty = 1;
+  // Before the first poll renders mintPayView (3 s later), Cancel would
+  // otherwise miss the Joey warning for a request this session still has open.
+  livePayLink = session.payment_link || null;
   showFlow(sponsoredMintView(session) || {
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',

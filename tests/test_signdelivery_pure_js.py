@@ -168,6 +168,12 @@ def test_wc_result_action_reads_the_hash_inside_tx_json():
     assert run_js("M.wcResultAction({tx_json: {hash: 'AB'}})") == {"hash": "AB"}
 
 
+def test_wc_result_action_skips_an_unusable_top_level_hash():
+    # A truthy non-string `hash` must not mask a valid one inside tx_json, or
+    # a submitted payment is reported as a failure and never verified.
+    assert run_js("M.wcResultAction({hash: 123, tx_json: {hash: 'AB'}})") == {"hash": "AB"}
+
+
 def test_wc_result_action_carries_the_wallets_error_message():
     assert run_js("M.wcResultAction({error: {message: 'User rejected'}})") == {
         "error": "User rejected"

@@ -85,8 +85,11 @@ export function wcRequestId(link) {
 // never a success; the wallet's own error message is carried through when it
 // sent one (#514).
 export function wcResultAction(resp) {
-  const hash = resp && (resp.hash || (resp.tx_json && resp.tx_json.hash));
-  if (typeof hash === 'string' && hash) return { hash };
+  // Each candidate is checked on its own: a truthy but unusable top-level
+  // `hash` must not mask a valid one inside tx_json.
+  const hash = [resp && resp.hash, resp && resp.tx_json && resp.tx_json.hash]
+    .find((value) => typeof value === 'string' && value);
+  if (hash) return { hash };
   const message = resp && resp.error && resp.error.message;
   if (typeof message === 'string' && message) return { error: message };
   return { error: 'no hash returned' };
