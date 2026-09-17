@@ -5509,6 +5509,19 @@ def _closet_market_disabled_response():
     )
 
 
+def _wallet_unsupported_response():
+    """(#516 D4) Closet Market signing — a TokenEscrow (bid) or a pinned-LLS
+    Payment (ask buy) — isn't available on WalletConnect (Joey) yet: refuse
+    rather than build a payload the wallet can't sign. Xaman sessions are
+    unaffected; the provider is read from lfg_core.signing.context, ambient
+    for the request since require_auth (option-A guard for #516; the issue
+    stays open for the LastLedgerSequence follow-up)."""
+    return web.json_response(
+        {"error": "Closet Market orders need Xaman for now.", "code": "wallet_unsupported"},
+        status=409,
+    )
+
+
 def require_closet_market(handler):
     @functools.wraps(handler)
     async def wrapper(request):
@@ -5998,6 +6011,8 @@ async def handle_closet_bid_create(request):
     generated here and stored sealed; the bid opens once the escrow is
     verified on-ledger (GET /api/closet/bid/{id})."""
     wallet, user = request["wallet"], request["user"]
+    if signing_context.current_provider() == "walletconnect":
+        return _wallet_unsupported_response()
     body = await _json_body(request)
     slot, value = body.get("slot"), body.get("value")
     price = _parse_brix_price(body.get("price_brix"))
@@ -6005,6 +6020,11 @@ async def handle_closet_bid_create(request):
         return web.json_response(
             {"error": "slot, value and a valid price_brix are required", "code": "bad_request"},
             status=400,
+        )
+    if value == "None":
+        # (#516 D5) "None" is an empty slot, not a real asset — nothing to bid on.
+        return web.json_response(
+            {"error": "an empty slot can't be traded", "code": "invalid_asset"}, status=400
         )
     network = config.ECONOMY_NETWORK
     loop = asyncio.get_event_loop()
@@ -6150,6 +6170,8 @@ async def handle_closet_ask_buy(request):
     (a refund is paid in BRIX); buyers with a line but too little BRIX pay XRP
     via SendMax on the same Payment."""
     wallet, user = request["wallet"], request["user"]
+    if signing_context.current_provider() == "walletconnect":
+        return _wallet_unsupported_response()
     order_id = request.match_info["order_id"]
     ask = await _closet_db(closet_market_store.get_order, order_id)
     if ask is None or ask["side"] != closet_market_store.SIDE_ASK:

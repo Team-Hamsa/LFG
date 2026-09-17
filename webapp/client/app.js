@@ -5207,6 +5207,14 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
     const label = document.createElement('span');
     label.className = 'trait-chip-label';
     label.textContent = entry.label;
+    // (#516 D5) entry.noAction: nothing this chip's action could do (e.g. a
+    // Closet "None" asset — an empty slot isn't a tradeable trait) — render
+    // the chip so the holding is still visible, just without a button.
+    if (entry.noAction) {
+      chip.replaceChildren(img, label);
+      containerEl.appendChild(chip);
+      continue;
+    }
     const btn = document.createElement('button');
     btn.className = 'chip-action';
     btn.textContent = actionLabel;
@@ -5265,6 +5273,8 @@ function renderMineGroups(data) {
   const closetEntries = data.closet_assets.map((a) => ({
     imgSrc: mineTraitImgSrc(a.slot, a.value, a.image_url),
     label: closetPure.closetAssetLabel(a),
+    // (#516 D5) "None" is an empty slot, not a trait — nothing to sell.
+    noAction: a.value === 'None',
     // #443: with the Closet market on, Sell posts a free off-ledger ask; the
     // Extract -> List wizard stays reachable through Unlisted traits.
     payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: !closetMarketEnabled, closetAsk: closetMarketEnabled },
@@ -5435,6 +5445,12 @@ async function marketFlow(kind, startPath, body, render) {
     if (e.message === 'closet_required') {
       showPanel('market-panel');
       promptClosetRequired();
+      return;
+    }
+    if (e.body && e.body.code === 'wallet_unsupported') {
+      // (#516 D4) Joey/WalletConnect can't sign Closet Market orders yet —
+      // the server's message is already the full explanation.
+      showFlow({ title: '❌ Xaman required', text: e.message, done: true });
       return;
     }
     if (e.body && e.body.code === 'trustline_required') {

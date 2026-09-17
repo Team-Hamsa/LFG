@@ -145,6 +145,17 @@ def test_ask_create_rejects_bad_price_and_unheld(closet_env):
     assert unheld.status == 409 and _json(unheld)["code"] == "not_available"
 
 
+def test_ask_create_refuses_none_value(closet_env):
+    """(#516 D5) "None" is an empty slot, not a real asset — refused even
+    though the store never checked whether ME actually holds one."""
+    resp = _run(
+        server.handle_closet_ask_create(
+            _req("POST", "/", {"slot": "Head", "value": "None", "price_brix": "1"})
+        )
+    )
+    assert resp.status == 400 and _json(resp)["code"] == "invalid_asset"
+
+
 def test_ask_crossing_a_bid_schedules_settlement(closet_env):
     _open_bid(closet_env, price="10")
     body = _json(

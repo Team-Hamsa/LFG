@@ -107,6 +107,32 @@ def test_closet_market_dom_lookups_are_null_guarded():
     assert "if (closetBidNote) closetBidNote.textContent" in js
 
 
+def test_mine_closet_hides_sell_button_for_none_value():
+    """(#516 D5) a harvested-but-empty slot ("None") sits in the Closet as a
+    loose asset like any other, but there is nothing to sell — no button."""
+    js = _read("webapp/client/app.js")
+    body = js[
+        js.index("function renderMineGroups(data)") : js.index("function renderBidGroups(data)")
+    ]
+    assert "noAction: a.value === 'None'" in body
+
+
+def test_render_chip_list_skips_the_action_button_when_no_action():
+    js = _read("webapp/client/app.js")
+    body = js[js.index("function renderChipList(") : js.index("function mineTraitImgSrc(")]
+    assert "entry.noAction" in body
+
+
+def test_market_flow_surfaces_wallet_unsupported_error():
+    """(#516 D4) bid-create and ask-buy both start through marketFlow; a 409
+    wallet_unsupported must not be swallowed by a code-specific branch that
+    only recognizes closet_required/trustline_required — its exact server
+    text has to reach the flow panel."""
+    js = _read("webapp/client/app.js")
+    body = js[js.index("async function marketFlow(") : js.index("function marketListRender(")]
+    assert "wallet_unsupported" in body
+
+
 def test_closet_ask_errors_are_surfaced():
     """Staging 2026-09-16: a 409 trustline_required from POST /api/closet/ask
     was an unhandled rejection — the list modal closed and nothing happened."""
