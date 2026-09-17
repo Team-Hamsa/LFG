@@ -734,3 +734,42 @@ def test_sweep_settlement_flag_write_failure_does_not_propagate(onchain_env, mon
     order = shop_store.get_order(conn, "X5")
     assert order["status"] == "settled"
     assert buybacks == [1]
+
+
+def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_behind(
+    onchain_env, monkeypatch, tmp_path
+):
+    """#522 (trait-sale sweep twin): the Shop marks a paid order `failed` once
+    its budget is spent, and nothing re-arms it when the mirror is repaired. A
+    temporary `closet_mirror_behind` refusal must defer instead."""
+    from tests.closet_archive_helpers import closet_archive, closet_uri
+
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    conn = _reopen(onchain_env)
+    es.set_closet_token(
+        conn, BUYER, "CLOSETS", version_b, status="active", applied_ledger_index=1000
+    )
+    es.set_closet_contents(conn, BUYER, [], [])
+    _seed_order(conn, "X9", status="accepted", created_ts=int(time.time()))
+    conn.close()
+    monkeypatch.setenv(
+        "HISTORY_DB_PATH",
+        closet_archive(
+            tmp_path, "CLOSETS", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+        ),
+    )
+
+    settle_calls = []
+
+    def recording_deps(c):
+        settle_calls.append(1)
+        return _settle_deps(c, _FakeSettleDeps(), tmp_path)
+
+    monkeypatch.setattr(server.economy_api, "build_settlement_deps", recording_deps)
+
+    _run(server.sweep_shop_orders())
+
+    assert settle_calls == []  # deferred before any settlement work
+    assert server._shop_settle_attempts.get("X9", 0) == 0
+    conn = _reopen(onchain_env)
+    assert shop_store.get_order(conn, "X9")["status"] == "accepted"  # still retryable

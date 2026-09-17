@@ -5054,6 +5054,31 @@ def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> Non
         )
 
 
+def _closet_mirror_behind(network: str, owner: str) -> bool:
+    """True while `owner`'s Closet mirror is behind the chain (#522).
+
+    A deposit run now would refuse (`closet_mirror_behind`) — and that refusal is
+    TEMPORARY: the listener catches up, or an operator rebuilds the mirror. Both
+    settlement sweeps must therefore DEFER such a pass instead of spending an
+    attempt: a spent budget journals a durable give-up (and the Shop marks the
+    paid order `failed`), and nothing re-arms it when the mirror is repaired.
+    Same treatment the sweeps already give an unresolvable buyer.
+
+    Any other error answers False: only this refusal is deferrable, everything
+    else is a real settlement failure the budget exists for."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        closet_token.ensure_mirror_current(
+            conn, owner, history_db_path=history_store.history_db_path(network)
+        )
+        return False
+    except closet_token.ClosetError as e:
+        return bool(e.code == closet_token.CLOSET_MIRROR_BEHIND)
+    finally:
+        conn.close()
+
+
 def _sweep_giveup_recorded(offer_index: str) -> bool:
     """Durable form of the in-memory attempt counter: a giveup record on disk
     means a previous process already exhausted the budget for this row. Read
@@ -5123,6 +5148,12 @@ async def settle_pending_trait_sales() -> None:
             # hasn't (yet) recorded an owner for this token: transient lag,
             # not a precondition failure. Try again next sweep without
             # counting an attempt.
+            continue
+        if _closet_mirror_behind(network, buyer):
+            logging.info(
+                f"settlement sweep: deferring {offer_index} — {buyer}'s Closet mirror is behind "
+                "the chain (#522); a deposit would refuse, so no attempt is counted"
+            )
             continue
         try:
             settled = await _settle_trait_sale(buyer, row["nft_id"], offer_index, network)
@@ -5306,6 +5337,12 @@ async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
     now_ts = int(time.time())
     if not nft_id:
         return  # nothing minted; not a settleable order
+    if _closet_mirror_behind(network, buyer):
+        logging.info(
+            f"shop settlement sweep: deferring {session_id} — {buyer}'s Closet mirror is behind "
+            "the chain (#522); a deposit would refuse, so no attempt is counted"
+        )
+        return
 
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:

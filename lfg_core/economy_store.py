@@ -407,16 +407,23 @@ def set_closet_token(
     conn.commit()
 
 
-def clear_closet_applied_ledger(conn: sqlite3.Connection, owner: str) -> None:
-    """Forget which Closet version the owner's mirror holds (#522).
+def set_closet_applied_ledger(
+    conn: sqlite3.Connection, owner: str, ledger_index: int | None
+) -> None:
+    """Re-date (or, with None, forget) which Closet version the owner's mirror
+    holds (#522) — unlike `set_closet_token`, this never keeps the old stamp.
 
-    For a writer that rebuilt the contents from a source it cannot date — the
-    clio snapshot `scripts/backfill_economy.py` reads, which lags a
-    just-validated modify. Keeping the previous stamp would claim the mirror
-    sits at a version NEWER than the contents just written, and
-    `closet_token.ensure_mirror_current` would then read a behind mirror as
-    current and let the next flow overwrite the newer version away."""
-    conn.execute("UPDATE closet_tokens SET applied_ledger_index = NULL WHERE owner = ?", (owner,))
+    For a writer that REPLACED the contents from a source it cannot date itself:
+    the clio snapshot `scripts/backfill_economy.py` reads lags a just-validated
+    modify, so keeping the previous stamp would claim a version NEWER than what
+    was written, and `closet_token.ensure_mirror_current` would read a behind
+    mirror as current. `None` (nothing dates the version) is the honest fallback;
+    a ledger from the history archive is better, because it also lets the
+    listener refuse an OLDER modify that would undo the rebuild."""
+    conn.execute(
+        "UPDATE closet_tokens SET applied_ledger_index = ? WHERE owner = ?",
+        (ledger_index, owner),
+    )
     conn.commit()
 
 

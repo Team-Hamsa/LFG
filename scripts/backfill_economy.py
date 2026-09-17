@@ -29,13 +29,16 @@ and scripts/backfill_onchain.py (per-network onchain_<network>.db,
 
 THE SNAPSHOT IS ONLY AS FRESH AS CLIO (#522). clio can still serve the PREVIOUS
 Closet URI for a while after a modify validates, so a run started too soon after
-economy traffic rebuilds a Closet one version back. That is why every Closet this
-run rebuilds has its `applied_ledger_index` stamp CLEARED: the mirror then dates
-itself only by what the history archive knows about the URI written here, so the
-flows' stale-mirror guard can still tell the mirror is behind and refuse
-(`closet_mirror_behind`) instead of erasing the newer version on-chain. An owner
-refused that way is repaired by re-running this script once clio serves the
-newest version again.
+economy traffic rebuilds a Closet one version back. Every Closet this run
+rebuilds is therefore RE-DATED, never left carrying the stamp that described the
+mirror before the rewrite: the ledger history archive (read-only) is asked which
+ledger set the URI just written, and the mirror is stamped with that — or with
+nothing, when the archive cannot date it.
+
+So a rebuild one version back cannot pretend to be current: the flows' guard
+still refuses (`closet_mirror_behind`), and the listener still skips an OLDER
+modify that would undo a good rebuild. An owner refused that way is repaired by
+re-running this script once clio serves the newest version again.
 
   python scripts/backfill_economy.py --network testnet
 """
@@ -60,6 +63,7 @@ from lfg_core import (  # noqa: E402
     closet_token,
     config,
     economy_store,
+    history_store,
     nft_index,
     trait_economy,
     trait_token,
@@ -79,12 +83,25 @@ EnumerateFn = Callable[[int], Awaitable[list[dict[str, Any]]]]
 FetchMetaFn = Callable[[str], Awaitable[dict[str, Any] | None]]
 
 
+def _archived_version_ledger(archive: Any, nft_id: str, uri_hex: str | None) -> int | None:
+    """The ledger the history archive saw `nft_id` set to `uri_hex` in, or None
+    when there is no archive, no URI, or the archive never saw that version."""
+    if archive is None or not uri_hex:
+        return None
+    try:
+        return history_store.uri_version_ledger(archive, nft_id, uri_hex)
+    except sqlite3.Error as e:
+        print(f"archive lookup failed for {nft_id}: {e}")
+        return None
+
+
 def _reconcile_closet(
     conn: sqlite3.Connection,
     token: dict[str, Any],
     metadata: Any,
     issuer: str,
     genesis: trait_economy.Genesis | None = None,
+    archive: Any = None,
 ) -> bool:
     """Rebuild one owner's Closet contents + token record from an on-ledger
     Closet NFToken snapshot. Returns True if applied, False if skipped.
@@ -99,9 +116,11 @@ def _reconcile_closet(
         never treat a failed read as an empty closet — set_closet_contents([], [])
         would wipe the owner's real rows and clear mirror_pending (#190).
 
-    A rebuilt Closet loses its `applied_ledger_index` stamp: this snapshot comes
-    from clio, which lags a just-validated modify, and nothing here can date the
-    version it wrote (#522 — see the module docstring)."""
+    A rebuilt Closet is re-stamped with the ledger `archive` dates the URI just
+    written to, and left unstamped when the archive cannot date it (#522 — see
+    the module docstring). The snapshot itself comes from clio, which lags a
+    just-validated modify, so the previous stamp must never simply be kept: it
+    would claim a version newer than the contents written here."""
     owner = token.get("owner")
     if not owner:
         return False
@@ -121,12 +140,16 @@ def _reconcile_closet(
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
         economy_store.set_closet_contents(conn, owner, assets, bodies)
         # #522: this snapshot comes from clio, the source that can still serve
-        # the PREVIOUS Closet URI right after a modify validates, and nothing
-        # here can date the version it just rebuilt. Drop the ledger stamp
-        # rather than let it keep claiming a newer version than these contents:
-        # the flows' stale-mirror guard would read the mirror as current and
-        # the next flow would overwrite the newer version away.
-        economy_store.clear_closet_applied_ledger(conn, owner)
+        # the PREVIOUS Closet URI right after a modify validates, so the stamp
+        # that described the mirror BEFORE this rewrite must not survive it —
+        # it would claim a version newer than the contents just written, and the
+        # flows' stale-mirror guard would read a behind mirror as current.
+        # Re-date it from the archive, which knows the ledger each URI was set
+        # in: that both keeps the guard honest and lets the listener refuse an
+        # OLDER modify that would otherwise undo this rebuild.
+        economy_store.set_closet_applied_ledger(
+            conn, owner, _archived_version_ledger(archive, token["nft_id"], token.get("uri_hex"))
+        )
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
@@ -159,6 +182,7 @@ async def backfill_economy(
     *,
     issuer: str,
     concurrency: int = FETCH_CONCURRENCY,
+    history_db_path: str | None = None,
 ) -> dict[str, int]:
     """Reconcile the economy tables from on-ledger state. `enumerate_fn(taxon)`
     returns every token (live + burned) for that taxon under our issuer;
@@ -169,13 +193,26 @@ async def backfill_economy(
     and forwards it into every Closet reconcile so a legacy-schema token's
     integer `bodies` list converts to `("Body", value)` asset rows on rebuild,
     same as the live listener. No frozen genesis (`genesis_exists` false) ->
-    `None`, leaving that conversion off and behavior unchanged."""
+    `None`, leaving that conversion off and behavior unchanged.
+
+    `history_db_path` is the ledger history archive, opened READ-ONLY to date the
+    Closet version each rebuild writes (#522). Unavailable (or omitted) just
+    means a rebuilt Closet carries no version stamp — never a failed run."""
     economy_store.init_economy_schema(conn)
     genesis: trait_economy.Genesis | None = None
     if economy_store.genesis_exists(conn):
         genesis = trait_economy.effective_genesis(
             economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
         )
+    archive = None
+    if history_db_path is not None:
+        try:
+            archive = history_store.connect_readonly(history_db_path)
+        except (OSError, sqlite3.Error) as e:
+            print(
+                f"history archive {history_db_path} unavailable ({e}); rebuilt Closets carry no "
+                "version stamp, so their owners' flows refuse until a later rebuild dates them"
+            )
     sem = asyncio.Semaphore(concurrency)
 
     async def _meta(uri_hex: str) -> dict[str, Any] | None:
@@ -200,7 +237,7 @@ async def backfill_economy(
         closets_seen += len(live)
         metas = await asyncio.gather(*(_meta(t.get("uri_hex") or "") for t in live))
         for token, meta in zip(live, metas, strict=True):
-            if _reconcile_closet(conn, token, meta, issuer, genesis):
+            if _reconcile_closet(conn, token, meta, issuer, genesis, archive):
                 closets_applied += 1
 
     # --- Trait tokens: taxon 176 (config.TRAIT_TAXON, flipped from 1763 per
@@ -226,6 +263,8 @@ async def backfill_economy(
             economy_store.delete_trait_token(conn, nft_id)
             traits_deleted_stale += 1
 
+    if archive is not None:
+        archive.close()
     return {
         "closets_seen": closets_seen,
         "closets_applied": closets_applied,
@@ -242,8 +281,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Reconcile the trait-economy tables from chain. The snapshot is read from clio, "
             "which can still serve the previous Closet URI right after a modify validates, so "
-            "every rebuilt Closet loses its applied-ledger stamp (#522): the flows then refuse "
-            "with closet_mirror_behind rather than overwrite a newer version. Re-run once clio "
+            "every rebuilt Closet is re-dated from the ledger history archive instead of "
+            "keeping its old stamp (#522): a rebuild one version back then refuses flows with "
+            "closet_mirror_behind rather than overwriting a newer version. Re-run once clio "
             "serves the newest version to clear that refusal."
         )
     )
@@ -273,7 +313,13 @@ async def _amain() -> int:
         async def fetch(uri_hex: str) -> dict[str, Any] | None:
             return await nft_index.fetch_metadata_multi(http, uri_hex)
 
-        counts = await backfill_economy(conn, enum, fetch, issuer=issuer)
+        counts = await backfill_economy(
+            conn,
+            enum,
+            fetch,
+            issuer=issuer,
+            history_db_path=history_store.history_db_path(args.network),
+        )
 
     print(f"Network: {args.network}  issuer: {issuer}")
     print(f"  DB: {nft_index.index_db_path(args.network)}")

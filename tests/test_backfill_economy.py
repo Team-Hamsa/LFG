@@ -306,12 +306,66 @@ def test_lagging_snapshot_rebuild_does_not_claim_the_newer_version(tmp_path):
     # clio still serves version B, so the rebuild writes B's contents back.
     enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_b)]})
     fetch = _meta({version_b: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
-    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
 
     with pytest.raises(ct.ClosetError) as ei:
         ct.ensure_mirror_current(conn, OWNER, history_db_path=archive)
     assert ei.value.code == ct.CLOSET_MIRROR_BEHIND
-    assert es.get_closet_applied_ledger(conn, OWNER) is None  # dates nothing it rebuilt
+    # Dated by the archive as the version it actually wrote — NOT the newer one it replaced.
+    assert es.get_closet_applied_ledger(conn, OWNER) == 1000
+
+
+def test_rebuild_stamps_the_version_it_wrote_so_a_later_older_tx_cannot_undo_it(tmp_path):
+    """A rebuild that leaves the mirror undatable is not safe either: a lagging
+    listener then handles an OLDER Closet modify, finds no stamp to compare
+    against, and replaces the recovered version with the older one. The archive
+    can date the URI this rebuild wrote — stamp it with that evidence."""
+    from lfg_core import nft_listener
+    from tests.closet_archive_helpers import closet_version_tx
+
+    conn = _conn(tmp_path)
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    es.set_closet_token(
+        conn, OWNER, "CLOSET1", version_b, status=ct.ACTIVE, applied_ledger_index=1000
+    )
+    es.set_closet_contents(conn, OWNER, [("Hat", "Cap", 2)], [])
+    archive = closet_archive(
+        tmp_path, "CLOSET1", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+    )
+
+    # clio has caught up: the rebuild recovers version C.
+    contents_c = [("Hat", "Cap", 2), ("Body", "Ape Xray", 1)]
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta({version_c: ct.build_closet_metadata(OWNER, contents_c, [])})
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
+
+    assert es.get_closet_applied_ledger(conn, OWNER) == 1005  # dated from the archive
+
+    # The listener, still behind, now handles the OLDER version B.
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": nft_id,
+            "owner": OWNER,
+            "taxon": CLOSET_TAXON,
+            "uri_hex": version_b,
+            "issuer": ISSUER,
+        }
+
+    async def fetch_meta(uri_hex):
+        return ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])
+
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            closet_version_tx("modify", "CLOSET1", version_b, 1000),
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=None,
+        )
+    )
+
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
+    assert assets.get(("Body", "Ape Xray")) == 1  # the recovery survived
 
 
 def test_rebuild_from_the_newest_version_lets_flows_run_again(tmp_path):
@@ -333,7 +387,7 @@ def test_rebuild_from_the_newest_version_lets_flows_run_again(tmp_path):
             )
         }
     )
-    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
 
     ct.ensure_mirror_current(conn, OWNER, history_db_path=archive)
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
