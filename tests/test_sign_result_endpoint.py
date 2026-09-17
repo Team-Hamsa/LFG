@@ -5,6 +5,7 @@
 # the txjson we asked for.
 import asyncio
 import json
+import logging
 import time
 
 import pytest
@@ -55,6 +56,8 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(app.mock_economy, "DEV_OWNER", DEV_OWNER, raising=False)
     monkeypatch.setattr(store, "DATABASE", str(tmp_path / "sign.db"))
+    # Late-signature journal records (#513) land in a per-test directory.
+    monkeypatch.setattr(app.config, "ECONOMY_RECORDS_DIR", str(tmp_path / "records"))
     store.ensure_table()
 
 
@@ -629,3 +632,151 @@ def test_lost_txid_race_still_ends_mismatch(monkeypatch):
     assert store.get(second["id"])["txid"] is None
     assert store.get(first["id"])["state"] == "signed"
     assert store.get(first["id"])["txid"] == HASH
+
+
+# --- late signatures (#513) --------------------------------------------------
+#
+# Cancelling a WalletConnect request only retires OUR row (cancel_xumm_payload
+# on a wc- id): the request stays open in Joey, and approving it there later
+# still submits the payment. The row stays resolved and the answer stays 409,
+# but a hash proving a VALIDATED, SUCCESSFUL transaction that is exactly what
+# the row asked for means the wallet paid for nothing — it is journaled for a
+# manual refund (owner decision D7).
+
+_ALREADY_RESOLVED_CANCELLED = {
+    "error": "already resolved",
+    "code": "already_resolved",
+    "state": "cancelled",
+}
+
+
+def _mint_payment():
+    """A mint payment as the XRP path requests it: to the app's payment wallet."""
+    return {
+        "TransactionType": "Payment",
+        "Account": DEV_OWNER,
+        "Destination": app.xrpl_ops.bot_wallet_address(),
+        "Amount": "5000000",
+        "SourceTag": 2606160021,
+        "Memos": _memos(),
+    }
+
+
+def _cancelled_payment_row():
+    row = _row(txjson=_mint_payment())
+    store.set_state(row["id"], "cancelled")  # what cancelling a wc- payload does
+    return row
+
+
+def _late_records(tmp_path, request_id, tx_hash):
+    """Late-signature records on disk for one (request, hash) pair, matched by
+    content so the test does not depend on how the files are named."""
+    root = tmp_path / "records"
+    if not root.is_dir():
+        return []
+    found = []
+    for path in root.iterdir():
+        if path.suffix != ".json":
+            continue
+        record = json.loads(path.read_text())
+        if record.get("request_id") == request_id and record.get("tx_hash") == tx_hash:
+            found.append(record)
+    return found
+
+
+def _error_logs_naming(caplog, *needles):
+    return [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.ERROR and all(n in rec.getMessage() for n in needles)
+    ]
+
+
+def _assert_row_untouched(request_id):
+    got = store.get(request_id)
+    assert got["state"] == "cancelled"
+    assert got["txid"] is None
+
+
+def test_late_hash_on_cancelled_row_is_recorded(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH.lower()})
+    assert r.status == 409
+    assert _body(r) == _ALREADY_RESOLVED_CANCELLED
+    records = _late_records(tmp_path, row["id"], HASH)
+    assert len(records) == 1
+    assert records[0]["wallet"] == DEV_OWNER
+    assert records[0]["amount"] == "5000000"
+    assert records[0]["destination"] == app.xrpl_ops.bot_wallet_address()
+    assert _error_logs_naming(caplog, row["id"], DEV_OWNER, HASH)
+    _assert_row_untouched(row["id"])
+
+
+@pytest.mark.parametrize("lookup", ["not_found", "unvalidated"])
+def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, lookup):
+    row = _cancelled_payment_row()
+    if lookup == "not_found":
+        result = {"error": "txnNotFound"}
+    else:
+        result = _rippled_shape(_mint_payment())
+        result["validated"] = False
+        result["tx_json"]["validated"] = False
+    _fake_tx(monkeypatch, result=result)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    _assert_row_untouched(row["id"])
+
+
+@pytest.mark.parametrize(
+    "field,value", [("Destination", OTHER), ("Amount", "4000000")], ids=["destination", "amount"]
+)
+def test_late_hash_mismatched_tx_not_recorded(monkeypatch, tmp_path, field, value):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment(), **{field: value}))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_repost_idempotent(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        first = _post(row["id"], {"hash": HASH})
+        second = _post(row["id"], {"hash": HASH})
+    assert first.status == second.status == 409
+    assert _body(second) == _ALREADY_RESOLVED_CANCELLED
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    # One refund alarm per payment: a repost must not read as a second charge.
+    assert len(_error_logs_naming(caplog, HASH)) == 1
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_that_failed_on_ledger_not_recorded(monkeypatch, tmp_path):
+    """A tec result is final but moved nothing beyond the fee. The 9 late prod
+    payments were all tecUNFUNDED_PAYMENT, and none of them was owed a refund."""
+    row = _cancelled_payment_row()
+    result = _rippled_shape(_mint_payment())
+    result["meta"] = {"TransactionResult": "tecUNFUNDED_PAYMENT"}
+    _fake_tx(monkeypatch, result=result)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_lookup_failure_still_answers_409(monkeypatch, tmp_path, caplog):
+    """An unreachable ledger proves nothing either way: the answer stays 409,
+    and the unverifiable hash is left in the error log for a manual check."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, exc=RuntimeError("rpc down"))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    assert _error_logs_naming(caplog, row["id"], HASH)
+    _assert_row_untouched(row["id"])

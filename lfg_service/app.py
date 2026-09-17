@@ -9555,6 +9555,39 @@ def _ledger_tx_time(tx: dict[str, Any], result: dict[str, Any]) -> float | None:
     return None
 
 
+async def _verify_request_tx(
+    row: dict[str, Any], tx_hash: str, result: dict[str, Any]
+) -> tuple[dict[str, Any], bool, bool]:
+    """Check a VALIDATED `tx` lookup against the sign request it claims to settle.
+
+    Returns `(tx, matched, reused)`. `tx` is the on-ledger transaction. `matched`
+    holds only when it is exactly what the row asked for: the row's signer and
+    type, every field we set, a hash no other request has claimed, and a close
+    time that is not before the request existed. `reused` says another request
+    already claimed the hash.
+    """
+    tx = dict(result.get("tx_json") or result)
+    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
+    # name we signed so the comparison below is apples to apples.
+    if "DeliverMax" in tx and "Amount" not in tx:
+        tx["Amount"] = tx["DeliverMax"]
+    stored = row["txjson"] or {}
+    # The hash must belong to THIS request: not a transaction already claimed
+    # by another row, and not one that closed before we even asked for it.
+    tx_time = _ledger_tx_time(tx, result)
+    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, row["id"])
+    matched = not (
+        tx.get("Account") != row["wallet"]
+        or tx.get("TransactionType") != stored.get("TransactionType")
+        or not _semantic_match(stored, tx)
+        or reused
+        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
+        or tx_time is None
+        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
+    )
+    return tx, matched, reused
+
+
 def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | None:
     """Shared ownership gate: 404 for unknown/not-a-tx, 403 for someone else's."""
     if row is None or row.get("purpose") != "tx":
@@ -9631,6 +9664,85 @@ async def handle_sign_request(request):
     )
 
 
+def _save_late_signature_record(record: dict[str, Any]) -> tuple[str, bool]:
+    """Journal a late signature (#513) in ECONOMY_RECORDS_DIR, next to the
+    other records an admin reconciles by hand. One file per (request, hash),
+    written atomically, so a repost of the same hash never adds a second
+    record. Returns `(path, created)`; `created` is False when the pair is
+    already on record. Raises on a disk failure."""
+    records_dir = config.ECONOMY_RECORDS_DIR
+    os.makedirs(records_dir, exist_ok=True)
+    path = os.path.join(
+        records_dir, f"late-signature-{record['request_id']}-{record['tx_hash']}.json"
+    )
+    if os.path.exists(path):
+        return path, False
+    fd, tmp = tempfile.mkstemp(dir=records_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+    return path, True
+
+
+async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
+    """A hash posted for a sign request that is no longer pending (#513).
+
+    Cancelling a WalletConnect request only retires OUR row: the request stays
+    open in Joey, and approving it there later still submits the transaction.
+    The row stays resolved (whatever flow asked for it is gone), but a
+    VALIDATED, SUCCESSFUL transaction that is exactly what the row asked for
+    means the wallet paid for nothing. Record it for a manual refund. Never
+    raises and never touches the row; the caller answers 409 either way.
+    """
+    request_id, wallet = row["id"], row["wallet"]
+    try:
+        result = await xrpl_ops.get_tx(tx_hash)
+        if not (result or {}).get("validated"):
+            return
+        tx, matched, _reused = await _verify_request_tx(row, tx_hash, result)
+        if not matched or (result.get("meta") or {}).get("TransactionResult") != "tesSUCCESS":
+            return
+    except Exception:
+        logging.error(
+            f"late signature check: could not verify tx {tx_hash} posted by {wallet} for "
+            f"{row['state']} sign request {request_id} — check it on-ledger",
+            exc_info=True,
+        )
+        return
+    amount, destination = tx.get("Amount"), tx.get("Destination")
+    record = {
+        "request_id": request_id,
+        "request_state": row["state"],
+        "wallet": wallet,
+        "tx_hash": tx_hash,
+        "transaction_type": tx.get("TransactionType"),
+        "destination": destination,
+        "amount": amount,
+        "network": config.XRPL_NETWORK,
+        "txjson": row["txjson"],
+        "recorded_at": time.time(),
+    }
+    try:
+        path, created = await asyncio.to_thread(_save_late_signature_record, record)
+    except Exception:
+        # The log line below is then the only trace of the payment.
+        logging.error(f"late signature record write failed: {traceback.format_exc()}")
+        path, created = "(record NOT written)", True
+    if not created:
+        logging.info(f"late signature {request_id} / {tx_hash} already recorded at {path}")
+        return
+    logging.error(
+        f"LATE SIGNATURE: {wallet} signed {row['state']} sign request {request_id} anyway; "
+        f"tx {tx_hash} validated tesSUCCESS ({amount} to {destination}). Refund it by hand "
+        f"unless a mint or other flow consumed the payment. Record: {path}"
+    )
+
+
 @require_wallet
 async def handle_sign_result(request):
     """Record the outcome of a WalletConnect sign request (#447).
@@ -9664,6 +9776,10 @@ async def handle_sign_result(request):
         # retrying a lost response, not a conflict.
         if tx_hash is not None and row.get("txid") == tx_hash:
             return web.json_response({"state": row["state"], "txid": row["txid"]})
+        if tx_hash is not None:
+            # A different hash for a resolved row: typically Joey approving a
+            # request the app already cancelled. The answer stays 409.
+            await _check_late_signature(row, tx_hash)
         return web.json_response(
             {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
             status=409,
@@ -9698,25 +9814,8 @@ async def handle_sign_result(request):
             )
         return web.json_response({"state": "pending", "code": "tx_not_found"}, status=202)
 
-    tx = dict(result.get("tx_json") or result)
-    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
-    # name we signed so the comparison below is apples to apples.
-    if "DeliverMax" in tx and "Amount" not in tx:
-        tx["Amount"] = tx["DeliverMax"]
-    stored = row["txjson"] or {}
-    # The hash must belong to THIS request: not a transaction already claimed
-    # by another row, and not one that closed before we even asked for it.
-    tx_time = _ledger_tx_time(tx, result)
-    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, request_id)
-    if (
-        tx.get("Account") != row["wallet"]
-        or tx.get("TransactionType") != stored.get("TransactionType")
-        or not _semantic_match(stored, tx)
-        or reused
-        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
-        or tx_time is None
-        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
-    ):
+    _tx, matched, reused = await _verify_request_tx(row, tx_hash, result)
+    if not matched:
         logging.warning(
             f"sign result {request_id}: on-ledger tx {tx_hash} does not match the request"
             f"{' (hash already claimed)' if reused else ''}"
