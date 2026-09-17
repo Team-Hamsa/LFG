@@ -234,6 +234,39 @@ def _apply_trait_token(
         economy_store.upsert_trait_token(conn, nft_id, owner, parsed[0], parsed[1])
 
 
+def _with_accept_tx_owner(tx: dict[str, Any], nft_id: str, token: dict[str, Any]) -> dict[str, Any]:
+    """`token` with `owner` replaced by the account that RECEIVED `nft_id` in
+    this NFTokenAcceptOffer, read from the tx itself (`_accept_new_owner`).
+
+    `fetch_token_fn` is clio `nft_info`, which can still report the PRE-accept
+    owner for a moment after the accept validates. Persisting that stale answer
+    left a just-delivered trait token recorded as the issuer's, and browse (which
+    joins `market_listings.seller = trait_tokens.owner`) hid the new owner's
+    listing — staging 2026-09-16. The market index already resolves buyers from
+    the tx for the same reason. Falls back to `token` unchanged when the tx
+    carries no deleted offer for this token (nothing authoritative to read)."""
+    deleted = [
+        w
+        for w in _deleted_nft_offer_nodes(tx)
+        if (w.get("FinalFields") or {}).get("NFTokenID") == nft_id
+    ]
+    if not deleted:
+        return token
+    sell = next(
+        (
+            w
+            for w in deleted
+            if int((w.get("FinalFields") or {}).get("Flags") or 0) & market_ops.LSF_SELL_NFTOKEN
+        ),
+        None,
+    )
+    seller = (sell.get("FinalFields") or {}).get("Owner") if sell is not None else None
+    new_owner = _accept_new_owner(tx, deleted, seller)
+    if new_owner is None or new_owner == token.get("owner"):
+        return token
+    return {**token, "owner": new_owner}
+
+
 def _apply_possible_growth(
     conn: sqlite3.Connection, token: dict[str, Any], metadata: Any, genesis: trait_economy.Genesis
 ) -> None:
@@ -387,6 +420,8 @@ async def apply_economy_tx(
             if taxon in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
                 _apply_closet(conn, token, metadata, genesis)
             elif taxon == config.TRAIT_TAXON:
+                if kind == "accept":
+                    token = _with_accept_tx_owner(tx, nft_id, token)
                 _apply_trait_token(conn, kind, token, metadata)
             elif kind == "mint" and genesis is not None:
                 _apply_possible_growth(conn, token, metadata, genesis)
