@@ -59,7 +59,6 @@ from xrpl.models.transactions import (  # noqa: E402
 )
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag  # noqa: E402
 from xrpl.models.transactions.transaction import Transaction  # noqa: E402
-from xrpl.utils import get_nftoken_id  # noqa: E402
 from xrpl.wallet import Wallet  # noqa: E402
 
 from lfg_core import (  # noqa: E402
@@ -232,9 +231,6 @@ def _offer_id(result: dict[str, Any], label: str) -> str:
 def _nft_id(result: dict[str, Any]) -> str:
     meta = result.get("meta")
     nft_id = meta.get("nftoken_id") if isinstance(meta, dict) else None
-    if not nft_id and isinstance(meta, dict):
-        with contextlib.suppress(Exception):
-            nft_id = get_nftoken_id(meta)
     if not isinstance(nft_id, str) or not nft_id:
         raise RehearsalError(
             f"the mint validated but its NFTokenID could not be read (tx {result.get('hash')}): "
