@@ -69,6 +69,18 @@ def test_dynamic_sign_panels_route_through_apply_sign_delivery():
     assert src.count("applySignDelivery(") >= 6
 
 
+def test_qr_disclosure_expansion_survives_poll_rerenders():
+    # Clicking "Show QR" must be remembered per payload link and fed back into
+    # signDelivery on every re-render; otherwise the next status poll collapses
+    # the QR again within ~3 s (seen on PC mint with push='sent').
+    src = _read("app.js")
+    fn_start = src.index("function applySignDelivery(")
+    fn_body = src[fn_start : fn_start + 3500]
+    assert "expanded: qrExpandedLinks.includes(link)" in fn_body
+    toggle = fn_body[fn_body.index("toggleBtn.onclick") :][:300]
+    assert "qrExpandedLinks.push(link)" in toggle
+
+
 def test_cache_busters_bumped():
     html = _read("index.html")
     assert "app.js?v=93" in html

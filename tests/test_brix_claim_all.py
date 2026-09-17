@@ -79,6 +79,16 @@ def drip(monkeypatch, tmp_path):
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", paid)
+
+    async def fixed_ledger_index():
+        # Hermetic (#524): unpatched, _claim_one_wallet's fallback-deadline
+        # path calls this for real (a live JSON-RPC call). Under an
+        # unreachable/throttled node it returns None, the job ends
+        # claim_unavailable BEFORE ever reaching send_brix_claim, and any
+        # test waiting on a signal set inside send_brix_claim hangs forever.
+        return 100000
+
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", fixed_ledger_index)
     return conn
 
 
@@ -99,7 +109,7 @@ def _link_bucket(*wallets):
 async def _drain_job(job_id):
     task = server.brix_claim_all_jobs[job_id].get("task")
     if task is not None:
-        await task
+        await asyncio.wait_for(task, timeout=15)
 
 
 # --- routes ---------------------------------------------------------------
@@ -334,7 +344,7 @@ def test_claim_all_refuses_a_second_job_while_one_runs(drip, monkeypatch):
     gate = asyncio.Event()
 
     async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
-        await gate.wait()
+        await asyncio.wait_for(gate.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", slow_paid)
@@ -433,7 +443,7 @@ def test_claim_all_two_overlapping_starts_cannot_both_mint_a_job(drip, monkeypat
     monkeypatch.setattr(identity_store, "bucket_for_wallet", slow_lookup)
 
     async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", slow_paid)
@@ -449,7 +459,7 @@ def test_claim_all_two_overlapping_starts_cannot_both_mint_a_job(drip, monkeypat
         for job in list(server.brix_claim_all_jobs.values()):
             task = job.get("task")
             if task is not None:
-                await task
+                await asyncio.wait_for(task, timeout=15)
         return sorted([r1.status, r2.status])
 
     statuses = _run(go())
@@ -464,7 +474,7 @@ def test_claim_all_a_bucket_sibling_cannot_start_an_overlapping_job(drip, monkey
     release = asyncio.Event()
 
     async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", slow_paid)
@@ -496,7 +506,7 @@ def test_claim_all_cancellation_finalizes_every_row(drip, monkeypatch):
 
     async def hanging_paid(destination, value, claim_id, max_last_ledger_seq=None):
         started.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", hanging_paid)
@@ -507,10 +517,10 @@ def test_claim_all_cancellation_finalizes_every_row(drip, monkeypatch):
     async def go():
         body = _body(await server.handle_brix_claim_all(_Req()))
         task = server.brix_claim_all_jobs[body["job_id"]]["task"]
-        await started.wait()  # first wallet is mid-payment
+        await asyncio.wait_for(started.wait(), timeout=15)  # first wallet is mid-payment
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=15)
         return body["job_id"]
 
     job_id = _run(go())
@@ -530,7 +540,7 @@ def test_claim_all_cancelled_during_prechecks_marks_the_wallet_cancelled(drip, m
 
     async def hanging_trustline(*a, **k):
         started.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.TrustlineState.PRESENT, Decimal(100)
 
     monkeypatch.setattr(xrpl_ops, "get_trustline_state", hanging_trustline)
@@ -539,10 +549,10 @@ def test_claim_all_cancelled_during_prechecks_marks_the_wallet_cancelled(drip, m
     async def go():
         body = _body(await server.handle_brix_claim_all(_Req()))
         task = server.brix_claim_all_jobs[body["job_id"]]["task"]
-        await started.wait()  # first wallet is inside the pre-check
+        await asyncio.wait_for(started.wait(), timeout=15)  # first wallet is inside the pre-check
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=15)
         return body["job_id"]
 
     job_id = _run(go())
