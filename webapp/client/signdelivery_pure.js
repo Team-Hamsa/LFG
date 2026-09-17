@@ -16,11 +16,14 @@
 //   coarse:  primary input is touch (matchMedia('(pointer: coarse)')).
 //   hasLink: a xumm_url deep link is available.
 //   hasQr:   QR data is available.
+//   expanded: the user already opened this payload's "Show QR" disclosure —
+//            panels re-render on every status poll, and a re-render must not
+//            collapse a QR the user asked to see.
 // Returns { linkPrimary, qrCollapsed, autoOpen }.
-export function signDelivery({ push = null, coarse = false, hasLink = false, hasQr = false } = {}) {
+export function signDelivery({ push = null, coarse = false, hasLink = false, hasQr = false, expanded = false } = {}) {
   const linkPrimary = coarse && hasLink;
   // Never collapse the QR when it is the only affordance left (no link).
-  const qrCollapsed = hasQr && hasLink && (push === 'sent' || linkPrimary);
+  const qrCollapsed = !expanded && hasQr && hasLink && (push === 'sent' || linkPrimary);
   // Auto-open at most once per payload, and never when push already delivered
   // the request into Xaman (an unprompted app-switch on top of a push is
   // jarring and redundant).

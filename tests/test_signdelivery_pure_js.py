@@ -84,6 +84,24 @@ def test_no_qr_never_reports_collapsed():
     assert d["qrCollapsed"] is False
 
 
+def test_user_expanded_qr_stays_expanded_across_rerenders():
+    # Flow panels re-render on every status poll. Once the user clicked
+    # "Show QR to sign on another device" for a payload, a push='sent' /
+    # coarse-pointer collapse must not hide the QR again on the next poll.
+    for push, coarse in (("'sent'", "false"), ("null", "true"), ("'sent'", "true")):
+        d = run_js(
+            f"M.signDelivery({{push: {push}, coarse: {coarse}, hasLink: true, hasQr: true, expanded: true}})"
+        )
+        assert d["qrCollapsed"] is False
+
+
+def test_expanded_does_not_change_link_primary_or_auto_open():
+    d = run_js(
+        "M.signDelivery({push: null, coarse: true, hasLink: true, hasQr: true, expanded: true})"
+    )
+    assert d["linkPrimary"] is True and d["autoOpen"] is True
+
+
 # ---------------------------------------------------------------------------
 # shouldAutoOpen(seen, link) — at most one open per unique payload link
 # ---------------------------------------------------------------------------
