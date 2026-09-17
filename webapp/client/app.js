@@ -2682,7 +2682,10 @@ function attachMintResume(session) {
   liveQty = 1;
   // Before the first poll renders mintPayView (3 s later), Cancel would
   // otherwise miss the Joey warning for a request this session still has open.
-  livePayLink = session.payment_link || null;
+  // Only while it is still awaiting payment: past that the payment landed, and
+  // this page (fresh wcDone/wcPendingResults after a reload) would read the
+  // finished request as unanswered and warn that Joey still has it open.
+  livePayLink = session.state === 'awaiting_payment' ? session.payment_link || null : null;
   showFlow(sponsoredMintView(session) || {
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',
