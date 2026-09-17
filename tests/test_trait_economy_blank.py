@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("BUNNY_PULL_ZONE", "test.b-cdn.net")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
+from lfg_core import swap_meta
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
 from lfg_core.swap_meta import TRAIT_ORDER
@@ -62,3 +63,16 @@ def test_body_class_map_from_genesis():
         },
     )
     assert te.body_class_map(g) == {"Milady": "milady", "Skeleton": "skeleton"}
+
+
+def test_blank_reports_a_body_class_not_an_empty_body():
+    # #523: the Build client is allowed to assume a blank is recognizable ONLY
+    # by `blank`, never by a falsy `body`. A blank's metadata parses fine, and
+    # detect_body() has no "no body" answer — Body="None" matches none of its
+    # branches and falls through to "skeleton". An empty `body` means UNREADABLE
+    # metadata (token_record's no-metadata arm), which is never blank. The
+    # Closet's equip gate (renderCloset in webapp/client/app.js) leans on this:
+    # believing a blank had body=="" is what let a real trait be staged onto one.
+    assert swap_meta.detect_body(te.blank_attributes()) == "skeleton"
+    assert te.is_blank(_rec(te.blank_attributes()))
+    assert not te.is_blank(_rec([]))
