@@ -3258,6 +3258,13 @@ async function confirmSwap() {
     el('swap-done-btn').hidden = true;
     pollSwap(s.id);
   } catch (e) {
+    if (e.body && e.body.code === 'blank_character') {
+      // #523: retrying with different traits can never succeed -- a blank
+      // side needs Assemble ("Build this GO"), not a swap. Send the user
+      // back to pick different GOs instead of stranding them on this
+      // now-dead-end trait checklist.
+      showPanel('swap-panel');
+    }
     showError(e.message);
   }
 }

@@ -183,7 +183,14 @@ class EconomyWebSession:
 
 
 class EconomyError(Exception):
-    """A user-safe economy precondition/validation failure."""
+    """A user-safe economy precondition/validation failure. `code` is an
+    optional machine-readable API error code for a caller that needs more
+    than a generic 400 (mirrors closet_market_store.OrderError) -- e.g.
+    #523's 409 blank_character."""
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def open_conn() -> sqlite3.Connection:
@@ -369,6 +376,12 @@ async def start_equip(
             seen.add(slot)
             chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
             if not chk.ok:
+                if chk.reason == trait_economy.BLANK_CHARACTER_ERROR:
+                    # #523: verbatim client-facing text, mapped to 409 by
+                    # _economy_post in lfg_service/app.py -- no "cannot
+                    # equip:" prefix, and blank-ness doesn't depend on which
+                    # slot in the batch tripped it.
+                    raise EconomyError(chk.reason, code="blank_character")
                 raise EconomyError(f"cannot equip: {chk.reason}")
             await _require_body_affinity(rec.body, slot, value)
             displaced = trait_economy.slot_value(rec, slot)

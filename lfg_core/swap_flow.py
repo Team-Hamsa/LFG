@@ -63,6 +63,7 @@ from lfg_core import (
     nft_index,
     swap_compose,
     swap_meta,
+    trait_economy,
     traits,
     xrpl_ops,
     xumm_ops,
@@ -706,6 +707,21 @@ async def run_swap_session(session: SwapSession) -> None:
     """Drive a SwapSession to a terminal state. Run as a background task."""
     try:
         nft1, nft2 = session.nft1, session.nft2
+        # #523: refuse a swap when either side is a blank (harvested)
+        # character -- landing a trait on it produces a partly-dressed
+        # character the conservation audit can't account for (see
+        # trait_economy.BLANK_CHARACTER_ERROR). Assemble is the only
+        # supported way to dress a blank. lfg_service.app.handle_swap_start
+        # already refuses this before a session even exists; this is
+        # defense in depth for any other path that reaches
+        # run_swap_session directly, and it must run before ANY fee
+        # detection, compose, or on-chain work.
+        if trait_economy.attrs_are_blank(nft1["attributes"]) or trait_economy.attrs_are_blank(
+            nft2["attributes"]
+        ):
+            session.state = FAILED
+            session.error = trait_economy.BLANK_CHARACTER_ERROR
+            return
         new_attrs1, new_attrs2 = swap_meta.swap_traits(
             nft1["attributes"], nft2["attributes"], session.traits_to_swap
         )

@@ -84,6 +84,7 @@ from lfg_core import (
     swap_meta,
     system_wallets,
     trait_config,
+    trait_economy,
     trait_images,
     xrpl_ops,
     xumm_ops,
@@ -8542,6 +8543,17 @@ async def handle_swap_start(request):
     nft1, nft2 = by_id.get(nft1_id), by_id.get(nft2_id)
     if not nft1 or not nft2:
         return web.json_response({"error": "NFT not found in your wallet"}, status=400)
+    # #523: a blank (harvested) side can never swap -- landing a trait on it
+    # produces a partly-dressed character the conservation audit can't
+    # account for. Refuse before a SwapSession exists: no fee, no compose,
+    # no NFTokenModify. Assemble is the only supported way to dress a blank.
+    if trait_economy.attrs_are_blank(nft1["attributes"]) or trait_economy.attrs_are_blank(
+        nft2["attributes"]
+    ):
+        return web.json_response(
+            {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"},
+            status=409,
+        )
     cfg = trait_config.get_config()
     blocked = [t for t in traits_to_swap if not cfg.swap_allowed(nft1["gender"], nft2["gender"], t)]
     if blocked:
@@ -10766,6 +10778,10 @@ def _economy_post(kind, start_coro, mock_call):
             try:
                 ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
             except economy_api.EconomyError as e:
+                if e.code == "blank_character":
+                    # #523: verbatim client-facing text, not the generic 400
+                    # every other precondition failure gets.
+                    return web.json_response({"error": str(e), "code": e.code}, status=409)
                 return web.json_response({"error": str(e)}, status=400)
             except (KeyError, ValueError) as e:
                 return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)

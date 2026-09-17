@@ -2040,3 +2040,38 @@ def test_equip_accepts_batch_and_legacy_shapes(monkeypatch):
         == 400
     )
     assert seen == [[("Head", "Crown")], [("Head", "Crown"), ("Eyes", "Laser")]]
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_equip_blank_character_maps_to_409(monkeypatch):
+    """#523: start_equip's blank-character precondition failure must reach the
+    client as 409 {"code": "blank_character", "error": "<verbatim message>"} --
+    not the generic 400 every other EconomyError gets."""
+    from aiohttp.test_utils import make_mocked_request
+
+    from lfg_core import trait_economy
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+
+    async def fake_start_equip(uid, wallet, nft_id, changes, user_token=None):
+        raise server.economy_api.EconomyError(
+            trait_economy.BLANK_CHARACTER_ERROR, code="blank_character"
+        )
+
+    monkeypatch.setattr(server.economy_api, "start_equip", fake_start_equip)
+
+    req = make_mocked_request("POST", "/api/equip")
+    req["user"] = {"id": "u1", "name": "test"}
+    req["wallet"] = "rOwner"
+
+    async def _json():
+        return {"nft_id": "N", "changes": [{"slot": "Head", "value": "Crown"}]}
+
+    req.json = _json  # type: ignore[method-assign]
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_equip_start(req))
+    assert resp.status == 409
+    import json
+
+    body = json.loads(resp.body)
+    assert body == {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"}

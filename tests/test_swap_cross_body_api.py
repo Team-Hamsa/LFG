@@ -31,7 +31,7 @@ import pytest  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 from aiohttp.web import BaseRequest  # noqa: E402
 
-from lfg_core import trait_config  # noqa: E402
+from lfg_core import trait_config, trait_economy  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 
 
@@ -239,6 +239,43 @@ def test_swap_filled_slots_still_ok(monkeypatch):
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 
     assert resp.status == 200
+
+
+def _blank_nft(nft_id: str, gender: str, name: str):
+    """A fully-blank normalized NFT record: every TRAIT_ORDER slot (Body
+    included) explicitly "None", matching trait_economy.attrs_are_blank."""
+    from lfg_core import swap_meta
+
+    return _nft(nft_id, gender, name, none_slots=frozenset(swap_meta.TRAIT_ORDER))
+
+
+def test_swap_first_side_blank_rejected(monkeypatch):
+    """#523: a blank (harvested) character can never be a swap side -- landing
+    a trait on it produces a partly-dressed character the conservation audit
+    can't account for. Refused with 409 blank_character BEFORE a SwapSession
+    is even created (no fee, no compose, no NFTokenModify)."""
+    nfts = [_blank_nft("M1", "male", "LFG #10"), _nft("M2", "male", "LFG #11")]
+    _stub_wallet_nfts(monkeypatch, nfts)
+    req = _make_swap_request("M1", "M2", ["Head"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 409
+    body = json.loads(resp.body)
+    assert body == {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"}
+    assert not server.swap_sessions  # no session/task was ever created
+
+
+def test_swap_second_side_blank_also_rejected(monkeypatch):
+    nfts = [_nft("M1", "male", "LFG #10"), _blank_nft("M2", "male", "LFG #11")]
+    _stub_wallet_nfts(monkeypatch, nfts)
+    req = _make_swap_request("M1", "M2", ["Head"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 409
+    assert json.loads(resp.body)["code"] == "blank_character"
+    assert not server.swap_sessions
 
 
 def test_nfts_payload_includes_swap_matrix(monkeypatch, ape_skeleton_nfts):

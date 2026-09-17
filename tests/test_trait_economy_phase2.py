@@ -239,6 +239,18 @@ def test_can_equip_rejects_immutable_bad_slot_and_lacking():
     assert not te.can_equip(_char(7), "Head", "Tiara", assets, mutable=True).ok  # not in bucket
 
 
+def test_can_equip_rejects_blank():
+    # #523: equipping a real trait onto a blank produces a partly-dressed
+    # character (a "phantom None set" in every other slot) with no
+    # supply_changes row to cover it. Assemble is the only supported way to
+    # dress a blank, so can_equip refuses it outright, with the exact
+    # client-facing text the service maps to 409 blank_character.
+    assets = {("Head", "Crown"): 1}
+    r = te.can_equip(_blank(7), "Head", "Crown", assets, mutable=True)
+    assert not r.ok
+    assert r.reason == te.BLANK_CHARACTER_ERROR
+
+
 # --- extract + deposit conservation round-trip ---
 
 
