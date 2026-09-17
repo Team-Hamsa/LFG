@@ -716,9 +716,13 @@ async def run_swap_session(session: SwapSession) -> None:
         # defense in depth for any other path that reaches
         # run_swap_session directly, and it must run before ANY fee
         # detection, compose, or on-chain work.
-        if trait_economy.attrs_are_blank(nft1["attributes"]) or trait_economy.attrs_are_blank(
-            nft2["attributes"]
-        ):
+        # Reviewed (#523 P5): nft["blank"] (swap_meta.normalize_nft, computed
+        # on the RAW pre-normalization attributes) rather than re-deriving
+        # from nft["attributes"] -- normalize_attributes() always pads a
+        # missing/unreadable attributes list to all-"None", so re-checking
+        # the padded field here could misclassify a dressed-but-unreadable
+        # character as blank.
+        if nft1.get("blank") or nft2.get("blank"):
             session.state = FAILED
             session.error = trait_economy.BLANK_CHARACTER_ERROR
             return

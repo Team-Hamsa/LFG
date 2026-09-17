@@ -36,7 +36,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from lfg_core import swap_flow, trait_economy  # noqa: E402
+from lfg_core import swap_flow, swap_meta, trait_economy  # noqa: E402
 
 
 def _run(coro):
@@ -59,6 +59,11 @@ def _nft(*, blank: bool = False) -> dict:
         "gender": "male",
         "mutable": True,
         "attributes": attrs,
+        # Mirrors swap_meta.normalize_nft's output shape (#523 P5): "blank"
+        # is derived from the RAW pre-normalization attributes, separately
+        # from "attributes" (which normalize_attributes always pads to
+        # all-"None" for ANY missing data, blank or not).
+        "blank": blank,
     }
 
 
@@ -86,3 +91,46 @@ def test_run_swap_session_refuses_blank_second_side_before_any_work():
 
     assert s.state == swap_flow.FAILED
     assert s.error == trait_economy.BLANK_CHARACTER_ERROR
+
+
+# --- normalize_nft's "blank" field (#523 review, Greptile P2) -------------
+# swap_meta.normalize_attributes() unconditionally pads EVERY missing slot to
+# "None", so a dressed character with unreadable/absent metadata attributes
+# and a genuine harvested blank end up with byte-identical "attributes"
+# fields. normalize_nft must derive "blank" from the RAW pre-normalization
+# attributes, where that distinction still exists, or the swap/equip blank
+# guard above would misfire on a data hiccup, not just a real blank.
+
+
+def test_normalize_nft_blank_field_true_for_genuine_blank():
+    rec = swap_meta.normalize_nft(
+        "00" * 32,
+        {"name": "Let's Effing Go! #1", "attributes": trait_economy.blank_attributes()},
+        flags=16,
+    )
+    assert rec is not None
+    assert rec["blank"] is True
+
+
+def test_normalize_nft_blank_field_false_for_unreadable_metadata():
+    """A valid name but no "attributes" key at all -- e.g. malformed or
+    partially-unreadable metadata -- must NOT be flagged blank, even though
+    the padded "attributes" field this same call produces is indistinguishable
+    from a genuine blank's (every slot explicitly "None")."""
+    rec = swap_meta.normalize_nft("00" * 32, {"name": "Let's Effing Go! #1"}, flags=16)
+    assert rec is not None
+    assert rec["blank"] is False
+    assert all(a["value"] == "None" for a in rec["attributes"])
+
+
+def test_normalize_nft_blank_field_false_for_dressed():
+    rec = swap_meta.normalize_nft(
+        "00" * 32,
+        {
+            "name": "Let's Effing Go! #1",
+            "attributes": [{"trait_type": "Body", "value": "Straight Blue"}],
+        },
+        flags=16,
+    )
+    assert rec is not None
+    assert rec["blank"] is False

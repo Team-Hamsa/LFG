@@ -8547,9 +8547,12 @@ async def handle_swap_start(request):
     # produces a partly-dressed character the conservation audit can't
     # account for. Refuse before a SwapSession exists: no fee, no compose,
     # no NFTokenModify. Assemble is the only supported way to dress a blank.
-    if trait_economy.attrs_are_blank(nft1["attributes"]) or trait_economy.attrs_are_blank(
-        nft2["attributes"]
-    ):
+    # Reviewed (#523 P5): `nft["blank"]` comes from swap_meta.normalize_nft,
+    # computed on the RAW pre-normalization attributes -- unlike
+    # nft["attributes"] (always padded to all-"None" by normalize_attributes
+    # for ANY missing/unreadable data), it can't mistake a dressed character
+    # with unreadable metadata for a genuine blank.
+    if nft1.get("blank") or nft2.get("blank"):
         return web.json_response(
             {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"},
             status=409,

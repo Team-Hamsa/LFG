@@ -3269,8 +3269,13 @@ async function confirmSwap() {
       // #523: retrying with different traits can never succeed -- a blank
       // side needs Assemble ("Build this GO"), not a swap. Send the user
       // back to pick different GOs instead of stranding them on this
-      // now-dead-end trait checklist.
+      // now-dead-end trait checklist -- and actually free them to pick
+      // different ones: showPanel() alone leaves the rejected pair's
+      // card styling and the enabled "Pick traits" button untouched, so
+      // clear the pick and re-render (review finding).
+      swapPick = [];
       showPanel('swap-panel');
+      renderPicks();
     }
     showError(e.message);
   }

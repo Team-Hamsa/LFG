@@ -243,10 +243,16 @@ def test_swap_filled_slots_still_ok(monkeypatch):
 
 def _blank_nft(nft_id: str, gender: str, name: str):
     """A fully-blank normalized NFT record: every TRAIT_ORDER slot (Body
-    included) explicitly "None", matching trait_economy.attrs_are_blank."""
+    included) explicitly "None", matching trait_economy.attrs_are_blank.
+    Also sets "blank" directly (#523 P5): swap_meta.normalize_nft derives it
+    from the RAW pre-normalization attributes, not from the always-padded
+    "attributes" field this test harness builds -- setting it explicitly
+    here is the test-double equivalent of that derivation."""
     from lfg_core import swap_meta
 
-    return _nft(nft_id, gender, name, none_slots=frozenset(swap_meta.TRAIT_ORDER))
+    nft = _nft(nft_id, gender, name, none_slots=frozenset(swap_meta.TRAIT_ORDER))
+    nft["blank"] = True
+    return nft
 
 
 def test_swap_first_side_blank_rejected(monkeypatch):

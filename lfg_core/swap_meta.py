@@ -85,6 +85,26 @@ def normalize_attributes(attributes: list[Any]) -> list[dict[str, str]]:
     return attrs
 
 
+def _raw_attrs_are_blank(raw_attrs: Any) -> bool:
+    """#523 review: is this RAW (pre-normalize_attributes) attribute list a
+    genuine harvested blank -- every TRAIT_ORDER slot (Body included)
+    explicitly present with value "None"? Checked on the raw list because
+    normalize_attributes() unconditionally pads EVERY missing slot to "None"
+    (see its docstring), so by the time an nft dict's "attributes" field is
+    built, a genuine blank and a dressed-but-unreadable-metadata token (name
+    parsed, attributes missing/malformed) are byte-identical -- there would
+    be no way to refuse a swap/equip on a blank without also refusing one on
+    a data hiccup. Local mirror of trait_economy.attrs_are_blank/is_blank
+    (can't import trait_economy here -- it imports this module, so that
+    would be circular); keep the two in sync by hand if TRAIT_ORDER's
+    membership in "blank" ever changes."""
+    if not isinstance(raw_attrs, list):
+        return False
+    attrs = [a for a in raw_attrs if isinstance(a, dict) and isinstance(a.get("trait_type"), str)]
+    present = {a["trait_type"]: a.get("value") for a in attrs}
+    return all(present.get(t) == "None" for t in TRAIT_ORDER)
+
+
 def get_attr(attributes: list[dict[str, Any]], trait_type: str) -> str | None:
     for a in attributes:
         if a["trait_type"] == trait_type:
@@ -211,6 +231,11 @@ def normalize_nft(
     if not num or num < 1 or num > config.SWAP_MAX_NFT_NUMBER:
         return None
     raw_attrs = metadata.get("attributes")
+    # #523 review: compute "blank" from the RAW list, before normalize_attributes
+    # pads every missing slot to "None" and erases the distinction a caller
+    # needs to refuse a swap/equip on a genuine blank without misfiring on
+    # unreadable metadata.
+    blank = _raw_attrs_are_blank(raw_attrs)
     attributes = normalize_attributes(raw_attrs if isinstance(raw_attrs, list) else [])
     try:
         burn_count = int(metadata.get("burnCount") or 0)
@@ -226,6 +251,7 @@ def normalize_nft(
         "burn_count": burn_count,
         "gender": detect_gender(attributes),
         "attributes": attributes,
+        "blank": blank,
         "mutable": bool(flags & NFT_FLAG_MUTABLE),
         "uri_hex": uri_hex,
     }
