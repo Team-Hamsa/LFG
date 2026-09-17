@@ -133,6 +133,24 @@ def _deleted_offers(meta: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dic
     return sell, buy
 
 
+def _settling_broker_rate(
+    broker: str, promise: Mapping[str, Any], broker_rate_for: Callable[[str], float | None]
+) -> float | None:
+    """The measured rate that vouches for `broker` settling this promise: the
+    allowlist's current one, else the rate the promise saved for that same
+    broker when it was made. An allowlist edit after the promise (rate back to
+    unmeasured, entry pulled) must not decline a promise already given. The
+    saved rate only ever vouches for the account the promise was made against;
+    any other settler still needs a current measured rate."""
+    current = broker_rate_for(broker)
+    if current is not None:
+        return current
+    saved = promise.get("broker_rate")
+    if promise.get("broker") == broker and saved is not None:
+        return float(saved)
+    return None
+
+
 def _balance_delta(meta: Mapping[str, Any], account: str) -> int | None:
     for node in meta.get("AffectedNodes") or []:
         modified = node.get("ModifiedNode") if isinstance(node, Mapping) else None
@@ -185,7 +203,7 @@ def compute_refund(
         and buy is not None
         and buy.get("Owner") == bidder
         and broker is not None
-        and broker_rate_for(broker) is not None
+        and _settling_broker_rate(broker, promise, broker_rate_for) is not None
     )
     if not brokered:
         return decline("not_broker_settled")
