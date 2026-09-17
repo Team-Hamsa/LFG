@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS fee_cover_quotes (
   offer_index TEXT,
   created_at INTEGER NOT NULL, closed_at INTEGER
 );
+-- bid_created_at: settlement links each open promise to its quote every sweep.
+CREATE INDEX IF NOT EXISTS idx_fee_cover_quotes_offer
+  ON fee_cover_quotes(offer_index);
 CREATE TABLE IF NOT EXISTS fee_cover_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
@@ -828,10 +831,18 @@ def return_to_owed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
     return cursor.rowcount == 1
 
 
-def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> str:
+def requeue_failed(
+    conn: sqlite3.Connection, accept_tx_hash: str, *, actor: str, now: int | None = None
+) -> str:
     """failed -> owed for an operator who fixed the cause. A failed payout can
     never validate later, so paying again cannot double-pay. Refused when the
-    campaign budget no longer has room for it."""
+    campaign budget no longer has room for it.
+
+    The move is audited in the same transaction (`fee_cover_audit`, action
+    `requeue`): it changes money state and clears the failure reason, so the
+    row records `actor` plus the from/to state and the reason it had been
+    parked. A refusal changes nothing and writes nothing."""
+    who = _actor(actor)
     ts = _now(now)
     with _immediate(conn):
         row = conn.execute(
@@ -849,6 +860,21 @@ def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
             "UPDATE fee_cover_refunds SET state = 'owed', reason = NULL, payout_tx_hash = NULL,"
             " last_ledger_seq = NULL, claim_ledger = NULL, updated_at = ? WHERE accept_tx_hash = ?",
             (ts, accept_tx_hash),
+        )
+        audit(
+            conn,
+            network=str(row["network"]),
+            actor=who,
+            action="requeue",
+            at=ts,
+            campaign_id=campaign.id,
+            result="requeued",
+            details={
+                "accept_tx_hash": accept_tx_hash,
+                "from_state": "failed",
+                "to_state": "owed",
+                "reason": row["reason"],
+            },
         )
     return "requeued"
 
@@ -905,6 +931,20 @@ def record_quote(conn: sqlite3.Connection, quote: Quote) -> None:
         ),
     )
     conn.commit()
+
+
+def bid_created_at(conn: sqlite3.Connection, offer_index: str) -> int | None:
+    """When the bid behind `offer_index` was created, as far as the store can
+    link it: the creation time of the quote closed with that offer index. The
+    quote is written with its bid session, before the buyer signs, so this is
+    the bid's own start — unlike the promise's `created_at`, which is when the
+    promise row was WRITTEN and can trail the fill by hours (a reconciled
+    quote, a late poll). None when no quote carries the index: a promise made
+    without one (no campaign when its bid started) has no linkable start."""
+    row = conn.execute(
+        "SELECT MIN(created_at) FROM fee_cover_quotes WHERE offer_index = ?", (offer_index,)
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
 
 
 def get_quote(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:

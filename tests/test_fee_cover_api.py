@@ -912,6 +912,46 @@ def test_a_bid_row_index_failure_still_writes_the_promise(env, monkeypatch):
     assert _quote_row(env["app_db"], session.id)["outcome"] == "promised"
 
 
+def test_quoted_bid_with_failed_bid_row_write_still_gets_promise(env, monkeypatch):
+    """#515: a quoted bid that validates (the session goes DONE) while indexing
+    its bid row raises must still end up promised. Two mechanisms cover it:
+    the poll's `finally` writes the promise despite the error, and failing
+    that, the next sweep's reconciler rebuilds the session from the durable
+    quote. Either may be the one that writes it; the buyer must never be
+    left with a cover that was shown but never recorded."""
+    session = _start_quoted_bid(env, monkeypatch)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+
+    def boom(network, row):
+        raise RuntimeError("onchain db locked")
+
+    monkeypatch.setattr(server, "_write_bid_row", boom)
+    with pytest.raises(RuntimeError, match="onchain db locked"):
+        _run(server.handle_market_bid_status(_StatusReq(session.id)))
+    assert session.state == server.market_flow.DONE
+
+    # The next sweep: the session is terminal, so only the reconciler can act.
+    _age_quote(env["app_db"], session.id, 120)
+    _wallet_status(monkeypatch, _signed())
+
+    async def no_settlement(deps, **kwargs):
+        return fee_cover_settle.SweepReport()
+
+    monkeypatch.setattr(server.fee_cover_settle, "sweep_once", no_settlement)
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: "deps")
+    _run(server.sweep_fee_cover())
+
+    promise = _promise_row(env["app_db"])
+    assert promise is not None and promise["state"] == "open"
+    assert (promise["bidder"], promise["nft_id"], promise["bid_drops"]) == (BIDDER, CHAR, 5_075_000)
+    quote = _quote_row(env["app_db"], session.id)
+    assert (quote["state"], quote["outcome"], quote["offer_index"]) == (
+        "closed",
+        "promised",
+        "D" * 64,
+    )
+
+
 def test_a_quote_lost_to_a_restart_is_reconciled_from_the_ledger(env, monkeypatch):
     """The bid validated but the service restarted before observing it: the
     in-memory session is gone, and the durable quote rebuilds it."""

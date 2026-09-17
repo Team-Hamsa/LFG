@@ -107,7 +107,9 @@ def env(tmp_path):
     return deps, ledger, campaign
 
 
-def _promise(deps, campaign, offer_index=BUY_OFFER, bidder=BUYER, expiration=900_000_000):
+def _promise(
+    deps, campaign, offer_index=BUY_OFFER, bidder=BUYER, expiration=900_000_000, now=ACCEPT_TS - 60
+):
     conn = store.connect(deps.app_db_path)
     try:
         inp = store.PromiseInput(
@@ -121,7 +123,34 @@ def _promise(deps, campaign, offer_index=BUY_OFFER, bidder=BUYER, expiration=900
             broker_rate=0.01589,
             bid_expiration=expiration,
         )
-        return store.record_promise(conn, campaign, inp, decline_reason=None, now=ACCEPT_TS - 60)
+        return store.record_promise(conn, campaign, inp, decline_reason=None, now=now)
+    finally:
+        conn.close()
+
+
+def _quote(deps, created_at, offer_index=BUY_OFFER, bidder=BUYER):
+    """The durable quote a covered bid's session writes before the buyer signs,
+    closed `promised` with the bid's offer index once its promise is written."""
+    session_id = f"S-{offer_index[:8]}"
+    conn = store.connect(deps.app_db_path)
+    try:
+        store.record_quote(
+            conn,
+            store.Quote(
+                session_id=session_id,
+                network=NET,
+                payload_uuid="U1",
+                txid=None,
+                nft_id=NFT_ID,
+                owner=SELLER,
+                bidder=bidder,
+                bid_drops=5_075_000,
+                bid_expires_at=created_at + 604_800,
+                listing={"offer_index": SELL_OFFER, "broker": CAFE, "broker_rate": 0.01589},
+                created_at=created_at,
+            ),
+        )
+        store.close_quote(conn, session_id, "promised", offer_index=offer_index, now=created_at)
     finally:
         conn.close()
 
@@ -196,6 +225,18 @@ def test_find_accept_tx_matches_only_this_buy_offer_after_since(env):
         assert settle.find_accept_tx(hconn, NFT_ID, BUY_OFFER, ACCEPT_TS - 10)["hash"] == ACCEPT
         assert settle.find_accept_tx(hconn, NFT_ID, "F" * 64, ACCEPT_TS - 10) is None
         assert settle.find_accept_tx(hconn, NFT_ID, BUY_OFFER, ACCEPT_TS + 1) is None
+    finally:
+        hconn.close()
+
+
+def test_find_accept_tx_without_a_lower_bound_matches_at_any_time(env):
+    """`since_unix=None` means no time filter: the offer index is unique."""
+    deps, _, _ = env
+    _archive_accept(deps)
+    hconn = history_store.init_history_db(deps.history_db_path)
+    try:
+        assert settle.find_accept_tx(hconn, NFT_ID, BUY_OFFER, None)["hash"] == ACCEPT
+        assert settle.find_accept_tx(hconn, NFT_ID, "F" * 64, None) is None
     finally:
         hconn.close()
 
@@ -307,6 +348,76 @@ def test_settle_promise_lookup_failure_stays_open(env):
     _archive_accept(deps)
     ledger.get_tx_error = RuntimeError("rpc down")
     assert _run(settle.settle_promise(deps, BUY_OFFER))["state"] == "open"
+
+
+# --- FC-1 (#515): the accept lookup is bounded by the bid, not the promise write ---
+
+
+def test_accept_found_when_promise_written_late(env):
+    """The quote reconciler (or a poll hours later) can write a promise long
+    after the broker filled the bid. The lookup is bounded by the bid's own
+    creation, which its quote records, never by when the promise row was
+    written: an accept archived at T is found for a promise written at T+2h."""
+    deps, ledger, campaign = env
+    _quote(deps, created_at=ACCEPT_TS - 60)
+    _promise(deps, campaign, now=ACCEPT_TS + 7200)
+    _archive_accept(deps, ts=ACCEPT_TS)
+    view = _run(settle.settle_promise(deps, BUY_OFFER))
+    assert view is not None and view["state"] == "owed"
+    assert ledger.get_tx_calls == [ACCEPT]
+
+
+def test_accept_before_bid_creation_ignored(env):
+    """A sale archived before the bid's quote (less the clock slack) cannot be
+    this bid's accept, whatever its offer index says."""
+    deps, ledger, campaign = env
+    quoted_at = ACCEPT_TS
+    _quote(deps, created_at=quoted_at)
+    _promise(deps, campaign, now=quoted_at + 7200)
+    _archive_accept(deps, ts=quoted_at - settle.ACCEPT_LOOKBACK_SECONDS - 1)
+    view = _run(settle.settle_promise(deps, BUY_OFFER))
+    assert view is not None and view["state"] == "open"
+    assert ledger.get_tx_calls == []
+
+
+def test_a_promise_no_quote_links_to_searches_without_a_time_bound(env):
+    """A promise made without a quote (no campaign when its bid started) has
+    no linkable creation time. The offer index alone identifies the accept."""
+    deps, ledger, campaign = env
+    _promise(deps, campaign, now=ACCEPT_TS + 7200)
+    _archive_accept(deps, ts=ACCEPT_TS)
+    view = _run(settle.settle_promise(deps, BUY_OFFER))
+    assert view is not None and view["state"] == "owed"
+
+
+def test_a_late_written_promise_is_not_released_as_expired_while_its_accept_is_archived(env):
+    """The release path uses the same bound. With the bound taken from the
+    promise write, an expired, certified-past bid whose get_tx is briefly down
+    had its archived accept filtered out and was released `expired`: the
+    buyer who was filled lost the refund for good."""
+    deps, ledger, campaign = env
+    offer = "E" * 64
+    _quote(deps, created_at=ACCEPT_TS - 60, offer_index=offer)
+    _promise(
+        deps,
+        campaign,
+        offer_index=offer,
+        bidder="rOtherBidder",
+        expiration=800_000_000,
+        now=ACCEPT_TS + 7200,
+    )
+    tx = _tx()
+    tx["NFTokenBuyOffer"] = offer
+    _archive_accept(deps, tx=tx, ts=ACCEPT_TS)
+    ledger.get_tx_error = RuntimeError("rpc down")
+    _archive_state(deps, close_time=NOW)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda row: None))
+    assert report.released == 0
+    conn = store.connect(deps.app_db_path)
+    try:
+        assert store.get_promise(conn, offer)["state"] == "open"
+    finally:
+        conn.close()
 
 
 # --- pay ------------------------------------------------------------------------
