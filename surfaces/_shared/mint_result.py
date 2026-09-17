@@ -17,14 +17,15 @@ BAD_STATE_MESSAGES: dict[str, str] = {
 
 # Refusal codes whose service-supplied `error` text is already the right thing
 # to show a user, and which must NOT be swallowed by the generic rules below.
-# The destination pre-flight (#388/#408) returns 409 with an actionable message
-# per failure mode; without this set every one of them rendered as "you already
-# have a mint in progress", which is both wrong and unactionable.
+# The destination pre-flight (#388/#408) and the XRP funding check (#514) return
+# 409 with a user-facing message; without this set every one of them rendered as
+# "you already have a mint in progress", which is both wrong and unactionable.
 PASS_THROUGH_ERROR_CODES: frozenset[str] = frozenset(
     {
         "wallet_unfunded",
         "wallet_blocks_nft_offers",
         "wallet_reserve_short",
+        "insufficient_xrp",
     }
 )
 

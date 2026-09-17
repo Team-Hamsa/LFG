@@ -35,6 +35,43 @@ from lfg_core import (
 )
 from lfg_core.db_helpers import get_next_nft_number, record_nft_mint
 
+# The network fee a wallet's autofill typically puts on the mint Payment: the
+# 10-drop reference fee plus the usual 20% cushion. Only the XRP funding check
+# (#514) reads it; nothing we build carries it.
+PAYMENT_FEE_DROPS = 12
+
+
+class InsufficientXrp(Exception):
+    """The wallet provably cannot fund the XRP mint payment (#514)."""
+
+    def __init__(self, needed_drops: int, spendable_drops: int) -> None:
+        super().__init__(f"needs {needed_drops} drops, {spendable_drops} spendable")
+        self.needed_drops = needed_drops
+        self.spendable_drops = spendable_drops
+
+
+def refuse_unfunded_xrp_payment(
+    snapshot: xrpl_ops.DestinationPreflight | None, amount_xrp: str
+) -> None:
+    """Raise InsufficientXrp when the account_info `snapshot` PROVES the wallet
+    cannot pay `amount_xrp` XRP plus the fee (#514). Asking it anyway only
+    produces a payment that fails on-ledger (tecUNFUNDED_PAYMENT) after the
+    user has approved it.
+
+        spendable = balance - (base_reserve + owner_reserve * owner_count)
+
+    The reserves are the configured values the destination pre-flight uses.
+    Anything unknown fails open: a missing snapshot or an unreadable field
+    never refuses a mint."""
+    if snapshot is None or snapshot.balance_drops is None or snapshot.owner_count is None:
+        return
+    reserve = config.XRPL_RESERVE_BASE_DROPS + config.XRPL_RESERVE_INC_DROPS * snapshot.owner_count
+    spendable = max(0, snapshot.balance_drops - reserve)
+    needed = int(Decimal(amount_xrp) * 1_000_000) + PAYMENT_FEE_DROPS
+    if spendable < needed:
+        raise InsufficientXrp(needed, spendable)
+
+
 # Session states
 AWAITING_PAYMENT = "awaiting_payment"
 GENERATING = "generating"
@@ -190,7 +227,7 @@ class MintSession:
             "issuer": config.TOKEN_ISSUER_ADDRESS,
         }
 
-    async def prepare_payment(self) -> None:
+    async def prepare_payment(self, snapshot: xrpl_ops.DestinationPreflight | None = None) -> None:
         """Detect the payment path (LFGO holders burn LFGO; everyone else
         pays XRP — never explained to the user beyond the pay pill) and
         create the XUMM sign-request payload. Xaman cannot parse the
@@ -198,7 +235,11 @@ class MintSession:
         up in the payment QR (issue #8). On payload failure payment_uuid
         stays None — both callers (handle_mint_start and run_mint_session)
         gate on it and fail the session terminally rather than entering the
-        payment wait with only the unparseable static detect link (#262)."""
+        payment wait with only the unparseable static detect link (#262).
+
+        `snapshot` is the start handler's account_info pre-flight: on the XRP
+        path, a wallet it proves cannot pay raises InsufficientXrp before any
+        payload exists (#514). Without one (regenerate) nothing is refused."""
         if self.sponsored:
             raise RuntimeError("sponsored sessions do not prepare payment")
         balance = await xrpl_ops.get_trustline_balance(
@@ -208,6 +249,7 @@ class MintSession:
             self.pay_with, self.pay_amount = "LFGO", config.MINT_PRICE_LFGO
         else:
             self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
+            refuse_unfunded_xrp_payment(snapshot, self.pay_amount)
         p = self._payment_params()
         self.payment_link = xumm_ops.generate_static_payment_link(
             p["destination"], value=p["value"], currency=p["currency"], issuer=p["issuer"]

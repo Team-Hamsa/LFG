@@ -16,10 +16,19 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
+from decimal import Decimal  # noqa: E402
 
 import pytest  # noqa: E402
 
-from lfg_core import bulk_mint_flow, config, headroom, mint_credits, mint_flow, supply  # noqa: E402
+from lfg_core import (  # noqa: E402
+    bulk_mint_flow,
+    config,
+    headroom,
+    mint_credits,
+    mint_flow,
+    supply,
+    xrpl_ops,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -265,3 +274,96 @@ def test_prepare_payment_pins_signing_account(monkeypatch):
     j.clamp_to_headroom()
     asyncio.run(j.prepare_payment())
     assert captured["account"] == "rUSER"
+
+
+# --- XRP funding check before the payment request (#514) --------------------
+# Same rule as MintSession.prepare_payment, at price x quantity: one Payment
+# (one fee) carries every unit.
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+@pytest.fixture
+def _xrp_path(monkeypatch):
+    """Price 9 XRP, reserves 1 XRP + 0.2 XRP per owned object, a 12-drop fee,
+    and a wallet holding no LFGO. Returns the payment payloads built."""
+    monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
+    monkeypatch.setattr(config, "MINT_PRICE_XRP", "9")
+    monkeypatch.setattr(config, "XRPL_RESERVE_BASE_DROPS", 1_000_000)
+    monkeypatch.setattr(config, "XRPL_RESERVE_INC_DROPS", 200_000)
+    monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None))
+    built = []
+
+    async def _payload(destination, **kwargs):
+        built.append({"destination": destination, **kwargs})
+        return {"xumm_url": "lfg-wc://wc-bulk", "uuid": "wc-bulk"}
+
+    monkeypatch.setattr(bulk_mint_flow.xumm_ops, "create_payment_payload", _payload)
+    return built
+
+
+def _snapshot(balance_drops, owner_count):
+    return xrpl_ops.DestinationPreflight(
+        exists=True, blocks_nft_offers=False, balance_drops=balance_drops, owner_count=owner_count
+    )
+
+
+def _two_unit_job():
+    j = _job(2)
+    j.clamp_to_headroom()
+    return j
+
+
+def test_xrp_path_definite_shortfall_refused(_xrp_path):
+    j = _two_unit_job()
+    # 15 XRP - (1 + 4 x 0.2) XRP reserve = 13.2 XRP: one 9 XRP mint, not two.
+    with pytest.raises(mint_flow.InsufficientXrp) as refused:
+        _run(j.prepare_payment(_snapshot(15_000_000, 4)))
+    assert refused.value.needed_drops == 18_000_012
+    assert refused.value.spendable_drops == 13_200_000
+    assert _xrp_path == []  # no sign request was ever built
+
+
+def test_xrp_path_exactly_enough_proceeds(_xrp_path):
+    j = _two_unit_job()
+    # 19_800_012 - 1_800_000 reserve = 18_000_012 = 2 x 9 XRP + fee, to the drop
+    _run(j.prepare_payment(_snapshot(19_800_012, 4)))
+    assert j.pay_with == "XRP"
+    assert [p["value"] for p in _xrp_path] == ["18"]
+    assert j.payment_uuid == "wc-bulk"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        xrpl_ops.DestinationPreflight(None, None, None, None),
+        xrpl_ops.DestinationPreflight(True, False, None, 4),
+        xrpl_ops.DestinationPreflight(True, False, 0, None),
+    ],
+    ids=["no-snapshot", "lookup-failed", "no-balance", "no-owner-count"],
+)
+def test_xrp_path_snapshot_missing_fails_open(_xrp_path, snapshot):
+    j = _two_unit_job()
+    _run(j.prepare_payment(snapshot))
+    assert j.pay_with == "XRP"
+    assert len(_xrp_path) == 1
+
+
+def test_lfgo_path_unaffected(_xrp_path, monkeypatch):
+    """LFGO holders pay in LFGO: the XRP funding check never applies to them."""
+    monkeypatch.setattr(config, "MINT_PRICE_LFGO", "1")
+    monkeypatch.setattr(
+        bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(Decimal("2"))
+    )
+    j = _two_unit_job()
+    _run(j.prepare_payment(_snapshot(1_000_000, 4)))  # 0 XRP spendable
+    assert j.pay_with == "LFGO"
+    assert len(_xrp_path) == 1

@@ -225,7 +225,7 @@ def test_handle_mint_start_wires_the_publishing_wrapper(monkeypatch):
     # is stubbed below, so nothing would settle it either).
     monkeypatch.setattr(server.headroom, "try_reserve", lambda *a, **k: 1)
 
-    async def noop_prepare(self):
+    async def noop_prepare(self, _snapshot=None):
         self.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
         return None
 

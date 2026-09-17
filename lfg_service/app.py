@@ -6962,6 +6962,21 @@ def _preflight_refusal(preflight: xrpl_ops.DestinationPreflight) -> str | None:
     return None
 
 
+def _insufficient_xrp_response(short: mint_flow.InsufficientXrp) -> web.Response:
+    """409 for an XRP mint payment the wallet provably cannot fund (#514),
+    refused before any sign request exists. `insufficient_xrp` is a
+    pass-through code, so Discord and Telegram show `error` verbatim."""
+    return web.json_response(
+        {
+            "code": "insufficient_xrp",
+            "error": "Not enough XRP to pay for this mint.",
+            "needed_drops": short.needed_drops,
+            "spendable_drops": short.spendable_drops,
+        },
+        status=409,
+    )
+
+
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -7161,10 +7176,20 @@ async def handle_mint_start(request):
     # stalled XRPL/XUMM API can't hang /api/mint — on timeout the session
     # falls back to the XRP path with the static detect link.
     try:
-        await asyncio.wait_for(session.prepare_payment(), timeout=8)
+        await asyncio.wait_for(session.prepare_payment(preflight), timeout=8)
     except asyncio.CancelledError:
         _cleanup_cancelled_mint_admission(session)
         raise
+    except mint_flow.InsufficientXrp as short:
+        # #514: the pre-flight snapshot proves the wallet cannot fund the XRP
+        # payment, so no sign request was built (it could only fail on-ledger).
+        # Refused like a pre-flight refusal: terminal, headroom back.
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            session.state = mint_flow.FAILED
+            session.error = "insufficient_xrp"
+        mint_flow.settle_headroom(session)
+        session.mark_published()  # a deliberate refusal, not a pipeline failure
+        return _insufficient_xrp_response(short)
     except asyncio.TimeoutError:
         logging.warning("prepare_payment timed out; falling back to XRP path")
     except Exception as e:
@@ -7229,8 +7254,8 @@ async def handle_mint_start(request):
 async def handle_bulk_mint_start(request):
     """Start a bulk mint job (#215): one K x payment, then a background task
     mints K units in sequence. Mirrors handle_mint_start's ordering — every
-    suspending value (request body parse, push token, return URL, and the
-    threaded headroom clamp) is resolved BEFORE the one-active-job check so
+    suspending value (request body parse, push token, return URL, the funding
+    snapshot, and the threaded headroom clamp) is resolved BEFORE the one-active-job check so
     no await sits between the check and the insert below (the guard is only
     race-free while that window stays await-free). prepare_payment() is
     deliberately awaited AFTER the insert — a concurrent request already
@@ -7256,6 +7281,19 @@ async def handle_bulk_mint_start(request):
 
     if qty < 1:
         return web.json_response({"error": "invalid_quantity"}, status=400)
+
+    # #514: one account_info snapshot so prepare_payment can refuse an XRP
+    # payment the wallet provably cannot fund. Taken before the headroom clamp
+    # (nothing is reserved while it runs) and before the one-active-job check
+    # (that window stays await-free). Bounded; a failed lookup refuses nothing.
+    try:
+        snapshot: xrpl_ops.DestinationPreflight | None = await asyncio.wait_for(
+            xrpl_ops.destination_preflight(request["wallet"]),
+            timeout=_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logging.warning(f"bulk mint funding snapshot unavailable; not checking XRP funding: {e}")
+        snapshot = None
 
     job = bulk_mint_flow.BulkMintJob(
         discord_id=user["id"],
@@ -7293,7 +7331,15 @@ async def handle_bulk_mint_start(request):
     bulk_sessions[job.id] = job
 
     try:
-        await asyncio.wait_for(job.prepare_payment(), timeout=8)
+        await asyncio.wait_for(job.prepare_payment(snapshot), timeout=8)
+    except mint_flow.InsufficientXrp as short:
+        # #514: the wallet cannot fund price x quantity, and no sign request
+        # was built (nor any job record: that is persisted only after this).
+        if job.state == bulk_mint_flow.AWAITING_PAYMENT:
+            job.state = bulk_mint_flow.FAILED
+            job.error = "insufficient_xrp"
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
+        return _insufficient_xrp_response(short)
     except Exception as e:
         # Never leave a non-terminal job with no task in bulk_sessions — that
         # would permanently wedge this user's bulk slot (every future POST

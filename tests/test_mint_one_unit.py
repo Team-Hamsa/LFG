@@ -20,11 +20,12 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 import json  # noqa: E402
+from decimal import Decimal  # noqa: E402
 from typing import Any  # noqa: E402
 
 import pytest  # noqa: E402
 
-from lfg_core import mint_flow, swap_meta  # noqa: E402
+from lfg_core import config, mint_flow, swap_meta, xrpl_ops  # noqa: E402
 
 
 def _expected_traits(**overrides):
@@ -468,3 +469,87 @@ def test_mint_session_to_dict_carries_video_url():
     session = mint_flow.MintSession("u1", "rUSER")
     session.video_url = "https://cdn.example/1/1_0.mp4"
     assert session.to_dict()["video_url"] == "https://cdn.example/1/1_0.mp4"
+
+
+# --- XRP funding check before the payment request (#514) --------------------
+#
+# A Payment the wallet cannot fund can only fail on-ledger (tecUNFUNDED_PAYMENT)
+# after the user was already asked to approve it: 0 of 45 Joey requests signed
+# in a week. prepare_payment refuses a DEFINITE shortfall from the account_info
+# snapshot the mint pre-flight already holds:
+#   spendable = balance - (base_reserve + owner_reserve * owner_count)
+# and never refuses on anything it does not know.
+
+
+@pytest.fixture
+def _xrp_path(monkeypatch):
+    """Price 9 XRP, reserves 1 XRP + 0.2 XRP per owned object, a 12-drop fee,
+    and a wallet holding no LFGO. Returns the payment payloads built."""
+    monkeypatch.setattr(config, "MINT_PRICE_XRP", "9")
+    monkeypatch.setattr(config, "XRPL_RESERVE_BASE_DROPS", 1_000_000)
+    monkeypatch.setattr(config, "XRPL_RESERVE_INC_DROPS", 200_000)
+    monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None))
+    built: list[dict[str, Any]] = []
+
+    async def _payload(destination, **kwargs):
+        built.append({"destination": destination, **kwargs})
+        return {"qr_url": None, "xumm_url": "lfg-wc://wc-pay", "uuid": "wc-pay"}
+
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", _payload)
+    return built
+
+
+def _snapshot(balance_drops, owner_count):
+    return xrpl_ops.DestinationPreflight(
+        exists=True, blocks_nft_offers=False, balance_drops=balance_drops, owner_count=owner_count
+    )
+
+
+_UNKNOWN_SNAPSHOTS = pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        xrpl_ops.DestinationPreflight(None, None, None, None),
+        xrpl_ops.DestinationPreflight(True, False, None, 4),
+        xrpl_ops.DestinationPreflight(True, False, 0, None),
+    ],
+    ids=["no-snapshot", "lookup-failed", "no-balance", "no-owner-count"],
+)
+
+
+def test_xrp_path_definite_shortfall_refused(_xrp_path):
+    session = mint_flow.MintSession("u1", "rUSER")
+    # 10 XRP - (1 + 4 x 0.2) XRP reserve = 8.2 XRP spendable < 9 XRP + 12 drops
+    with pytest.raises(mint_flow.InsufficientXrp) as refused:
+        _run(session.prepare_payment(_snapshot(10_000_000, 4)))
+    assert refused.value.needed_drops == 9_000_012
+    assert refused.value.spendable_drops == 8_200_000
+    assert _xrp_path == []  # no sign request was ever built
+
+
+def test_xrp_path_exactly_enough_proceeds(_xrp_path):
+    session = mint_flow.MintSession("u1", "rUSER")
+    # 10_800_012 - 1_800_000 reserve = 9_000_012 = price + fee, to the drop
+    _run(session.prepare_payment(_snapshot(10_800_012, 4)))
+    assert session.pay_with == "XRP"
+    assert [p["value"] for p in _xrp_path] == ["9"]
+    assert session.payment_uuid == "wc-pay"
+
+
+@_UNKNOWN_SNAPSHOTS
+def test_xrp_path_snapshot_missing_fails_open(_xrp_path, snapshot):
+    session = mint_flow.MintSession("u1", "rUSER")
+    _run(session.prepare_payment(snapshot))
+    assert session.pay_with == "XRP"
+    assert len(_xrp_path) == 1
+
+
+def test_lfgo_path_unaffected(_xrp_path, monkeypatch):
+    """LFGO holders pay in LFGO: the XRP funding check never applies to them."""
+    monkeypatch.setattr(config, "MINT_PRICE_LFGO", "1")
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", _async_return(Decimal("5")))
+    session = mint_flow.MintSession("u1", "rUSER")
+    _run(session.prepare_payment(_snapshot(1_000_000, 4)))  # 0 XRP spendable
+    assert session.pay_with == "LFGO"
+    assert len(_xrp_path) == 1
