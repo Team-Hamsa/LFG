@@ -149,11 +149,40 @@ async def apply_tx(
             logging.exception(f"apply_tx failed for {nft_id} ({kind})")
 
 
+def _tx_ledger_index(tx: dict[str, Any]) -> int | None:
+    """The validated ledger a normalized stream tx belongs to, or None when the
+    tx carries no usable one."""
+    ledger_index = tx.get("ledger_index")
+    if isinstance(ledger_index, int) and not isinstance(ledger_index, bool) and ledger_index >= 0:
+        return ledger_index
+    return None
+
+
+def _with_tx_uri(tx: dict[str, Any], kind: str, token: dict[str, Any]) -> dict[str, Any]:
+    """`token` with `uri_hex` replaced by the URI this NFTokenMint/NFTokenModify
+    set (#522).
+
+    `fetch_token_fn` is clio `nft_info`, which can still serve the PREVIOUS URI
+    right after a modify validates. A Closet's contents live in the JSON behind
+    its URI, one URL per version, so rebuilding from that answer rolled the
+    mirror one version back — and the owner's next flow full-overwrote the token
+    from it, erasing the newest credit on-chain (10 lost versions since 08-07).
+    The tx names the exact version it created. An AcceptOffer changes no URI and
+    carries none, and a modify without `URI` would clear it (never done to a
+    Closet), so those keep `token` unchanged."""
+    uri = tx.get("URI")
+    if kind not in ("mint", "modify") or not isinstance(uri, str) or not uri:
+        return token
+    return {**token, "uri_hex": uri}
+
+
 def _apply_closet(
     conn: sqlite3.Connection,
     token: dict[str, Any],
     metadata: Any,
     genesis: trait_economy.Genesis | None = None,
+    *,
+    ledger_index: int | None = None,
 ) -> None:
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
     NFToken's metadata and mark it active — the token is held by its real owner,
@@ -174,14 +203,28 @@ def _apply_closet(
     `genesis` (the EFFECTIVE genesis) is forwarded to `parse_closet_metadata` so
     a legacy-schema token's integer `bodies` list converts to `("Body", value)`
     asset rows on rebuild instead of being silently dropped; `None` (no genesis
-    frozen) leaves that conversion off and behavior unchanged."""
+    frozen) leaves that conversion off and behavior unchanged.
+
+    `ledger_index` is the validated ledger of the version `token` describes
+    (#522). Versions apply monotonically: one older than the version the mirror
+    already holds is skipped outright, so a late or out-of-order tx can never
+    roll the mirror back. The mirror's own stamp comes from this listener and
+    from the flows' own Closet modifies (`closet_token.sync_closet`)."""
     owner = token.get("owner")
     if not owner:
         return
     if owner in economy_store.project_accounts():
         economy_store.delete_closet(conn, owner)
         return
-    if isinstance(metadata, dict):
+    applied = economy_store.get_closet_applied_ledger(conn, owner)
+    if ledger_index is not None and applied is not None and ledger_index < applied:
+        logging.info(
+            f"_apply_closet: {token.get('nft_id')} version from ledger {ledger_index} is older "
+            f"than the ledger-{applied} version mirrored for {owner}; keeping the mirror"
+        )
+        return
+    resolved = isinstance(metadata, dict)
+    if resolved:
         if closet_market_store.has_recent_fill(conn, owner):
             # #443: a Closet Market fill moved a unit in the DB first; this
             # owner's token metadata is behind until the fill's mirror modify
@@ -209,13 +252,20 @@ def _apply_closet(
         )
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
+    uri_hex = token.get("uri_hex") or ""
+    if not resolved and existing is not None:
+        # The contents stayed at the version already mirrored, so its URI stays
+        # too (#522): naming the unread version over them would make a mirror
+        # that is behind the chain look current to the flows' stale-mirror guard.
+        uri_hex = existing[1]
     economy_store.set_closet_token(
         conn,
         owner,
         token["nft_id"],
-        token.get("uri_hex") or "",
+        uri_hex,
         status=closet_token.ACTIVE,
         offer_id=existing_offer_id,
+        applied_ledger_index=ledger_index if resolved else None,
     )
 
 
@@ -414,11 +464,14 @@ async def apply_economy_tx(
             # signal — and drop anything not from us before any economy write.
             if token.get("issuer") != config.SWAP_ISSUER_ADDRESS:
                 continue
+            taxon = int(token.get("taxon") or -1)
+            is_closet = taxon in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON)
+            if is_closet:
+                token = _with_tx_uri(tx, kind, token)
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
-            taxon = int(token.get("taxon") or -1)
-            if taxon in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
-                _apply_closet(conn, token, metadata, genesis)
+            if is_closet:
+                _apply_closet(conn, token, metadata, genesis, ledger_index=_tx_ledger_index(tx))
             elif taxon == config.TRAIT_TAXON:
                 if kind == "accept":
                     token = _with_accept_tx_owner(tx, nft_id, token)

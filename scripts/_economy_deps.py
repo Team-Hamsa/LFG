@@ -19,6 +19,7 @@ from lfg_core import (
     config,
     db_path,
     economy_flow,
+    history_store,
     layer_store,
     memos,
     nft_index,
@@ -200,18 +201,22 @@ async def _compose_trait(slot: str, value: str) -> str:
     raise RuntimeError(f"no layer found for {slot}={value!r}")
 
 
-async def _closet_modify(nft_id: str, owner: str, url: str) -> str | None:
+async def _closet_modify(nft_id: str, owner: str, url: str) -> closet_token.ModifyReceipt | None:
     """NFTokenModify the Closet URI, mapping an INDETERMINATE on-chain outcome
     (xrpl_ops.IndeterminateResultError — submit raised and the tx could not be
     confirmed either way) to closet_token.ClosetIndeterminateError so
     sync_closet's phase-aware taxonomy (#107/#179) fails closed (no on-chain
     compensation, reconcile from chain) instead of collapsing an unknown outcome
     to a plain ClosetError ('did NOT commit'). A definitive, validated failure
-    still returns None → plain ClosetError; a success returns the tx hash."""
+    still returns None → plain ClosetError; a success returns the tx hash with
+    the ledger it validated in, which sync_closet stamps on the mirror (#522)."""
     try:
-        return await xrpl_ops.modify_nft(nft_id, owner, url)
+        result = await xrpl_ops.modify_nft(nft_id, owner, url, return_details=True)
     except xrpl_ops.IndeterminateResultError as e:
         raise closet_token.ClosetIndeterminateError(str(e)) from e
+    if result is None:
+        return None
+    return closet_token.ModifyReceipt(tx_hash=result.tx_hash, ledger_index=result.ledger_index)
 
 
 async def _trait_info(nft_id: str) -> dict[str, Any] | None:
@@ -285,6 +290,9 @@ def build_economy_deps(
         # live-count the Trait Shop price formula reads.
         app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
         blank_meta_fn=_blank_meta,
+        # #522: refuse a full Closet overwrite while the mirror is behind the
+        # chain, judged against the listener's history archive (read-only).
+        history_db_path=history_store.history_db_path(config.ECONOMY_NETWORK),
     )
 
 

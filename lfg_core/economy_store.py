@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS closet_tokens (
     status         TEXT DEFAULT 'pending_accept',
     offer_id       TEXT,
     mirror_pending INTEGER DEFAULT 0,
-    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    applied_ledger_index INTEGER   -- ledger of the Closet version uri_hex names (#522)
 );
 CREATE TABLE IF NOT EXISTS supply_changes (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,11 +125,15 @@ def _migrate_closet_columns(conn: sqlite3.Connection) -> None:
     """Self-migrate closet_tokens columns added after the table first shipped.
     `mirror_pending` (#184) flags an owner whose on-chain Closet was modified
     but whose local mirror write failed (`complete_pending_mirror`); an index DB
-    created before this column needs it added. ADD COLUMN is idempotent-guarded
+    created before this column needs it added. `applied_ledger_index` (#522) is
+    the validated ledger of the Closet version the mirror holds; NULL (every row
+    written before it existed) means unknown. ADD COLUMN is idempotent-guarded
     by the PRAGMA check."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(closet_tokens)")}
     if "mirror_pending" not in cols:
         conn.execute("ALTER TABLE closet_tokens ADD COLUMN mirror_pending INTEGER DEFAULT 0")
+    if "applied_ledger_index" not in cols:
+        conn.execute("ALTER TABLE closet_tokens ADD COLUMN applied_ledger_index INTEGER")
     conn.commit()
 
 
@@ -359,21 +364,40 @@ def set_closet_token(
     uri_hex: str,
     status: str = "pending_accept",
     offer_id: str | None = None,
+    applied_ledger_index: int | None = None,
 ) -> None:
     """Record/update an owner's Closet NFToken id, URI, lifecycle status, and the
-    outstanding accept offer id (kept so the UI can re-show the Xaman accept)."""
+    outstanding accept offer id (kept so the UI can re-show the Xaman accept).
+
+    `applied_ledger_index` stamps the validated ledger of the version `uri_hex`
+    names (#522). A writer that does not know it passes None, which keeps the
+    stored stamp: whatever it writes is at least as new as that version."""
     _reject_project_account(owner)
     conn.execute(
         """
-        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, offer_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO closet_tokens
+            (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(owner) DO UPDATE SET
             nft_id=excluded.nft_id, uri_hex=excluded.uri_hex,
-            status=excluded.status, offer_id=excluded.offer_id, updated_at=CURRENT_TIMESTAMP
+            status=excluded.status, offer_id=excluded.offer_id,
+            applied_ledger_index=COALESCE(
+                excluded.applied_ledger_index, closet_tokens.applied_ledger_index
+            ),
+            updated_at=CURRENT_TIMESTAMP
         """,
-        (owner, nft_id, uri_hex, status, offer_id),
+        (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index),
     )
     conn.commit()
+
+
+def get_closet_applied_ledger(conn: sqlite3.Connection, owner: str) -> int | None:
+    """The validated ledger of the Closet version the owner's mirror holds
+    (#522), or None when there is no row or that ledger is unknown."""
+    row = conn.execute(
+        "SELECT applied_ledger_index FROM closet_tokens WHERE owner = ?", (owner,)
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
 
 
 def set_closet_status(conn: sqlite3.Connection, owner: str, status: str) -> None:

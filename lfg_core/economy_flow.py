@@ -211,7 +211,7 @@ class EconomyDeps:
     closet_mint_fn: bt.MintFn
     closet_offer_fn: bt.OfferFn
     closet_accept_fn: bt.AcceptFn
-    closet_modify_fn: bt.ModifyFn
+    closet_modify_fn: bt.ClosetModifyFn
     char_compose_fn: ComposeFn
     char_mint_fn: bt.MintFn
     char_modify_fn: bt.ModifyFn
@@ -245,6 +245,10 @@ class EconomyDeps:
     # it keep compiling; real wiring lands in Task 8.
     blank_meta_fn: Callable[[int], Awaitable[str | None]] | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
+    # The ledger history archive (history_<ECONOMY_NETWORK>.db) the stale-mirror
+    # guard reads before a full Closet overwrite (#522). None (constructions
+    # that omit it) skips the guard.
+    history_db_path: str | None = None
 
 
 def _write_record(records_dir: str, op: str, session_id: str, record: dict[str, Any]) -> None:
@@ -436,6 +440,23 @@ def _mirror_pending_error(deps: EconomyDeps, owner: str) -> str | None:
     return None
 
 
+def _mirror_behind_error(deps: EconomyDeps, owner: str) -> str | None:
+    """Error string if the owner's Closet mirror is behind the chain (#522), else
+    None. Every flow ends in `_sync_then_persist`, which full-overwrites the
+    Closet token from `_owner_contents`; a mirror missing a version already
+    on-chain (the listener could not apply it yet) would erase that version's
+    credit. `closet_token.ensure_mirror_current` compares the mirror against the
+    history archive and raises the not-committed ClosetError
+    (code `closet_mirror_behind`). Checked up front, before any compose, burn,
+    mint or NFTokenModify — harvest and deposit only read the mirror after their
+    irreversible character/trait step."""
+    try:
+        bt.ensure_mirror_current(deps.conn, owner, history_db_path=deps.history_db_path)
+    except bt.ClosetError as e:
+        return str(e)
+    return None
+
+
 # --- Harvest: strip a live character to a BLANK; its 9 slot values (8
 # non-body incl. "None", plus Body) drop into the Closet as loose assets ---
 
@@ -522,7 +543,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     conn, rec, owner = deps.conn, session.character, session.owner
     legacy_offer_failed = False
     try:
-        stale = _mirror_pending_error(deps, owner)
+        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
         if stale:
             session.fail(stale)
             return
@@ -896,7 +917,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     nft_id throughout."""
     conn, rec, owner = deps.conn, session.character, session.owner
     try:
-        stale = _mirror_pending_error(deps, owner)
+        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
         if stale:
             session.fail(stale)
             return
@@ -1287,7 +1308,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     and the Closet untouched."""
     conn, owner, rec = deps.conn, session.owner, session.character
     try:
-        stale = _mirror_pending_error(deps, owner)
+        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
         if stale:
             session.resolution = "reverted"
             session.fail(stale)
@@ -1529,7 +1550,7 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         if err:
             session.fail(err)
             return
-        stale = _mirror_pending_error(deps, owner)
+        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
         if stale:
             session.fail(stale)
             return
@@ -1753,7 +1774,7 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         if err:
             session.fail(err)
             return
-        stale = _mirror_pending_error(deps, owner)
+        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
         if stale:
             session.fail(stale)
             return

@@ -134,3 +134,25 @@ def test_trait_token_upsert_and_delete():
     assert ("NFT1", "rB", "Hat", "Cap") in rows and len(rows) == 1
     es.delete_trait_token(c, "NFT1")
     assert es.read_trait_tokens(c) == []
+
+
+def test_closet_tokens_applied_ledger_column_self_migrates():
+    """#522: an index DB whose closet_tokens predates the ledger stamp gains the
+    column on open; its existing rows read as an unknown (NULL) version ledger."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE closet_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            status TEXT DEFAULT 'pending_accept', offer_id TEXT,
+            mirror_pending INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status) VALUES ('rA', 'N1', 'AB', 'active');
+    """)
+    c.commit()
+
+    es.init_economy_schema(c)
+
+    assert es.get_closet_applied_ledger(c, "rA") is None
+    es.set_closet_token(c, "rA", "N1", "CD", status="active", applied_ledger_index=77)
+    assert es.get_closet_applied_ledger(c, "rA") == 77

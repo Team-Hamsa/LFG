@@ -174,7 +174,7 @@ def test_closet_modify_translates_indeterminate_to_closet_taxonomy(monkeypatch):
 
     from lfg_core import closet_token
 
-    async def modify_indeterminate(nft_id, owner, url):
+    async def modify_indeterminate(nft_id, owner, url, **_kwargs):
         raise xrpl_ops.IndeterminateResultError("outcome unknown")
 
     monkeypatch.setattr(deps.xrpl_ops, "modify_nft", modify_indeterminate)
@@ -185,13 +185,76 @@ def test_closet_modify_translates_indeterminate_to_closet_taxonomy(monkeypatch):
 def test_closet_modify_definitive_failure_stays_none(monkeypatch):
     import _economy_deps as deps
 
-    async def modify_none(nft_id, owner, url):
+    async def modify_none(nft_id, owner, url, **_kwargs):
         return None
 
     monkeypatch.setattr(deps.xrpl_ops, "modify_nft", modify_none)
     # A definitive failure must NOT masquerade as indeterminate — sync_closet
     # turns this None into a plain ClosetError (on-chain compensation safe).
     assert _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json")) is None
+
+
+def _validated_in_ledger(tx_hash: str, ledger_index: int) -> _Resp:
+    return _Resp(
+        {
+            "hash": tx_hash,
+            "ledger_index": ledger_index,
+            "validated": True,
+            "meta": {"TransactionResult": "tesSUCCESS"},
+        }
+    )
+
+
+def test_modify_opt_in_details_include_the_validated_ledger(monkeypatch):
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated_in_ledger("H1", 777)
+    )
+
+    result = _run(xrpl_ops.modify_nft("NFTID", "rOwner", "https://x/new.json", return_details=True))
+
+    assert result == xrpl_ops.ModifyNFTResult(tx_hash="H1", ledger_index=777)
+
+
+def test_modify_default_return_contract_remains_the_hash(monkeypatch):
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated_in_ledger("H1", 777)
+    )
+
+    assert _run(xrpl_ops.modify_nft("NFTID", "rOwner", "https://x/new.json")) == "H1"
+
+
+def test_closet_modify_reports_the_ledger_it_validated_in(monkeypatch):
+    """#522: the Closet mirror stamp needs the validated ledger of the flow's own
+    modify; without it a lagging listener can roll the flow's write back."""
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated_in_ledger("H1", 777)
+    )
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert result == closet_token.ModifyReceipt(tx_hash="H1", ledger_index=777)
+
+
+def test_closet_modify_without_a_reported_ledger_still_returns_its_hash(monkeypatch):
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated(tx_hash="H2")
+    )
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert result == closet_token.ModifyReceipt(tx_hash="H2", ledger_index=None)
 
 
 # --- committed mint whose meta lacks the convenience nftoken_id (#188) ---
