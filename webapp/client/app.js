@@ -4786,8 +4786,12 @@ function refreshBuilderPreview() {
   // #T31 defect 1: the SAME shared stacker + z-order renderCanvas uses for
   // the Dressing Room canvas — Body takes its own economyState.trait_order
   // position (between Back and Clothing) instead of being forced first,
-  // which used to paint e.g. a Background layer over the body.
-  const order = (economyState && economyState.trait_order) || ['Body', ...opts.slots];
+  // which used to paint e.g. a Background layer over the body. Read
+  // unguarded, same as renderCanvas: every path into the builder already
+  // awaits /api/economy first, so a defensive fallback here would just be
+  // dead code that could silently reintroduce the Body-forced-first bug if
+  // it were ever (wrongly) exercised.
+  const order = economyState.trait_order;
   const layers = buildPure.orderedLayers(order, { ...chosen, Body: body });
   preview.replaceChildren(
     ...layers.map(({ slot, value }) => layerMediaEl(layerSrc(cls, slot, value), `${slot}: ${value}`)),

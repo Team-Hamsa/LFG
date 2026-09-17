@@ -63,6 +63,23 @@ def test_builder_preview_orders_by_economy_state_trait_order():
     assert "Body: body" in body  # Body's value threaded into the shared map
 
 
+def test_builder_preview_reads_trait_order_unguarded_like_render_canvas():
+    """Task review finding on #532: a `(economyState && economyState.trait_order)
+    || ['Body', ...opts.slots]` fallback would, if ever exercised, silently
+    reintroduce the exact defect-1 bug (Body forced near the front). Every path
+    into the builder already awaits /api/economy first, so refreshBuilderPreview
+    must read economyState.trait_order unguarded -- the same way renderCanvas
+    does -- rather than defend against a state that cannot occur."""
+    js = _read("app.js")
+    preview_body = _fn_body(js, "function refreshBuilderPreview()", "\nfunction renderBuilder()")
+    assert "const order = economyState.trait_order;" in preview_body
+    assert "['Body', ...opts.slots]" not in preview_body
+    assert "economyState &&" not in preview_body
+
+    canvas_body = _fn_body(js, "function renderCanvas(char)", "\n// --- GO picker")
+    assert "const order = economyState.trait_order;" in canvas_body
+
+
 # ---------------------------------------------------------------------------
 # Defect 2 — switching bodies must keep still-valid selections, using the
 # server's own per-body legality list (the shared cross-body matrix), and
