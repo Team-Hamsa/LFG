@@ -146,7 +146,9 @@ def test_normalize_nft_blank_field_false_for_duplicate_trait_entries():
     trust which of two conflicting entries is "right"."""
     attrs = [a for a in trait_economy.blank_attributes() if a["trait_type"] != "Head"]
     attrs.append({"trait_type": "Head", "value": "Crown"})  # real value, listed first
-    attrs.append({"trait_type": "Head", "value": "None"})  # duplicate -- would win a dict comprehension
+    attrs.append(
+        {"trait_type": "Head", "value": "None"}
+    )  # duplicate -- would win a dict comprehension
     rec = swap_meta.normalize_nft(
         "00" * 32, {"name": "Let's Effing Go! #1", "attributes": attrs}, flags=16
     )
