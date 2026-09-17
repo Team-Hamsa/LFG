@@ -97,11 +97,28 @@ def _raw_attrs_are_blank(raw_attrs: Any) -> bool:
     a data hiccup. Local mirror of trait_economy.attrs_are_blank/is_blank
     (can't import trait_economy here -- it imports this module, so that
     would be circular); keep the two in sync by hand if TRAIT_ORDER's
-    membership in "blank" ever changes."""
+    membership in "blank" ever changes.
+
+    A duplicate canonical trait entry refuses outright (returns False)
+    rather than picking one of the two conflicting values (#523 review):
+    trait_economy's own convention (get_attr, below) takes the FIRST
+    occurrence per slot, so a naive {trait_type: value for ...} dict build
+    here -- which keeps the LAST -- could silently flip a dressed
+    character's real first value (e.g. Head="Crown" then a stray duplicate
+    Head="None") into a false "blank". A duplicate is itself a data anomaly
+    either way, so refusing to call it blank is the conservative answer."""
     if not isinstance(raw_attrs, list):
         return False
-    attrs = [a for a in raw_attrs if isinstance(a, dict) and isinstance(a.get("trait_type"), str)]
-    present = {a["trait_type"]: a.get("value") for a in attrs}
+    present: dict[str, Any] = {}
+    for attr in raw_attrs:
+        if not isinstance(attr, dict) or not isinstance(attr.get("trait_type"), str):
+            continue
+        trait = attr["trait_type"]
+        if trait not in TRAIT_ORDER:
+            continue
+        if trait in present:
+            return False
+        present[trait] = attr.get("value")
     return all(present.get(t) == "None" for t in TRAIT_ORDER)
 
 
