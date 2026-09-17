@@ -7613,7 +7613,12 @@ def _pending_offer_row(
     but lives in closet_tokens — without this branch a brand-new user saw
     "0010000… Accept" with no hint the offer was ours (2026-08-22). Closet
     rows resolve to kind="closet" + owner so the tray can name it. A token
-    unknown to all three keeps the bare fallback (kind=None)."""
+    unknown to all three keeps the bare fallback (kind=None).
+
+    Every row carries price_label — None for a free gift, else the honest
+    cost string ("10 BRIX") the client renders on the Accept button; the
+    claimability filter guarantees no unpriceable amount reaches here."""
+    price_label = xrpl_ops.offer_price_label(o.get("amount", "0"))
     conn = nft_index.init_db(nft_index.index_db_path(char_network))
     try:
         meta = conn.execute(
@@ -7629,6 +7634,7 @@ def _pending_offer_row(
             "nft_number": meta[0],
             "image": meta[1],
             "amount": o["amount"],
+            "price_label": price_label,
         }
     conn = nft_index.init_db(nft_index.index_db_path(econ_network))
     try:
@@ -7656,6 +7662,7 @@ def _pending_offer_row(
             "value": value,
             "image_url": _trait_image_url(cfg, slot, value),
             "amount": o["amount"],
+            "price_label": price_label,
         }
     if crow is not None:
         return {
@@ -7666,6 +7673,7 @@ def _pending_offer_row(
             "owner": crow[0],
             "image": None,
             "amount": o["amount"],
+            "price_label": price_label,
         }
     return {
         "offer_index": o["offer_index"],
@@ -7674,6 +7682,7 @@ def _pending_offer_row(
         "nft_number": None,
         "image": None,
         "amount": o["amount"],
+        "price_label": price_label,
     }
 
 
@@ -7723,7 +7732,10 @@ async def handle_pending_offer_accept(request):
     """Build the XUMM accept payload for ONE pending offer, on click only
     (open-payload cap, #260). Fail-closed like the marketplace buy: the offer
     is re-verified on-ledger — still live, still a sell offer locked to the
-    caller — immediately before the payload is built."""
+    caller — immediately before the payload is built. A BRIX-priced offer
+    additionally checks the caller's balance first, so a doomed accept (funds
+    too low to clear on-ledger) is refused honestly instead of costing the
+    user a wasted Xaman signature."""
     if config.WEBAPP_DEV_MODE:
         return web.json_response({"error": "not available in dev mode"}, status=501)
     body = await request.json()
@@ -7738,13 +7750,64 @@ async def handle_pending_offer_accept(request):
         return web.json_response(
             {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
         )
-    live = {o["offer_index"] for o in xrpl_ops.filter_claimable_offers(offers, wallet, time.time())}
-    if offer_index not in live:
+    claimable = {
+        o["offer_index"]: o for o in xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
+    }
+    matched = claimable.get(offer_index)
+    if matched is None:
         # Verified absent (lookup succeeded above): claimed already, expired,
         # or never this wallet's — either way there is nothing to sign.
         return web.json_response(
             {"error": "offer no longer available", "code": "offer_gone"}, status=410
         )
+    amount = matched.get("amount")
+    if isinstance(amount, dict):
+        currency, issuer = amount.get("currency"), amount.get("issuer")
+        if isinstance(currency, str) and isinstance(issuer, str):
+            # filter_claimable_offers already proved this dict is one of the
+            # configured BRIX-shaped pairs and offer_price_label() parses its
+            # value cleanly (see that function) — safe to re-parse here.
+            price = Decimal(str(amount.get("value")))
+            state, balance = await xrpl_ops.get_trustline_state(wallet, currency, issuer)
+            if state == xrpl_ops.TrustlineState.ABSENT:
+                # No line at all — not merely short. The stranded editions
+                # this endpoint exists to unstick are exactly the population
+                # likely to have never set one.
+                if (currency, issuer) == (config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER):
+                    # Safely auto-recoverable: the client's trustline_required
+                    # handler (startBrixTrustline) always sets THIS specific
+                    # pair, same code + message the mint/market flows already
+                    # use for this precondition.
+                    return web.json_response(
+                        {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                        status=409,
+                    )
+                # The offer is priced in the SWAP_OFFER_* pair specifically,
+                # and (per the branch above) it differs from BRIX_* in this
+                # deployment. The client's ONE recovery flow always sets
+                # BRIX_*, so routing this through trustline_required would
+                # set the wrong asset and trap the caller in an infinite
+                # retry loop (Greptile P1, PR #457 re-review). A different
+                # code — no client auto-recovery is offered for it.
+                return web.json_response(
+                    {
+                        "error": "this offer needs a trustline the app can't set for you"
+                        " automatically",
+                        "code": "offer_trustline_required",
+                    },
+                    status=409,
+                )
+            if state == xrpl_ops.TrustlineState.PRESENT and balance is not None and balance < price:
+                return web.json_response(
+                    {
+                        "error": f"you hold {balance} BRIX; this offer costs {price} BRIX",
+                        "code": "insufficient_brix",
+                    },
+                    status=409,
+                )
+            # UNKNOWN (the lookup itself failed): fail OPEN, unlike the two
+            # cases above — a transient RPC blip must never block an accept
+            # the caller could otherwise complete.
     return_url = await _request_return_url(request)
     payload = await xumm_ops.create_accept_offer_payload(
         offer_index,

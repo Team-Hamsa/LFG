@@ -2475,7 +2475,9 @@ function offerRow(o) {
   row.appendChild(label);
   const btn = document.createElement('button');
   btn.className = 'secondary';
-  btn.textContent = 'Accept';
+  // Priced offers (e.g. a swap-remint delivery carrying the swap fee) show
+  // the honest cost — the server excludes anything it can't price.
+  btn.textContent = o.price_label ? `Accept — ${o.price_label}` : 'Accept';
   btn.onclick = () => offerAccept(o, row, btn);
   row.appendChild(btn);
   return row;
@@ -2536,6 +2538,16 @@ async function offerAccept(o, row, btn) {
     applySignDelivery({ qrEl: img, linkBtn: open, toggleBtn: toggle,
       link: r.link, qrData: r.link, push: r.push });
   } catch (e) {
+    if (e.body && e.body.code === 'trustline_required') {
+      // A priced offer (e.g. a swap-remint delivery) can need a BRIX line
+      // the caller never set — same #441 recovery as marketFlow: set it,
+      // then retry this very same accept.
+      startBrixTrustline({
+        back: () => showPanel('offers-panel'),
+        onSet: () => offerAccept(o, row, btn),
+      });
+      return;
+    }
     showError(e.message);
   } finally {
     btn.disabled = false; // repeat click = fresh payload, same as bulkAccept
