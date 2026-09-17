@@ -48,12 +48,13 @@ import sys
 import tempfile
 import time
 from collections.abc import Coroutine
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from xrpl.asyncio.wallet import generate_faucet_wallet  # noqa: E402
+from xrpl.models import TransactionMetadata  # noqa: E402
 from xrpl.models.requests import LedgerEntry, ServerInfo  # noqa: E402
 from xrpl.models.transactions import (  # noqa: E402
     Memo,
@@ -64,6 +65,7 @@ from xrpl.models.transactions import (  # noqa: E402
 )
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag  # noqa: E402
 from xrpl.models.transactions.transaction import Transaction  # noqa: E402
+from xrpl.utils import get_nftoken_id  # noqa: E402
 from xrpl.wallet import Wallet  # noqa: E402
 
 from lfg_core import (  # noqa: E402
@@ -301,19 +303,47 @@ def _memos(initiator: str, action: str) -> list[Memo]:
     return memos.build_memo_models(initiator, memos.PLATFORM_BACKEND, action, campaign=CAMPAIGN)
 
 
+def _meta(result: dict[str, Any]) -> dict[str, Any]:
+    raw = result.get("meta")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _created_offer_index(meta: dict[str, Any]) -> str | None:
+    """The NFTokenOffer this transaction created, read from its metadata."""
+    for node in meta.get("AffectedNodes") or []:
+        created = node.get("CreatedNode") if isinstance(node, dict) else None
+        if isinstance(created, dict) and created.get("LedgerEntryType") == "NFTokenOffer":
+            index = created.get("LedgerIndex")
+            if isinstance(index, str) and index:
+                return index
+    return None
+
+
 def _offer_id(result: dict[str, Any], label: str) -> str:
-    meta = result.get("meta")
-    offer_id = meta.get("offer_id") if isinstance(meta, dict) else None
+    """The offer index of a validated NFTokenCreateOffer. `meta.offer_id` is a
+    convenience rippled may omit, and by now the offer EXISTS — so it is
+    derived from the metadata rather than failing a step that succeeded, which
+    a re-run would repeat as a second on-ledger offer."""
+    meta = _meta(result)
+    offer_id = meta.get("offer_id") or _created_offer_index(meta)
     if not isinstance(offer_id, str) or not offer_id:
         raise RehearsalError(
-            f"{label}: validated, but its offer index was absent (tx {result.get('hash')})"
+            f"{label}: validated, but its offer index could not be read (tx "
+            f"{result.get('hash')}): take it from that transaction and set it in the state file"
         )
     return offer_id
 
 
 def _nft_id(result: dict[str, Any]) -> str:
-    meta = result.get("meta")
-    nft_id = meta.get("nftoken_id") if isinstance(meta, dict) else None
+    """The NFTokenID of a validated mint — from `meta.nftoken_id` when rippled
+    includes it, else derived from the metadata like xrpl_ops.mint_nft does.
+    The character exists either way, and a step that failed here would be
+    re-run into a second mint."""
+    meta = _meta(result)
+    nft_id = meta.get("nftoken_id")
+    if not nft_id:
+        with contextlib.suppress(Exception):
+            nft_id = get_nftoken_id(cast(TransactionMetadata, meta))
     if not isinstance(nft_id, str) or not nft_id:
         raise RehearsalError(
             f"the mint validated but its NFTokenID could not be read (tx {result.get('hash')}): "
@@ -364,6 +394,14 @@ async def mint_to_seller(chain: Chain, path: str) -> None:
             f"NFT_FLAGS={config.NFT_FLAGS} lacks tfTransferable: no TransferFee, and the seller "
             "could never sell the character"
         )
+    if config.NFT_TRANSFER_FEE <= 0:
+        # No royalty reaches the issuer, and the refund is bounded by the
+        # royalty observed in the accept: settlement would decline it
+        # `royalty_unobserved`. Refuse before minting anything.
+        raise RehearsalError(
+            "NFT_TRANSFER_FEE is 0: the sale would pay no royalty, so the refund would be "
+            "declined royalty_unobserved. Set a non-zero TransferFee before rehearsing."
+        )
     issuer = Wallet.from_seed(config.SEED)
     if not state.get("nft_id"):
         result = await chain.submit(
@@ -398,16 +436,22 @@ async def mint_to_seller(chain: Chain, path: str) -> None:
         state["transfer_offer"] = _offer_id(result, "rehearsal: offer to the seller")
         save_state(path, state)
     if not state.get("seller_holds_nft"):
-        await chain.submit(
-            NFTokenAcceptOffer(
-                account=seller.address,
-                nftoken_sell_offer=state["transfer_offer"],
-                source_tag=config.SOURCE_TAG,
-                memos=_memos(memos.INITIATOR_USER, memos.ACTION_ACCEPT_OFFER),
-            ),
-            seller,
-            "rehearsal: the seller accepts the character",
-        )
+        # A crash between a validated accept and this state write would leave
+        # the re-run submitting a consumed offer, which can only fail. The
+        # offer being gone from the ledger is proof the accept landed.
+        if await chain.ledger_entry(str(state["transfer_offer"])) is None:
+            print(f"transfer offer {state['transfer_offer']} is already consumed: accept landed")
+        else:
+            await chain.submit(
+                NFTokenAcceptOffer(
+                    account=seller.address,
+                    nftoken_sell_offer=state["transfer_offer"],
+                    source_tag=config.SOURCE_TAG,
+                    memos=_memos(memos.INITIATOR_USER, memos.ACTION_ACCEPT_OFFER),
+                ),
+                seller,
+                "rehearsal: the seller accepts the character",
+            )
         state["seller_holds_nft"] = True
         save_state(path, state)
     print(f"nft_id: {state['nft_id']}")
@@ -531,6 +575,10 @@ def offer_fee_cover(app_db: str, offer_index: str) -> dict[str, Any]:
 
 
 def verify(timeout_seconds: float, *, session_id: str | None, offer_index: str | None) -> int:
+    if not math.isfinite(timeout_seconds):
+        # nan never passes its deadline and inf never arrives: either would
+        # poll a still-moving fee cover for ever.
+        raise RehearsalError("--timeout must be a finite number of seconds")
     app_db = db_path.app_db_path(TESTNET)
     deadline = time.monotonic() + timeout_seconds
     last: str | None = None

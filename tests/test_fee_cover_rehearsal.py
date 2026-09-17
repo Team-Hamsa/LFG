@@ -6,6 +6,7 @@ Everything runs against a fake XRPL client: nothing here reaches a network.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import os
@@ -67,6 +68,20 @@ class FakeChain:
             meta["nftoken_id"] = f"{n:064X}"
         if isinstance(tx, NFTokenCreateOffer):
             meta["offer_id"] = f"{n:064X}"
+        if isinstance(tx, NFTokenCreateOffer):
+            # the offer it created is now a ledger object...
+            self.entries[meta["offer_id"]] = {
+                "LedgerEntryType": "NFTokenOffer",
+                "NFTokenID": tx.nftoken_id,
+                "Amount": tx.amount,
+                "Flags": int(tx.flags or 0),
+                "Owner": wallet.address,
+            }
+        if isinstance(tx, NFTokenAcceptOffer):
+            # ...until an accept consumes it
+            for consumed in (tx.nftoken_sell_offer, tx.nftoken_buy_offer):
+                if consumed:
+                    self.entries.pop(consumed, None)
         result = {"hash": f"HASH{n}", "validated": True, "meta": meta}
         self.results.append(result)
         return result
@@ -290,6 +305,76 @@ def test_mint_to_seller_refuses_a_non_transferable_character(testnet, state_path
     assert len(chain.submitted) == before
 
 
+def test_mint_to_seller_refuses_a_zero_transfer_fee(testnet, state_path, monkeypatch):
+    """TransferFee 0 means no royalty reaches the issuer, and settlement then
+    declines the refund `royalty_unobserved`: refuse before minting rather
+    than spend the operator's time on a rehearsal that cannot pass."""
+    chain = FakeChain()
+    assert rehearsal.main(["setup", "--state", state_path], chain=chain) == 0
+    monkeypatch.setattr(config, "NFT_TRANSFER_FEE", 0)
+    before = len(chain.submitted)
+    assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=chain) == 1
+    assert len(chain.submitted) == before
+    assert "nft_id" not in _state(state_path)
+
+
+def test_mint_to_seller_reconciles_a_transfer_offer_already_accepted(testnet, state_path):
+    """A crash after the validated accept but before its state was saved made
+    the re-run submit the consumed offer, which can only fail. The offer being
+    gone from the ledger is proof the seller already holds the character."""
+    crashed = FakeChain(fail=NFTokenAcceptOffer)
+    assert rehearsal.main(["setup", "--state", state_path], chain=crashed) == 0
+    assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=crashed) == 1
+    state = _state(state_path)
+    assert state["transfer_offer"] and "seller_holds_nft" not in state
+    retry = FakeChain()  # the accept had landed: its offer is off the ledger
+    assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=retry) == 0
+    assert _state(state_path)["seller_holds_nft"] is True
+    assert retry.txs(NFTokenAcceptOffer) == []
+
+
+def _mint_meta(nft_id):
+    return {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+            {
+                "CreatedNode": {
+                    "LedgerEntryType": "NFTokenPage",
+                    "NewFields": {"NFTokens": [{"NFToken": {"NFTokenID": nft_id}}]},
+                }
+            }
+        ],
+    }
+
+
+def _offer_meta(offer_index):
+    return {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+            {"CreatedNode": {"LedgerEntryType": "NFTokenOffer", "LedgerIndex": offer_index}}
+        ],
+    }
+
+
+def test_ids_are_derived_from_metadata_when_the_convenience_fields_are_absent():
+    """meta.nftoken_id / meta.offer_id are conveniences rippled may omit. By
+    then the transaction has committed, so deriving the id from AffectedNodes
+    is what stops a re-run from minting a second character (xrpl_ops.mint_nft
+    derives it for the same reason)."""
+    nft_id = "00081388" + "A" * 56
+    offer_index = "F" * 64
+    assert rehearsal._nft_id({"hash": "H", "meta": _mint_meta(nft_id)}) == nft_id
+    assert rehearsal._offer_id({"hash": "H", "meta": _offer_meta(offer_index)}, "l") == offer_index
+
+
+def test_an_id_that_cannot_be_read_at_all_still_refuses_with_the_tx_hash():
+    empty = {"hash": "HASHX", "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []}}
+    with pytest.raises(rehearsal.RehearsalError, match="HASHX"):
+        rehearsal._nft_id(empty)
+    with pytest.raises(rehearsal.RehearsalError, match="HASHX"):
+        rehearsal._offer_id(empty, "listing")
+
+
 def test_print_allowlist_emits_an_overlay_the_app_loads(
     testnet, state_path, monkeypatch, capsys, tmp_path
 ):
@@ -487,6 +572,15 @@ def test_verify_by_session_points_a_quoteless_bid_at_its_offer_index(testnet, ap
     assert "no_quote" in out and "--offer-index" in out
 
 
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_verify_refuses_a_non_finite_timeout(testnet, app_db, capsys, value):
+    """`--timeout nan` (or inf) never passes its deadline, so a fee cover that
+    is still moving would be polled for ever."""
+    _covered_bid(app_db, None)  # `quoted`: a waiting state
+    assert rehearsal.main(["verify", "--bid", "S1", "--timeout", value]) == 1
+    assert "finite" in capsys.readouterr().err
+
+
 def test_verify_by_offer_index_follows_a_covered_bid_too(testnet, app_db, capsys):
     _covered_bid(app_db, "confirmed")
     assert rehearsal.main(["verify", "--offer-index", "BID1", "--timeout", "0"]) == 0
@@ -611,6 +705,56 @@ def test_every_endpoint_a_submit_can_reach_must_be_testnet(
     else:
         assert len(endpoints.submitted) == 3  # mint, offer, accept
         assert all(client.urls == verified for client, _ in endpoints.submitted)
+
+
+def test_the_faucet_helper_drives_the_client_rpc_client_returns(monkeypatch, tmp_path):
+    """The async faucet helper is handed the client xrpl_ops.rpc_client()
+    returns. xrpl-py's async helpers reach a client only through its
+    `_request_impl` coroutine, which JsonRpcBase defines and
+    FailoverJsonRpcClient overrides — the same client xrpl_ops hands to
+    submit_and_wait. This drives the REAL helper over the REAL client with
+    only its HTTP boundary faked."""
+    monkeypatch.setattr(config, "JSON_RPC_URLS", [TESTNET_URL])
+    monkeypatch.setattr(
+        history_store, "history_db_path", lambda network=None: str(tmp_path / "history.db")
+    )
+    assert inspect.iscoroutinefunction(xrpl_rpc.FailoverJsonRpcClient._request_impl)
+    balances = iter(["0", "100000000", "100000000", "100000000"])
+    seen: list[str] = []
+
+    async def request_impl(self, request, *args, **kwargs):
+        method = str(request.method).lower()  # e.g. "requestmethod.server_info"
+        seen.append(method)
+        if "server_info" in method:
+            info = {"network_id": 1, "build_version": "2.4.0"}
+            return Response(status=ResponseStatus.SUCCESS, result={"info": info})
+        if "account_info" in method:
+            account = {"Balance": next(balances), "Sequence": 7}
+            return Response(status=ResponseStatus.SUCCESS, result={"account_data": account})
+        raise AssertionError(f"unexpected request: {method}")
+
+    monkeypatch.setattr(xrpl_rpc.FailoverJsonRpcClient, "_request_impl", request_impl)
+    posted: list[tuple[str, dict]] = []
+
+    class _Faucet:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json):
+            posted.append((url, json))
+            return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Faucet())
+    chain = rehearsal.XrplChain()
+    _run(chain.ensure_testnet())
+    wallet = Wallet.create()
+    _run(chain.fund_from_faucet(wallet))
+    [(url, body)] = posted
+    assert "faucet.altnet.rippletest.net" in url and body["destination"] == wallet.address
+    assert any("server_info" in m for m in seen) and any("account_info" in m for m in seen)
 
 
 def test_the_real_chain_sends_everything_through_rpc_client(endpoints, monkeypatch):

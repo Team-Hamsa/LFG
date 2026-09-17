@@ -19,8 +19,9 @@ and signing the bid in a wallet.
   `stg-activity` and `stg-index-testnet` are online.
 - Staging's `.env` is testnet: `XRPL_NETWORK=testnet`, and `SEED` is the
   testnet issuer (= `SIGNING_ACCOUNT`). `NFT_FLAGS` includes tfTransferable
-  (8), and `NFT_TRANSFER_FEE` is above 0: with a TransferFee of 0 the refund is
-  declined (§4).
+  (8), and `NFT_TRANSFER_FEE` is above 0. `mint-to-seller` refuses both
+  otherwise: a non-transferable character could never be sold, and a
+  TransferFee of 0 pays no royalty, so the refund would be declined (§4).
 - No fee-cover campaign is active on staging:
   `.venv/bin/python scripts/fee_cover_report.py --network testnet` prints
   `state: never_started` or `state: stopped`.
@@ -39,7 +40,9 @@ the app DB path is relative to the working directory.
 The harness exits 2 on anything but testnet. Every transaction it submits
 carries SourceTag `2606160021` and provenance memos with campaign
 `fee-cover-rehearsal`. `setup` and `mint-to-seller` skip the steps they already
-recorded, so one that failed part-way can simply be run again.
+recorded, so one that failed part-way can simply be run again;
+`mint-to-seller` also recognises a transfer offer that was accepted after a
+crash (the offer is gone from the ledger) instead of re-submitting it.
 
 `XRPL_NETWORK` alone is not trusted, because an explicit `XRPL_JSON_RPC_URL`
 wins over the network's defaults and an exported shell variable beats `.env`.
@@ -172,7 +175,7 @@ reached by `--bid`. `fee_cover_report.py` counts them under
 | What happened | State · reason | Decided at |
 |---|---|---|
 | The seller and bidder are linked: the seller wallet is signed in to LFG under the bidder's account, signs in the same Xaman install (its push token links wallets), or has the bidder's non-exchange activation funder | refund `declined` · `linked_counterparty` | settlement |
-| The character's TransferFee is 0 (`NFT_TRANSFER_FEE=0`), so no royalty reaches the issuer | refund `declined` · `royalty_unobserved` | settlement |
+| The character's TransferFee is 0, so no royalty reaches the issuer. `mint-to-seller` refuses `NFT_TRANSFER_FEE=0` up front, so this needs a character minted elsewhere | refund `declined` · `royalty_unobserved` | settlement |
 | The bidder is `SIGNING_ACCOUNT` (the testnet issuer). It's in `sponsored_mint.excluded_wallets()`, so the quote refuses it first | quote + promise `declined` · `system_wallet` | bid |
 | The NFT's issuer is itself a party to the sale, e.g. the character was listed straight from the issuer instead of through `mint-to-seller` | refund `declined` · `issuer_party` | settlement |
 | The bidder is in `SPONSORED_MINT_EXCLUDED_WALLETS`, or is the BRIX distributor | quote + promise `declined` · `system_wallet` | bid |
