@@ -4,8 +4,10 @@
 # back; a claimed hash is only believed once it is VERIFIED on-ledger against
 # the txjson we asked for.
 import asyncio
+import fcntl
 import json
 import logging
+import pathlib
 import sqlite3
 import threading
 import time
@@ -809,6 +811,55 @@ def test_late_payment_record_carries_the_consumed_state(monkeypatch, tmp_path, c
     assert record["consumed_payment"]["claimant"] == "mint:abc"
     (alarm,) = _error_logs_naming(caplog, "LATE SIGNATURE:", HASH)
     assert "consumed_payments" in alarm.getMessage()
+
+
+def _recorded_path(tmp_path):
+    (path,) = (tmp_path / "records").glob("late-signature-*.json")
+    return str(path)
+
+
+def test_a_failed_append_leaves_the_record_intact(monkeypatch, tmp_path):
+    """The record is the only evidence of a payment owed back, and a second
+    matching request has to be added to it. A write that dies midway must not
+    take the original with it."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    assert _post(row["id"], {"hash": HASH}).status == 409
+    path = _recorded_path(tmp_path)
+
+    def _dies_midway(_obj, fp, **_kwargs):
+        fp.write('{"half written')
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app.json, "dump", _dies_midway)
+    with pytest.raises(OSError):
+        app._append_late_signature_request(path, {"request_id": "wc-second"})
+    monkeypatch.undo()
+
+    record = json.loads(pathlib.Path(path).read_text())  # still valid JSON
+    assert [r["request_id"] for r in record["requests"]] == [row["id"]]
+
+
+def test_appending_to_a_record_waits_for_the_lock(monkeypatch, tmp_path):
+    """Two requests claiming one payment read-modify-write the same record, so
+    appends are serialized: without that, one of them is silently lost."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    assert _post(row["id"], {"hash": HASH}).status == 409
+    path = _recorded_path(tmp_path)
+    appended = threading.Thread(
+        target=app._append_late_signature_request, args=(path, {"request_id": "wc-second"})
+    )
+    with open(f"{path}.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        appended.start()
+        appended.join(0.3)
+        assert appended.is_alive()  # blocked while another writer holds it
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+    appended.join(5)
+    assert not appended.is_alive()
+    record = json.loads(pathlib.Path(path).read_text())
+    assert [r["request_id"] for r in record["requests"]] == [row["id"], "wc-second"]
 
 
 def test_consumed_lookup_failure_is_recorded_as_unknown(monkeypatch, tmp_path, caplog):

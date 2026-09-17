@@ -9754,20 +9754,31 @@ def _save_late_signature_record(
 
 def _append_late_signature_request(path: str, request: dict[str, Any]) -> None:
     """Add another sign request that claimed an already-recorded payment.
-    Held under an exclusive lock so two concurrent posts cannot lose one."""
-    with open(path, "r+") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+    The record is the only evidence of a payment owed back, so it is never
+    rewritten in place: the updated document is written to a temp file and
+    replaces it atomically, leaving the original untouched if anything fails
+    midway. Writers serialize on a sidecar lock file — not on the record,
+    whose inode is replaced — so a concurrent append cannot be lost."""
+    with open(f"{path}.lock", "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            record = json.load(f)
+            with open(path) as f:
+                record = json.load(f)
             requests = record.setdefault("requests", [])
             if any(r.get("request_id") == request["request_id"] for r in requests):
                 return
             requests.append(request)
-            f.seek(0)
-            json.dump(record, f, indent=2)
-            f.truncate()
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as out:
+                    json.dump(record, out, indent=2)
+                os.replace(tmp, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
         finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
