@@ -55,7 +55,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from xrpl.asyncio.wallet import generate_faucet_wallet  # noqa: E402
 from xrpl.models import TransactionMetadata  # noqa: E402
-from xrpl.models.requests import LedgerEntry, ServerInfo  # noqa: E402
+from xrpl.models.requests import AccountNFTs, LedgerEntry, ServerInfo  # noqa: E402
 from xrpl.models.transactions import (  # noqa: E402
     Memo,
     NFTokenAcceptOffer,
@@ -100,6 +100,7 @@ DEFAULT_VERIFY_TIMEOUT_SECONDS = 1800
 # What a testnet server reports as server_info.info.network_id (mainnet omits it).
 TESTNET_NETWORK_ID = 1
 ENDPOINT_CHECK_TIMEOUT_SECONDS = 30.0
+ACCOUNT_NFTS_MAX_PAGES = 25
 # fee-cover states that are still moving: anything else ends a verify poll.
 _WAITING = frozenset({"quoted", "open", "owed", "submitted"})
 _LSF_SELL_NFTOKEN = 0x00000001
@@ -126,6 +127,8 @@ class Chain(Protocol):
     async def submit(self, tx: Transaction, wallet: Wallet, label: str) -> dict[str, Any]: ...
 
     async def ledger_entry(self, index: str) -> dict[str, Any] | None: ...
+
+    async def holds_nft(self, address: str, nft_id: str) -> bool: ...
 
 
 class XrplChain:
@@ -222,6 +225,32 @@ class XrplChain:
         if response.result.get("error") == "entryNotFound":
             return None
         raise RehearsalError(f"ledger_entry {index} failed: {response.result.get('error')}")
+
+    async def holds_nft(self, address: str, nft_id: str) -> bool:
+        """Whether `address` holds `nft_id` on the validated ledger.
+
+        `account_nfts`, not `nft_info`: the latter is clio-only, and
+        CLIO_WS_URL is a separate endpoint this harness never verified as
+        testnet. An account with many tokens pages, so markers are followed."""
+        marker: Any = None
+        for _ in range(ACCOUNT_NFTS_MAX_PAGES):
+            response = await asyncio.to_thread(
+                self.client.request,
+                AccountNFTs(account=address, ledger_index="validated", limit=400, marker=marker),
+            )
+            if not response.is_successful():
+                if response.result.get("error") == "actNotFound":
+                    return False
+                raise RehearsalError(
+                    f"account_nfts for {address} failed: {response.result.get('error')}"
+                )
+            for token in response.result.get("account_nfts") or []:
+                if isinstance(token, dict) and token.get("NFTokenID") == nft_id:
+                    return True
+            marker = response.result.get("marker")
+            if not marker:
+                return False
+        raise RehearsalError(f"account_nfts for {address} did not finish paging")
 
 
 def broker_fee_drops(bid_drops: int, rate: float = BROKER_RATE) -> int:
@@ -419,6 +448,8 @@ async def mint_to_seller(chain: Chain, path: str) -> None:
         )
         state["nft_id"] = _nft_id(result)
         save_state(path, state)
+    if state.get("transfer_offer") and not state.get("seller_holds_nft"):
+        await _resume_delivery(chain, path, state, seller)
     if not state.get("transfer_offer"):
         result = await chain.submit(
             NFTokenCreateOffer(
@@ -436,22 +467,16 @@ async def mint_to_seller(chain: Chain, path: str) -> None:
         state["transfer_offer"] = _offer_id(result, "rehearsal: offer to the seller")
         save_state(path, state)
     if not state.get("seller_holds_nft"):
-        # A crash between a validated accept and this state write would leave
-        # the re-run submitting a consumed offer, which can only fail. The
-        # offer being gone from the ledger is proof the accept landed.
-        if await chain.ledger_entry(str(state["transfer_offer"])) is None:
-            print(f"transfer offer {state['transfer_offer']} is already consumed: accept landed")
-        else:
-            await chain.submit(
-                NFTokenAcceptOffer(
-                    account=seller.address,
-                    nftoken_sell_offer=state["transfer_offer"],
-                    source_tag=config.SOURCE_TAG,
-                    memos=_memos(memos.INITIATOR_USER, memos.ACTION_ACCEPT_OFFER),
-                ),
-                seller,
-                "rehearsal: the seller accepts the character",
-            )
+        await chain.submit(
+            NFTokenAcceptOffer(
+                account=seller.address,
+                nftoken_sell_offer=state["transfer_offer"],
+                source_tag=config.SOURCE_TAG,
+                memos=_memos(memos.INITIATOR_USER, memos.ACTION_ACCEPT_OFFER),
+            ),
+            seller,
+            "rehearsal: the seller accepts the character",
+        )
         state["seller_holds_nft"] = True
         save_state(path, state)
     print(f"nft_id: {state['nft_id']}")
@@ -459,6 +484,29 @@ async def mint_to_seller(chain: Chain, path: str) -> None:
         f"held by the seller {seller.address} (TransferFee {config.NFT_TRANSFER_FEE}, "
         f"taxon {config.NFT_TAXON})"
     )
+
+
+async def _resume_delivery(chain: Chain, path: str, state: dict[str, Any], seller: Wallet) -> None:
+    """Re-running after a crash in delivery: ask the ledger what became of the
+    recorded transfer offer, because a crash between a validated accept and
+    the state write used to leave the re-run submitting a consumed offer,
+    which can only fail.
+
+    Still there → nothing to settle, the accept below runs. Gone AND the
+    seller holds the character → the accept landed. Gone and it does not →
+    the offer was cancelled (the issuer can cancel its own), so forget it and
+    make a new one rather than record a delivery that never happened."""
+    offer = str(state["transfer_offer"])
+    if await chain.ledger_entry(offer) is not None:
+        return
+    nft_id = str(state["nft_id"])
+    if await chain.holds_nft(seller.address, nft_id):
+        print(f"transfer offer {offer} was accepted before it could be recorded")
+        state["seller_holds_nft"] = True
+    else:
+        print(f"transfer offer {offer} is gone and the seller holds nothing: offering again")
+        state["transfer_offer"] = None
+    save_state(path, state)
 
 
 async def list_character(chain: Chain, path: str, price_xrp: str) -> None:

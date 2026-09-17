@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from xrpl.models.requests import AccountNFTs
 from xrpl.models.response import Response, ResponseStatus
 from xrpl.models.transactions import NFTokenAcceptOffer, NFTokenCreateOffer, NFTokenMint, Payment
 from xrpl.wallet import Wallet
@@ -50,6 +51,8 @@ class FakeChain:
         self.results: list[dict] = []
         self.entries: dict[str, dict] = {}
         self.lookups: list[str] = []
+        self.owned: set[tuple[str, str]] = set()
+        self.ownership_checks: list[tuple[str, str]] = []
 
     async def ensure_testnet(self):
         if self.network != "testnet":
@@ -78,7 +81,13 @@ class FakeChain:
                 "Owner": wallet.address,
             }
         if isinstance(tx, NFTokenAcceptOffer):
-            # ...until an accept consumes it
+            # ...until an accept consumes it and moves the token
+            sell = self.entries.get(tx.nftoken_sell_offer or "") or {}
+            buy = self.entries.get(tx.nftoken_buy_offer or "") or {}
+            nft = sell.get("NFTokenID") or buy.get("NFTokenID")
+            if nft:
+                self.owned = {(a, n) for a, n in self.owned if n != nft}
+                self.owned.add((buy.get("Owner") or wallet.address, nft))
             for consumed in (tx.nftoken_sell_offer, tx.nftoken_buy_offer):
                 if consumed:
                     self.entries.pop(consumed, None)
@@ -89,6 +98,10 @@ class FakeChain:
     async def ledger_entry(self, index):
         self.lookups.append(index)
         return self.entries.get(index)
+
+    async def holds_nft(self, address, nft_id):
+        self.ownership_checks.append((address, nft_id))
+        return (address, nft_id) in self.owned
 
     def txs(self, kind):
         return [(tx, signer) for tx, signer, _ in self.submitted if isinstance(tx, kind)]
@@ -318,19 +331,45 @@ def test_mint_to_seller_refuses_a_zero_transfer_fee(testnet, state_path, monkeyp
     assert "nft_id" not in _state(state_path)
 
 
-def test_mint_to_seller_reconciles_a_transfer_offer_already_accepted(testnet, state_path):
-    """A crash after the validated accept but before its state was saved made
-    the re-run submit the consumed offer, which can only fail. The offer being
-    gone from the ledger is proof the seller already holds the character."""
+def _crashed_before_recording_the_accept(state_path):
+    """mint and offer recorded, the accept not: the state a crash leaves."""
     crashed = FakeChain(fail=NFTokenAcceptOffer)
     assert rehearsal.main(["setup", "--state", state_path], chain=crashed) == 0
     assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=crashed) == 1
     state = _state(state_path)
     assert state["transfer_offer"] and "seller_holds_nft" not in state
-    retry = FakeChain()  # the accept had landed: its offer is off the ledger
+    return state
+
+
+def test_mint_to_seller_reconciles_a_transfer_offer_already_accepted(testnet, state_path):
+    """A crash after the validated accept but before its state was saved made
+    the re-run submit the consumed offer, which can only fail. An offer gone
+    from the ledger while the seller holds the character means it landed."""
+    state = _crashed_before_recording_the_accept(state_path)
+    retry = FakeChain()  # the offer is off the ledger and the seller holds it
+    retry.owned.add((state["wallets"]["seller"]["address"], state["nft_id"]))
     assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=retry) == 0
     assert _state(state_path)["seller_holds_nft"] is True
-    assert retry.txs(NFTokenAcceptOffer) == []
+    assert retry.txs(NFTokenAcceptOffer) == [] and retry.txs(NFTokenCreateOffer) == []
+
+
+def test_mint_to_seller_re_offers_a_transfer_offer_that_was_cancelled(testnet, state_path):
+    """An absent offer is not proof of an accept: the issuer can cancel its
+    own offer, leaving the seller with nothing. Marking the delivery done
+    there would have `list` try to sell a character the seller never got."""
+    state = _crashed_before_recording_the_accept(state_path)
+    stale_offer = state["transfer_offer"]
+    seller = state["wallets"]["seller"]["address"]
+    retry = FakeChain()  # the offer is gone AND the seller holds nothing
+    assert rehearsal.main(["mint-to-seller", "--state", state_path], chain=retry) == 0
+    assert retry.ownership_checks == [(seller, state["nft_id"])]
+    [(offer, signer)] = retry.txs(NFTokenCreateOffer)  # a fresh delivery offer
+    assert (offer.amount, offer.destination, offer.nftoken_id) == ("0", seller, state["nft_id"])
+    assert signer == config.SIGNING_ACCOUNT
+    [(accept, _)] = retry.txs(NFTokenAcceptOffer)  # ...which the seller accepts
+    after = _state(state_path)
+    assert accept.nftoken_sell_offer == after["transfer_offer"] != stale_offer
+    assert after["seller_holds_nft"] is True and after["nft_id"] == state["nft_id"]
 
 
 def _mint_meta(nft_id):
@@ -613,9 +652,12 @@ class _Endpoint:
         return Response(status=ResponseStatus.SUCCESS, result={"info": info})
 
 
+HELD_NFT = "00081388" + "C" * 56
+
+
 class _Client:
     """The failover client xrpl_ops.rpc_client() returns: remembers the
-    endpoints it may use and answers ledger_entry."""
+    endpoints it may use, and answers ledger_entry and account_nfts."""
 
     def __init__(self, urls):
         self.urls = list(urls)
@@ -623,6 +665,15 @@ class _Client:
 
     def request(self, req):
         self.requests.append(req)
+        if isinstance(req, AccountNFTs):
+            if req.marker is None:
+                page = [{"NFTokenID": "00081388" + "D" * 56}]
+                return Response(
+                    status=ResponseStatus.SUCCESS,
+                    result={"account_nfts": page, "marker": "next"},
+                )
+            page = [{"NFTokenID": HELD_NFT}]  # found only on the second page
+            return Response(status=ResponseStatus.SUCCESS, result={"account_nfts": page})
         if req.index == BUY_OFFER:
             return Response(
                 status=ResponseStatus.SUCCESS, result={"node": {"LedgerEntryType": "NFTokenOffer"}}
@@ -773,6 +824,16 @@ def test_the_real_chain_sends_everything_through_rpc_client(endpoints, monkeypat
     _run(chain.fund_from_faucet(wallet))
     assert _run(chain.ledger_entry(BUY_OFFER)) == {"LedgerEntryType": "NFTokenOffer"}
     assert _run(chain.ledger_entry("C" * 64)) is None
+    # account_nfts, over the same verified endpoints, and it follows markers
+    assert _run(chain.holds_nft(wallet.address, HELD_NFT)) is True
+    assert _run(chain.holds_nft(wallet.address, "00081388" + "E" * 56)) is False
     assert endpoints.submitted == [(client, "ok"), (client, "refused")]
     assert endpoints.funded == [(client, wallet.address)]
-    assert len(client.requests) == 2
+    assert [type(r).__name__ for r in client.requests] == [
+        "LedgerEntry",
+        "LedgerEntry",
+        "AccountNFTs",
+        "AccountNFTs",
+        "AccountNFTs",
+        "AccountNFTs",
+    ]
