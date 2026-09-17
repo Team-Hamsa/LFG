@@ -114,6 +114,19 @@ export function netChanges(character, pending) {
     .map((slot) => ({ slot, value: staged[slot] }));
 }
 
+// Can this loose Closet asset be equipped onto the active character? A BLANK is
+// never equippable (#523): dressing one slot leaves a partly dressed character
+// and credits a phantom "None" to every other slot, which the conservation
+// audit reads as drift — Assemble ("Build this GO") is the only supported way
+// to dress a blank. `blank` is the ONLY field that says so. A blank's `body` is
+// a body CLASS, not '' — detect_body() has no "no body" answer and falls
+// through to "skeleton" for its all-"None" attributes — so neither a body check
+// nor closetTileState()'s visibility can stand in for this.
+export function equipCompatible(character, asset, slots) {
+  if (!character || character.blank) return false;
+  return (slots || []).includes(asset && asset.slot);
+}
+
 // Presentation state for one Closet tile (asset {slot, value}) given the
 // selected GO (`char`, or null when none is selected).
 //   visible — false only when the value's art can't render on this body (it

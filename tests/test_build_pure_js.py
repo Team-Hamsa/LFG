@@ -6,7 +6,6 @@
 # No lfg_core import at module top -> no env-guard preamble needed.
 import json
 import os
-import re
 import shutil
 import subprocess
 
@@ -475,15 +474,33 @@ def test_save_outcome_missing_session_is_reverted():
 # ---------------------------------------------------------------------------
 
 
-def test_closet_equip_compatibility_excludes_blank_characters():
-    m = re.search(r"const compatible = ([^;]+);", _render_closet_src())
-    assert m, "renderCloset() no longer computes `compatible`"
-    assert "char.blank" in m.group(1), (
-        "renderCloset()'s `compatible` must exclude blanks — Assemble is the "
-        "only supported way to dress one (#523)"
-    )
+def test_equip_compatible_allows_a_dressed_character_and_a_known_slot():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Head', value: 'Tiara'}}, ['Head', 'Eyes'])")
 
 
-def test_closet_tile_equip_click_stays_gated_on_compatible():
-    # The guard is only worth anything while the click stays behind it.
-    assert "if (compatible) item.onclick = () => stagePendingEquip(" in _render_closet_src()
+def test_equip_compatible_refuses_a_blank_character():
+    # The whole point (#523). An INVERTED guard (`char.blank` instead of
+    # `!char.blank`) fails right here, which a source-text assertion could not
+    # catch — it would still "mention char.blank".
+    out = run_js(f"M.equipCompatible({BLANK}, {{slot: 'Head', value: 'Camp Hat'}}, ['Head'])")
+    assert out is False
+
+
+def test_equip_compatible_refuses_without_a_character():
+    assert run_js("M.equipCompatible(null, {slot: 'Head'}, ['Head'])") is False
+
+
+def test_equip_compatible_refuses_a_slot_the_character_has_no_room_for():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Wings'}}, ['Head', 'Eyes'])") is False
+
+
+def test_equip_compatible_refuses_a_missing_slot_list():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Head'}}, null)") is False
+
+
+def test_closet_tile_equip_delegates_to_equip_compatible():
+    # renderCloset() must not re-derive the predicate inline — the Node tests
+    # above are only worth something while the grid actually calls it.
+    body = _render_closet_src()
+    assert "buildPure.equipCompatible(char, asset, economyState.slots)" in body
+    assert "if (compatible) item.onclick = () => stagePendingEquip(" in body

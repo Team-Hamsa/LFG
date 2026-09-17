@@ -3975,16 +3975,10 @@ function renderCloset() {
     item.tabIndex = 0;
     // Compatibility: only allow equip when this asset can go on the active
     // character. Client mirrors the server precheck (server re-verifies on
-    // commit). A BLANK is never equippable (#523): dressing one slot leaves a
-    // partly dressed character and credits a phantom "None" to every other
-    // slot, which the conservation audit reads as drift — Assemble ("Build this
-    // GO") is the only supported way to dress a blank. `char.blank` is the ONLY
-    // thing that can gate this: a blank's `body` is a body CLASS, not '' —
-    // swap_meta.detect_body() falls through to "skeleton" for its all-"None"
-    // attributes — so closetTileState() still shows every real trait tile, and
-    // netChanges() still reads a staged trait as a real change. The tile itself
-    // stays rendered (dimmed, .incompatible) because Extract must keep working.
-    const compatible = char && !char.blank && economyState.slots.includes(asset.slot);
+    // commit). Blanks are refused there (#523) — see equipCompatible's comment
+    // for why only `blank` can decide that. The tile itself stays rendered
+    // (dimmed, .incompatible) because Extract must keep working.
+    const compatible = buildPure.equipCompatible(char, asset, economyState.slots);
     if (!compatible) item.classList.add('incompatible');
     // With a GO selected, a trait that can't render on its body is hidden
     // entirely (it reappears on a GO whose body has the art). With no GO
