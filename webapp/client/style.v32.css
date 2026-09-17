@@ -877,6 +877,21 @@ button.back:hover { color: var(--text); border: none; }
 }
 .builder-picker-label { font-weight: 700; font-size: .85rem; }
 .builder-picker select { flex: 1 1 auto; max-width: 60%; }
+/* #T31: a step's collapsed heading is a disclosure <button> nested inside
+   its <h3 class="builder-step-title">. The global `button` rule (font,
+   pill border, margin) must be fully reset so it reads as plain heading
+   text — font/color are inherited from the h3 so they stay in sync with
+   it, and button:focus-visible's outline is left alone for keyboard use. */
+.builder-step-toggle {
+  display: block; width: 100%; text-align: left;
+  font: inherit; color: inherit;
+  background: none; border: none; border-radius: 0; margin: 0; padding: 0;
+  cursor: pointer;
+}
+.builder-step-toggle:hover, .builder-step-toggle:focus-visible { color: var(--text); }
+.builder-drop-notice {
+  margin: 8px 0 0; color: var(--muted); font-size: .8rem; font-weight: 600;
+}
 .builder-warn {
   margin: 12px 0 0; color: var(--red); font-size: .85rem; font-weight: 700;
 }
