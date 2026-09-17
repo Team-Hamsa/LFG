@@ -14,7 +14,9 @@ to `owed` (the sweep then pays it) after the operator fixed the cause — e.g.
 topped up the issuer. It first re-checks the chain for the memo-tagged payout:
 found, or the lookup errors, and it refuses (exit 1) without requeueing, so a
 payout that did land is never paid twice. It is also refused when the campaign
-budget no longer has room.
+budget no longer has room. A requeue that goes through writes a
+`fee_cover_audit` row (action `requeue`) with actor `cli:<os-login>`: the
+account owning the process, from the real UID, so `$USER` cannot forge it.
 """
 
 from __future__ import annotations
@@ -22,12 +24,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import pwd
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, db_path, fee_cover_settle, fee_cover_store, xrpl_ops  # noqa: E402
+
+
+def _audit_actor() -> str:
+    """`cli:<os-login>`, the same convention as scripts/sponsored_mint_admin.py."""
+    return f"cli:{pwd.getpwuid(os.getuid()).pw_name}"
 
 
 def _requeue(network: str, accept_tx_hash: str) -> int:
@@ -57,7 +65,7 @@ def _requeue(network: str, accept_tx_hash: str) -> int:
             if found:
                 print(f"{found} found on-ledger; not requeued")
                 return 1
-        result = fee_cover_store.requeue_failed(conn, accept_tx_hash)
+        result = fee_cover_store.requeue_failed(conn, accept_tx_hash, actor=_audit_actor())
     finally:
         conn.close()
     print(f"{accept_tx_hash}: {result}")

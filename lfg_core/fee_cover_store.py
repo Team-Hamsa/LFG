@@ -831,10 +831,18 @@ def return_to_owed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
     return cursor.rowcount == 1
 
 
-def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> str:
+def requeue_failed(
+    conn: sqlite3.Connection, accept_tx_hash: str, *, actor: str, now: int | None = None
+) -> str:
     """failed -> owed for an operator who fixed the cause. A failed payout can
     never validate later, so paying again cannot double-pay. Refused when the
-    campaign budget no longer has room for it."""
+    campaign budget no longer has room for it.
+
+    The move is audited in the same transaction (`fee_cover_audit`, action
+    `requeue`): it changes money state and clears the failure reason, so the
+    row records `actor` plus the from/to state and the reason it had been
+    parked. A refusal changes nothing and writes nothing."""
+    who = _actor(actor)
     ts = _now(now)
     with _immediate(conn):
         row = conn.execute(
@@ -852,6 +860,21 @@ def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | Non
             "UPDATE fee_cover_refunds SET state = 'owed', reason = NULL, payout_tx_hash = NULL,"
             " last_ledger_seq = NULL, claim_ledger = NULL, updated_at = ? WHERE accept_tx_hash = ?",
             (ts, accept_tx_hash),
+        )
+        audit(
+            conn,
+            network=str(row["network"]),
+            actor=who,
+            action="requeue",
+            at=ts,
+            campaign_id=campaign.id,
+            result="requeued",
+            details={
+                "accept_tx_hash": accept_tx_hash,
+                "from_state": "failed",
+                "to_state": "owed",
+                "reason": row["reason"],
+            },
         )
     return "requeued"
 
