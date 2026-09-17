@@ -2531,6 +2531,16 @@ async function offerAccept(o, row, btn) {
     applySignDelivery({ qrEl: img, linkBtn: open, toggleBtn: toggle,
       link: r.link, qrData: r.link, push: r.push });
   } catch (e) {
+    if (e.body && e.body.code === 'trustline_required') {
+      // A priced offer (e.g. a swap-remint delivery) can need a BRIX line
+      // the caller never set — same #441 recovery as marketFlow: set it,
+      // then retry this very same accept.
+      startBrixTrustline({
+        back: () => showPanel('offers-panel'),
+        onSet: () => offerAccept(o, row, btn),
+      });
+      return;
+    }
     showError(e.message);
   } finally {
     btn.disabled = false; // repeat click = fresh payload, same as bulkAccept

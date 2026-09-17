@@ -7747,6 +7747,15 @@ async def handle_pending_offer_accept(request):
             # value cleanly (see that function) — safe to re-parse here.
             price = Decimal(str(amount.get("value")))
             state, balance = await xrpl_ops.get_trustline_state(wallet, currency, issuer)
+            if state == xrpl_ops.TrustlineState.ABSENT:
+                # No line at all — not merely short. The stranded editions
+                # this endpoint exists to unstick are exactly the population
+                # likely to have never set one; same code + message the
+                # mint/market flows already use for this precondition.
+                return web.json_response(
+                    {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                    status=409,
+                )
             if state == xrpl_ops.TrustlineState.PRESENT and balance is not None and balance < price:
                 return web.json_response(
                     {
@@ -7755,6 +7764,9 @@ async def handle_pending_offer_accept(request):
                     },
                     status=409,
                 )
+            # UNKNOWN (the lookup itself failed): fail OPEN, unlike the two
+            # cases above — a transient RPC blip must never block an accept
+            # the caller could otherwise complete.
     return_url = await _request_return_url(request)
     payload = await xumm_ops.create_accept_offer_payload(
         offer_index,

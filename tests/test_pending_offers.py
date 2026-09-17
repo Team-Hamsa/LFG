@@ -407,6 +407,121 @@ def test_accept_priced_offer_insufficient_brix_409(monkeypatch):
     assert json.loads(response.body)["code"] == "insufficient_brix"
 
 
+def test_accept_priced_offer_missing_trustline_409(monkeypatch):
+    # Fix round 1 (task review of PR #457): the stranded editions this PR
+    # targets (#977, #985, #1217, #1866, #2058) are exactly the population
+    # likely to have NO BRIX line at all yet, not merely an insufficient
+    # balance. Falling through to build a payload for an ABSENT trustline
+    # would let the user sign in Xaman and have the accept fail on-ledger
+    # (tecNO_LINE class) — refuse up front with the same trustline_required
+    # code the mint/market flows already use, before any payload is built.
+    from lfg_service import app
+
+    brix_currency = "4252495800000000000000000000000000000000"
+    brix_issuer = "rBRIXISSUER"
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_CURRENCY_HEX", brix_currency)
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_ISSUER", brix_issuer)
+
+    class _Request(dict):
+        headers = {"Authorization": "Bearer test"}
+
+        async def json(self):
+            return {"offer_index": "OFFbrix"}
+
+    priced_offer = _offer(
+        offer_index="brix",
+        amount={"currency": brix_currency, "issuer": brix_issuer, "value": "10"},
+    )
+
+    async def _offers(_wallet):
+        return [priced_offer]
+
+    async def _absent_trustline(_wallet, _currency, _issuer):
+        return xrpl_ops.TrustlineState.ABSENT, None
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("no payload may be built when the caller has no BRIX trustline")
+
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setattr(
+        app, "verify_session_token", lambda _token: {"id": "user", "platform": "web"}
+    )
+    monkeypatch.setattr(
+        app, "_resolve_wallet", lambda _platform, _user: asyncio.sleep(0, result=WALLET)
+    )
+    monkeypatch.setattr(app.xrpl_ops, "bot_wallet_address", lambda: "rISSUER")
+    monkeypatch.setattr(app.xrpl_ops, "get_account_nft_offers", _offers)
+    monkeypatch.setattr(app.xrpl_ops, "get_trustline_state", _absent_trustline)
+    monkeypatch.setattr(app, "_request_return_url", _must_not_be_called)
+    monkeypatch.setattr(app.xumm_ops, "create_accept_offer_payload", _must_not_be_called)
+
+    response = asyncio.get_event_loop().run_until_complete(
+        app.handle_pending_offer_accept(_Request())
+    )
+
+    assert response.status == 409
+    assert json.loads(response.body)["code"] == "trustline_required"
+
+
+def test_accept_priced_offer_unknown_trustline_proceeds(monkeypatch):
+    # UNKNOWN (the lookup itself failed) must fail OPEN, unlike ABSENT or a
+    # confirmed-low balance: a transient RPC blip must never block a legitimate
+    # accept the caller could otherwise complete — Xaman shows the real cost,
+    # and a doomed accept (if funds truly are short) just costs a retry, not a
+    # silent block on every future attempt.
+    from lfg_service import app
+
+    brix_currency = "4252495800000000000000000000000000000000"
+    brix_issuer = "rBRIXISSUER"
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_CURRENCY_HEX", brix_currency)
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_ISSUER", brix_issuer)
+
+    class _Request(dict):
+        headers = {"Authorization": "Bearer test"}
+
+        async def json(self):
+            return {"offer_index": "OFFbrix"}
+
+    priced_offer = _offer(
+        offer_index="brix",
+        amount={"currency": brix_currency, "issuer": brix_issuer, "value": "10"},
+    )
+
+    async def _offers(_wallet):
+        return [priced_offer]
+
+    async def _unknown_trustline(_wallet, _currency, _issuer):
+        return xrpl_ops.TrustlineState.UNKNOWN, None
+
+    async def _push_token(_user):
+        return None
+
+    async def _payload(offer_id, **_kw):
+        assert offer_id == "OFFbrix"
+        return {"qr_url": "QR", "xumm_url": "LINK", "uuid": "U", "pushed": False, "push": None}
+
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setattr(
+        app, "verify_session_token", lambda _token: {"id": "user", "platform": "web"}
+    )
+    monkeypatch.setattr(
+        app, "_resolve_wallet", lambda _platform, _user: asyncio.sleep(0, result=WALLET)
+    )
+    monkeypatch.setattr(app.xrpl_ops, "bot_wallet_address", lambda: "rISSUER")
+    monkeypatch.setattr(app.xrpl_ops, "get_account_nft_offers", _offers)
+    monkeypatch.setattr(app.xrpl_ops, "get_trustline_state", _unknown_trustline)
+    monkeypatch.setattr(app, "_push_token", _push_token)
+    monkeypatch.setattr(app.xumm_ops, "create_accept_offer_payload", _payload)
+
+    response = asyncio.get_event_loop().run_until_complete(
+        app.handle_pending_offer_accept(_Request())
+    )
+
+    assert response.status == 200
+    body = json.loads(response.body)
+    assert body == {"qr": "QR", "link": "LINK", "push": None}
+
+
 def _read(name: str) -> str:
     with open(os.path.join(CLIENT, name), encoding="utf-8") as f:
         return f.read()
@@ -430,3 +545,20 @@ def test_app_js_wires_offers_tray():
     # trait tokens (Extract) render their /api/layer art via traitLayerSrc.
     assert "imgUrl(o.image, THUMB_W)" in js
     assert "traitLayerSrc(o.image_url)" in js
+
+
+def test_offer_accept_routes_missing_trustline_to_brix_flow():
+    # Fix round 1 (task review of PR #457): the stranded editions this PR
+    # targets (#977, #985, #1217, #1866, #2058) are exactly the population
+    # likely to have no BRIX line yet, so the server now answers a priced
+    # accept with 409 trustline_required (see handle_pending_offer_accept).
+    # offerAccept must route that into the existing BRIX trustline flow
+    # (same pattern as marketFlow's trustline_required handling), not just a
+    # plain showError toast that leaves the user with no actionable next
+    # step — a Source-assertion guard, since the client has no JS harness.
+    js = _read("app.js")
+    start = js.index("async function offerAccept(")
+    end = js.index("\nfunction renderBulkJob(", start)
+    body = js[start:end]
+    assert "trustline_required" in body
+    assert "startBrixTrustline" in body
