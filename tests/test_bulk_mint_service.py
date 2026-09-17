@@ -386,7 +386,7 @@ def test_bulk_start_refuses_unfunded_xrp_payment_before_any_sign_request(
         return server.xrpl_ops.DestinationPreflight(True, False, 15_000_000, 2)
 
     async def _no_lfgo(*_args, **_kwargs):
-        return None
+        return server.xrpl_ops.TrustlineState.ABSENT, None
 
     built = []
 
@@ -400,7 +400,7 @@ def test_bulk_start_refuses_unfunded_xrp_payment_before_any_sign_request(
     monkeypatch.setattr(server.config, "XRPL_RESERVE_BASE_DROPS", 1_000_000)
     monkeypatch.setattr(server.config, "XRPL_RESERVE_INC_DROPS", 200_000)
     monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
-    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_balance", _no_lfgo)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_state", _no_lfgo)
     monkeypatch.setattr(bulk_mint_flow.xumm_ops, "create_payment_payload", _payload)
 
     resp = _run(server.handle_bulk_mint_start(_post_request("/api/mint/bulk", {"quantity": 2})))

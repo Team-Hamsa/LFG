@@ -289,16 +289,22 @@ def _run(coro):
         loop.close()
 
 
+def _stub_trustline(monkeypatch, state, balance=None):
+    monkeypatch.setattr(
+        bulk_mint_flow.xrpl_ops, "get_trustline_state", _async_return((state, balance))
+    )
+
+
 @pytest.fixture
 def _xrp_path(monkeypatch):
     """Price 9 XRP, reserves 1 XRP + 0.2 XRP per owned object, a 12-drop fee,
-    and a wallet holding no LFGO. Returns the payment payloads built."""
+    and a wallet with no LFGO trustline. Returns the payment payloads built."""
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
     monkeypatch.setattr(config, "MINT_PRICE_XRP", "9")
     monkeypatch.setattr(config, "XRPL_RESERVE_BASE_DROPS", 1_000_000)
     monkeypatch.setattr(config, "XRPL_RESERVE_INC_DROPS", 200_000)
     monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
-    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None))
+    _stub_trustline(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
     built = []
 
     async def _payload(destination, **kwargs):
@@ -360,10 +366,18 @@ def test_xrp_path_snapshot_missing_fails_open(_xrp_path, snapshot):
 def test_lfgo_path_unaffected(_xrp_path, monkeypatch):
     """LFGO holders pay in LFGO: the XRP funding check never applies to them."""
     monkeypatch.setattr(config, "MINT_PRICE_LFGO", "1")
-    monkeypatch.setattr(
-        bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(Decimal("2"))
-    )
+    _stub_trustline(monkeypatch, xrpl_ops.TrustlineState.PRESENT, Decimal("2"))
     j = _two_unit_job()
     _run(j.prepare_payment(_snapshot(1_000_000, 4)))  # 0 XRP spendable
     assert j.pay_with == "LFGO"
+    assert len(_xrp_path) == 1
+
+
+def test_xrp_path_not_refused_when_the_trustline_lookup_failed(_xrp_path, monkeypatch):
+    """Same fail-open rule as single mint: an UNKNOWN line state (the lookup
+    itself failed) must never refuse a wallet that may well hold LFGO."""
+    _stub_trustline(monkeypatch, xrpl_ops.TrustlineState.UNKNOWN)
+    j = _two_unit_job()
+    _run(j.prepare_payment(_snapshot(15_000_000, 4)))  # a known line would refuse
+    assert j.pay_with == "XRP"
     assert len(_xrp_path) == 1

@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import threading
 import time
 
@@ -13,7 +14,7 @@ import pytest
 from xrpl.wallet import Wallet
 
 import lfg_service.app as app
-from lfg_core import memos
+from lfg_core import memos, payment_ledger
 from lfg_core.signing import store
 
 DEV_OWNER = Wallet.create().classic_address
@@ -680,20 +681,29 @@ def _cancelled_payment_row():
     return row
 
 
-def _late_records(tmp_path, request_id, tx_hash):
-    """Late-signature records on disk for one (request, hash) pair, matched by
-    content so the test does not depend on how the files are named."""
+def _late_records_for_hash(tmp_path, tx_hash):
+    """Late-signature records on disk for one transaction, matched by content
+    so the test does not depend on how the files are named. One payment is one
+    record, however many sign requests claimed it."""
     root = tmp_path / "records"
     if not root.is_dir():
         return []
-    found = []
-    for path in root.iterdir():
-        if path.suffix != ".json":
-            continue
-        record = json.loads(path.read_text())
-        if record.get("request_id") == request_id and record.get("tx_hash") == tx_hash:
-            found.append(record)
-    return found
+    return [
+        record
+        for path in sorted(root.iterdir())
+        if path.suffix == ".json"
+        for record in [json.loads(path.read_text())]
+        if record.get("tx_hash") == tx_hash
+    ]
+
+
+def _late_records(tmp_path, request_id, tx_hash):
+    """Those records that name this sign request."""
+    return [
+        record
+        for record in _late_records_for_hash(tmp_path, tx_hash)
+        if any(r.get("request_id") == request_id for r in record.get("requests", []))
+    ]
 
 
 def _error_logs_naming(caplog, *needles):
@@ -764,21 +774,100 @@ def test_late_hash_on_cancelled_row_is_recorded(monkeypatch, tmp_path, caplog):
     assert records[0]["wallet"] == DEV_OWNER
     assert records[0]["amount"] == "5000000"
     assert records[0]["destination"] == app.xrpl_ops.bot_wallet_address()
-    assert _error_logs_naming(caplog, row["id"], DEV_OWNER, HASH)
+    assert records[0]["currency"] == "XRP"
+    assert records[0]["consumed_payment"] is None  # nothing claimed it
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:", row["id"], DEV_OWNER, HASH)
     _assert_row_untouched(row["id"])
 
 
+def test_one_payment_is_one_record_across_every_request_it_matches(monkeypatch, tmp_path, caplog):
+    """A Payment carries nothing that ties it to ONE sign request, so a real
+    payment matches every resolved row of the same shape. It is still one
+    payment: one record, one alarm, and every request id on that record."""
+    rows = [_cancelled_payment_row() for _ in range(3)]
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        for row in rows:
+            assert _post(row["id"], {"hash": HASH}).status == 409
+    records = _late_records_for_hash(tmp_path, HASH)
+    assert len(records) == 1
+    assert [r["request_id"] for r in records[0]["requests"]] == [row["id"] for row in rows]
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_late_payment_record_carries_the_consumed_state(monkeypatch, tmp_path, caplog):
+    """A late payment a mint already claimed is not a refund at all, so the
+    record carries the consumed-payment row and the alarm says where to look."""
+    row = _cancelled_payment_row()
+    payment_ledger.try_consume(
+        HASH, DEV_OWNER, app.xrpl_ops.bot_wallet_address(), claimant="mint:abc"
+    )
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    (record,) = _late_records_for_hash(tmp_path, HASH)
+    assert record["consumed_payment"]["claimant"] == "mint:abc"
+    (alarm,) = _error_logs_naming(caplog, "LATE SIGNATURE:", HASH)
+    assert "consumed_payments" in alarm.getMessage()
+
+
+def test_consumed_lookup_failure_is_recorded_as_unknown(monkeypatch, tmp_path, caplog):
+    """An unreadable consumed-payment ledger must not read as "unclaimed" —
+    nor break the answer: the record says the state is unknown."""
+    row = _cancelled_payment_row()
+
+    def _boom(_tx_hash):
+        raise sqlite3.Error("ledger unreadable")
+
+    monkeypatch.setattr(app.payment_ledger, "consumed_payment", _boom)
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    (record,) = _late_records_for_hash(tmp_path, HASH)
+    assert record["consumed_payment_known"] is False
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_non_payment_late_signature_raises_no_refund_alarm(monkeypatch, tmp_path, caplog):
+    """A late TrustSet or offer moves no money — alarming on one only sent an
+    admin looking for a payment to refund ("… (None to None)")."""
+    row = _row()  # the TrustSet TXJSON
+    store.set_state(row["id"], "cancelled")
+    _fake_tx(monkeypatch, result=_onledger())
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    assert _late_records_for_hash(tmp_path, HASH) == []
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:") == []
+
+
+def test_matched_payment_past_the_grace_is_recorded(monkeypatch, tmp_path, caplog):
+    """Posted while the row was still pending but long past its grace: the row
+    retires `expired` as before, and the payment is journaled all the same."""
+    row = _row(txjson=_mint_payment(), ttl=-(app._SIGN_RESULT_GRACE_SECONDS + 30))
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH})
+    assert r.status == 410 and _body(r)["code"] == "expired"
+    assert store.get(row["id"])["state"] == "expired"
+    assert len(_late_records_for_hash(tmp_path, HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
 @pytest.mark.parametrize("lookup", ["not_found", "pending"])
-def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, lookup):
+def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, caplog, lookup):
     """Never validated within the re-check's bound: no record, and the
-    re-check ends on its own."""
+    re-check ends on its own. The hash is still logged when we answer, so a
+    payment we could not confirm is never silent."""
     row = _cancelled_payment_row()
     calls = _fake_tx_sequence(monkeypatch, _not_validated(lookup))
-    r = _post_and_settle(row["id"])
+    with caplog.at_level(logging.ERROR):
+        r = _post_and_settle(row["id"])
     assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
     assert len(calls) > 1  # the post's own lookup, then the re-check's polls
     assert app._late_signature_rechecks == {}
     assert _late_records(tmp_path, row["id"], HASH) == []
+    assert _error_logs_naming(caplog, row["id"], HASH)  # logged, not silent
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:") == []  # but not a refund alarm
     _assert_row_untouched(row["id"])
 
 
@@ -795,7 +884,7 @@ def test_late_hash_validated_on_a_later_poll_is_recorded(monkeypatch, tmp_path, 
     assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
     assert len(calls) == 3
     assert len(_late_records(tmp_path, row["id"], HASH)) == 1
-    assert len(_error_logs_naming(caplog, row["id"], DEV_OWNER, HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", row["id"], DEV_OWNER, HASH)) == 1
     _assert_row_untouched(row["id"])
 
 
@@ -846,7 +935,7 @@ def test_duplicate_late_posts_share_one_recheck(monkeypatch, tmp_path, caplog):
         _run(go())
     assert len(started) == 1
     assert len(_late_records(tmp_path, row["id"], HASH)) == 1
-    assert len(_error_logs_naming(caplog, HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
 
 
 def test_concurrent_late_posts_record_and_alarm_once(monkeypatch, tmp_path, caplog):
@@ -872,7 +961,7 @@ def test_concurrent_late_posts_record_and_alarm_once(monkeypatch, tmp_path, capl
         responses = _run(go())
     assert [r.status for r in responses] == [409, 409]
     assert len(_late_records(tmp_path, row["id"], HASH)) == 1
-    assert len(_error_logs_naming(caplog, "LATE SIGNATURE", HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
 
 
 def test_cleanup_cancels_pending_late_rechecks(monkeypatch):
@@ -914,7 +1003,7 @@ def test_late_hash_repost_idempotent(monkeypatch, tmp_path, caplog):
     assert _body(second) == _ALREADY_RESOLVED_CANCELLED
     assert len(_late_records(tmp_path, row["id"], HASH)) == 1
     # One refund alarm per payment: a repost must not read as a second charge.
-    assert len(_error_logs_naming(caplog, HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
     _assert_row_untouched(row["id"])
 
 

@@ -511,7 +511,7 @@ def test_unfunded_xrp_payment_is_refused_before_any_sign_request(_service_env, m
     monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
 
     async def _no_lfgo(*_args, **_kwargs):
-        return None
+        return xrpl_ops.TrustlineState.ABSENT, None
 
     built = []
 
@@ -519,7 +519,7 @@ def test_unfunded_xrp_payment_is_refused_before_any_sign_request(_service_env, m
         built.append(kwargs)
         return {"xumm_url": "lfg-wc://wc-pay", "uuid": "wc-pay"}
 
-    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", _no_lfgo)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_state", _no_lfgo)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", _payload)
     monkeypatch.setattr(server, "_run_mint_session_and_publish", _parked)
 

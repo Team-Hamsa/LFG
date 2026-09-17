@@ -10,6 +10,7 @@ import base64
 import contextlib
 import dataclasses
 import datetime
+import fcntl
 import functools
 import hashlib
 import hmac
@@ -72,6 +73,7 @@ from lfg_core import (
     mint_flow,
     nft_index,
     owner_lock,
+    payment_ledger,
     rarity,
     share_clicks,
     shop,
@@ -9717,31 +9719,55 @@ _LATE_RECHECK_MAX_SECONDS = 180.0
 _late_signature_rechecks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
 
-def _save_late_signature_record(record: dict[str, Any]) -> tuple[str, bool]:
+def _save_late_signature_record(
+    record: dict[str, Any], request: dict[str, Any]
+) -> tuple[str, bool]:
     """Journal a late signature (#513) in ECONOMY_RECORDS_DIR, next to the
-    other records an admin reconciles by hand. One file per (request, hash):
-    the complete record goes to a temp file that is then hard-linked into
-    place, and a link never replaces an existing file, so concurrent or
-    repeated posts create the record exactly once. Returns `(path, created)`;
-    `created` is False when the pair is already on record. Raises on a disk
-    failure."""
+    other records an admin reconciles by hand.
+
+    One file per TRANSACTION, not per sign request: a Payment carries nothing
+    that ties it to one request, so the same payment matches every resolved
+    row of the same shape, and a record each would read as that many refunds.
+    The first claim writes the file — built complete in a temp file and
+    hard-linked into place, which never clobbers, so concurrent posts create
+    it exactly once — and later claims append their request to it.
+
+    Returns `(path, created)`; `created` is False when this transaction was
+    already on record. Raises on a disk failure."""
     records_dir = config.ECONOMY_RECORDS_DIR
     os.makedirs(records_dir, exist_ok=True)
-    path = os.path.join(
-        records_dir, f"late-signature-{record['request_id']}-{record['tx_hash']}.json"
-    )
+    path = os.path.join(records_dir, f"late-signature-{record['tx_hash']}.json")
     fd, tmp = tempfile.mkstemp(dir=records_dir, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(record, f, indent=2)
+            json.dump({**record, "requests": [request]}, f, indent=2)
         try:
             os.link(tmp, path)
         except FileExistsError:
+            _append_late_signature_request(path, request)
             return path, False
         return path, True
     finally:
         with contextlib.suppress(OSError):
             os.remove(tmp)
+
+
+def _append_late_signature_request(path: str, request: dict[str, Any]) -> None:
+    """Add another sign request that claimed an already-recorded payment.
+    Held under an exclusive lock so two concurrent posts cannot lose one."""
+    with open(path, "r+") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            record = json.load(f)
+            requests = record.setdefault("requests", [])
+            if any(r.get("request_id") == request["request_id"] for r in requests):
+                return
+            requests.append(request)
+            f.seek(0)
+            json.dump(record, f, indent=2)
+            f.truncate()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
@@ -9761,10 +9787,16 @@ async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
         return
     if (result or {}).get("validated"):
         await _record_late_signature(row, tx_hash, result)
-    else:
-        # Joey returns the hash right after submitting, so the post usually
-        # beats validation. Keep checking in the background.
-        _spawn_late_signature_recheck(row, tx_hash, result)
+        return
+    # Joey returns the hash right after submitting, so the post usually beats
+    # validation. Keep checking in the background — and say so now, so a
+    # payment we could not confirm never passes silently.
+    logging.error(
+        f"late signature check: tx {tx_hash} posted by {row['wallet']} for {row['state']} "
+        f"sign request {row['id']} is not validated yet — re-checking for up to "
+        f"{int(_LATE_RECHECK_MAX_SECONDS)}s"
+    )
+    _spawn_late_signature_recheck(row, tx_hash, result)
 
 
 def _log_unverifiable_late_hash(row: dict[str, Any], tx_hash: str, exc: Exception) -> None:
@@ -9860,32 +9892,64 @@ async def _record_late_signature(row: dict[str, Any], tx_hash: str, result: dict
         return
     if not matched or (result.get("meta") or {}).get("TransactionResult") != "tesSUCCESS":
         return
+    tx_type = tx.get("TransactionType")
+    if tx_type != "Payment":
+        # Only a Payment can owe a refund; a late TrustSet or offer moves no
+        # money, and alarming on one only sent an admin hunting for a payment.
+        logging.info(
+            f"late signature {request_id}: {tx_type} {tx_hash} validated after the request "
+            f"resolved; no payment to refund"
+        )
+        return
     amount, destination = tx.get("Amount"), tx.get("Destination")
+    # A late payment may already have been honoured: any waiting session for
+    # the same amount can claim it on-ledger, so the record carries the
+    # consumed-payment row (None = unclaimed, absent = the read failed).
+    consumed: dict[str, Any] | None = None
+    consumed_known = True
+    try:
+        consumed = await asyncio.to_thread(payment_ledger.consumed_payment, tx_hash)
+    except Exception:
+        consumed_known = False
+        logging.warning(f"late signature {tx_hash}: consumed-payment lookup failed", exc_info=True)
     record = {
-        "request_id": request_id,
-        "request_state": row["state"],
-        "wallet": wallet,
         "tx_hash": tx_hash,
-        "transaction_type": tx.get("TransactionType"),
+        "wallet": wallet,
+        "transaction_type": tx_type,
         "destination": destination,
         "amount": amount,
+        "currency": amount.get("currency") if isinstance(amount, dict) else "XRP",
         "network": config.XRPL_NETWORK,
-        "txjson": row["txjson"],
+        "consumed_payment": consumed,
+        "consumed_payment_known": consumed_known,
         "recorded_at": time.time(),
     }
+    request_entry = {
+        "request_id": request_id,
+        "request_state": row["state"],
+        "txjson": row["txjson"],
+        "noticed_at": time.time(),
+    }
     try:
-        path, created = await asyncio.to_thread(_save_late_signature_record, record)
+        path, created = await asyncio.to_thread(_save_late_signature_record, record, request_entry)
     except Exception:
         # The log line below is then the only trace of the payment.
         logging.error(f"late signature record write failed: {traceback.format_exc()}")
         path, created = "(record NOT written)", True
     if not created:
-        logging.info(f"late signature {request_id} / {tx_hash} already recorded at {path}")
+        # The same payment, claimed by another resolved request: one payment,
+        # one alarm. The extra request id is appended to the record above.
+        logging.info(
+            f"late signature {request_id}: tx {tx_hash} is already recorded at {path}; "
+            f"this request was added to it"
+        )
         return
     logging.error(
         f"LATE SIGNATURE: {wallet} signed {row['state']} sign request {request_id} anyway; "
-        f"tx {tx_hash} validated tesSUCCESS ({amount} to {destination}). Refund it by hand "
-        f"unless a mint or other flow consumed the payment. Record: {path}"
+        f"tx {tx_hash} validated tesSUCCESS ({amount} to {destination}). Before refunding, "
+        f"check consumed_payments in the app DB for this hash — a session may have claimed "
+        f"it, and an unclaimed non-XRP payment stays spendable as a mint credit for "
+        f"MINT_CREDIT_TTL_SECONDS. Record: {path}"
     )
 
 
@@ -9997,6 +10061,9 @@ async def handle_sign_result(request):
     # is abandoned, and whatever flow was waiting on it is gone. Retire it as
     # expired rather than resurrecting it.
     if time.time() > row["expires_at"] + _SIGN_RESULT_GRACE_SECONDS:
+        # The money moved all the same, so journal it exactly like a hash
+        # posted for an already-resolved row (#513).
+        await _record_late_signature(row, tx_hash, result)
         return await _record_sign_outcome(
             request_id,
             "expired",

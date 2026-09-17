@@ -1866,7 +1866,7 @@ def test_sponsored_payment_methods_never_construct_a_payment(monkeypatch):
     async def forbidden(*args, **kwargs):
         raise AssertionError("payment boundary was reached")
 
-    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", forbidden)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_state", forbidden)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", forbidden)
 
     with pytest.raises(RuntimeError, match="sponsored"):

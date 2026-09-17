@@ -242,14 +242,19 @@ class MintSession:
         payload exists (#514). Without one (regenerate) nothing is refused."""
         if self.sponsored:
             raise RuntimeError("sponsored sessions do not prepare payment")
-        balance = await xrpl_ops.get_trustline_balance(
+        line_state, balance = await xrpl_ops.get_trustline_state(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
         if balance is not None and balance >= Decimal(config.MINT_PRICE_LFGO):
             self.pay_with, self.pay_amount = "LFGO", config.MINT_PRICE_LFGO
         else:
             self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
-            refuse_unfunded_xrp_payment(snapshot, self.pay_amount)
+            # UNKNOWN means the line lookup itself failed (one websocket, no
+            # failover, unlike the snapshot's JSON-RPC client). Refusing then
+            # would tell an LFGO holder to buy XRP they do not need, so only a
+            # known line state may refuse.
+            if line_state is not xrpl_ops.TrustlineState.UNKNOWN:
+                refuse_unfunded_xrp_payment(snapshot, self.pay_amount)
         p = self._payment_params()
         self.payment_link = xumm_ops.generate_static_payment_link(
             p["destination"], value=p["value"], currency=p["currency"], issuer=p["issuer"]
