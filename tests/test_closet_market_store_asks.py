@@ -114,3 +114,60 @@ def test_update_order_rejects_unknown_fields_and_states():
         cms.update_order(c, ask["id"], owner="rEvil")
     with pytest.raises(ValueError):
         cms.update_order(c, ask["id"], state="bogus")
+
+
+# --- #516 D5: "None" (an empty slot) isn't a real asset — refuse it up front,
+# before any inventory check, regardless of slot (Body included). ------------
+
+
+def test_create_ask_refuses_none_value():
+    c = _conn()
+    with pytest.raises(cms.OrderError) as e:
+        cms.create_ask(c, owner=SELLER, slot="Head", value="None", price_brix="1", platform=None)
+    assert e.value.code == "invalid_asset"
+
+
+def test_create_ask_allows_body_asset():
+    c = _conn()
+    es.set_closet_contents(c, SELLER, [("Body", "Skeleton", 1)], [])
+    ask = cms.create_ask(
+        c, owner=SELLER, slot="Body", value="Skeleton", price_brix="4", platform=None
+    )
+    assert ask["state"] == cms.OPEN
+    assert (ask["slot"], ask["value"]) == ("Body", "Skeleton")
+
+
+# --- #516: ensure_schema races another process's identical ALTER on an older
+# DB — mirrors fee_cover_store._migrate's tolerance of the same shape of
+# failure. ---------------------------------------------------------------
+
+
+def test_ensure_schema_tolerates_concurrent_duplicate_column():
+    """user_lls now ships in the base CREATE TABLE, so a fresh DB never
+    attempts its ALTER — hide it from one PRAGMA read (the stale view a
+    concurrent migrator would see) to force the attempt, then patch that
+    ALTER to fail exactly like a losing racer's would. ensure_schema must
+    tolerate it and finish, mirroring fee_cover_store._migrate."""
+    conn = sqlite3.connect(":memory:")
+    real_execute = conn.execute
+    raced = []
+
+    class _RacedConn:
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA table_info(closet_orders)"):
+                rows = [r for r in real_execute(sql, *args).fetchall() if r[1] != "user_lls"]
+                return iter(rows)
+            if sql.startswith("ALTER TABLE closet_orders ADD COLUMN user_lls"):
+                raced.append(sql)
+                raise sqlite3.OperationalError("duplicate column name: user_lls")
+            return real_execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    cms.ensure_schema(_RacedConn())  # would raise "duplicate column" unguarded
+    assert raced
+    # tolerated once; the column genuinely exists already (baked into _SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(closet_orders)")}
+    assert "user_lls" in cols
+    conn.close()

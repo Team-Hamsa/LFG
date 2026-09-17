@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from lfg_core import closet_market_store as cms
 from lfg_core import crypto_condition
+from lfg_core.signing import context as signing_context
 from lfg_service import app as server
 from tests import test_closet_market_api as api_tests
 from tests.test_closet_market_api import BIDDER, ME, _db, _json, _open_bid, _req, _run
@@ -85,6 +86,17 @@ def test_bid_create_refusals(closet_env, monkeypatch):
     _trustline(monkeypatch, balance="9.99")
     resp = _run(server.handle_closet_bid_create(_req("POST", "/", body)))
     assert resp.status == 409 and _json(resp)["code"] == "insufficient_brix"
+
+
+def test_bid_create_refuses_none_value(closet_env):
+    """(#516 D5) refused before _known_trait is even consulted — no mock for
+    it is set up here, so hitting that lookup unguarded would 404, not 400."""
+    resp = _run(
+        server.handle_closet_bid_create(
+            _req("POST", "/", {"slot": "Head", "value": "None", "price_brix": "10"})
+        )
+    )
+    assert resp.status == 400 and _json(resp)["code"] == "invalid_asset"
 
 
 def test_bid_create_refuses_a_second_live_bid(closet_env, monkeypatch):
@@ -397,3 +409,34 @@ def test_ask_buy_payload_failure_leaves_the_fill_funds_pending(closet_env, monke
     assert [(r["state"], r["user_lls"], r["payload_uuid"]) for r in rows] == [
         (cms.FUNDS_PENDING, 1000 + 300, None)
     ]
+
+
+# --- #516 D4: Closet Market signing (TokenEscrow / a pinned-LLS Payment)
+# isn't available on WalletConnect (Joey) yet — refuse both signature-needing
+# actions rather than build a payload the wallet can't sign. The provider is
+# read from lfg_core.signing.context, which require_auth sets for the
+# request in production; WEBAPP_DEV_MODE skips that, so these tests set the
+# ambient context directly, the same way test_signing_context.py does.
+
+
+def test_closet_bid_refused_for_walletconnect_session(closet_env):
+    body = {"slot": "Head", "value": "Tiara", "price_brix": "10"}
+    with signing_context.use("walletconnect", ME):
+        resp = _run(server.handle_closet_bid_create(_req("POST", "/", body)))
+    assert resp.status == 409
+    assert _json(resp) == {
+        "code": "wallet_unsupported",
+        "error": "Closet Market orders need Xaman for now.",
+    }
+
+
+def test_closet_buy_refused_for_walletconnect_session(closet_env):
+    with signing_context.use("walletconnect", BIDDER):
+        resp = _run(
+            server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": "bogus"}))
+        )
+    assert resp.status == 409
+    assert _json(resp) == {
+        "code": "wallet_unsupported",
+        "error": "Closet Market orders need Xaman for now.",
+    }

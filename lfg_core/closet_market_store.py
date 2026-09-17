@@ -213,11 +213,21 @@ _ADDED_COLUMNS = (
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Every closet_market_store caller opens its own connection
+    (_closet_conn / _closet_db), so two processes can race the same
+    check-then-ALTER on an older DB: both see a column missing, and the
+    loser's ALTER fails with "duplicate column name" — the outcome we
+    wanted anyway, so it's tolerated like fee_cover_store._migrate's own
+    race guard."""
     conn.executescript(_SCHEMA)
     for table, column, decl in _ADDED_COLUMNS:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
     conn.commit()
 
 
@@ -367,6 +377,11 @@ def create_ask(
     platform: str | None,
     now: int | None = None,
 ) -> dict[str, Any]:
+    if value == "None":
+        # (#516 D5) "None" is the absence of a trait in a slot, not a trait
+        # itself — every slot including Body stays sellable, but there is
+        # nothing to hand over for this one. Checked before touching the DB.
+        raise OrderError("invalid_asset", "an empty slot can't be traded")
     ts = now if now is not None else _now()
     oid = new_id()
     with _immediate(conn):
