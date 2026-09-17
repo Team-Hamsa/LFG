@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+from decimal import Decimal
 
 # Set env vars before any lfg_core.config import so module-level constants
 # are frozen with the correct values even when this file is collected before
@@ -104,6 +105,49 @@ def test_claimable_drops_unpriceable_currency_offers(monkeypatch):
     ]
     kept = xrpl_ops.filter_claimable_offers(offers, WALLET, 1_800_000_000)
     assert [o["offer_index"] for o in kept] == ["OFFgift"]
+
+
+def test_swap_delivery_priced_in_swap_offer_pair_is_labeled(monkeypatch):
+    # Greptile P1 (PR #457, thread 3897184743): a deployment may configure
+    # BRIX_CURRENCY_HEX/BRIX_ISSUER independently of SWAP_OFFER_CURRENCY_HEX/
+    # SWAP_OFFER_ISSUER (CLAUDE.md's "Per-kind denomination" — BRIX_* defaults
+    # to the SWAP_OFFER_* pair, so today's deployments have them equal, which
+    # made this latent). swap_flow.py prices delivery offers in the
+    # SWAP_OFFER pair specifically, so offer_price_label must recognize BOTH
+    # configured pairs — not just BRIX_* — or a divergent deployment strands
+    # the NFT exactly like the original bug this PR fixed.
+    monkeypatch.setattr(
+        xrpl_ops.config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+    )
+    monkeypatch.setattr(xrpl_ops.config, "BRIX_ISSUER", "rBRIXISSUER")
+    monkeypatch.setattr(
+        xrpl_ops.config, "SWAP_OFFER_CURRENCY_HEX", "ABABABABABABABABABABABABABABABABABABABAB"
+    )
+    monkeypatch.setattr(xrpl_ops.config, "SWAP_OFFER_ISSUER", "rSWAPOFFERISSUER")
+    swap_amount = {
+        "currency": "ABABABABABABABABABABABABABABABABABABABAB",
+        "issuer": "rSWAPOFFERISSUER",
+        "value": "10",
+    }
+    brix_amount = {
+        "currency": "4252495800000000000000000000000000000000",
+        "issuer": "rBRIXISSUER",
+        "value": "5",
+    }
+    unknown_amount = {"currency": "4C46", "issuer": "rSOMEONEELSE", "value": "1"}
+    offers = [
+        _offer(offer_index="swap", amount=swap_amount),
+        _offer(offer_index="brix", amount=brix_amount),
+        _offer(offer_index="unknown", amount=unknown_amount),
+    ]
+    # An offer priced in the SWAP_OFFER pair is claimable and labeled.
+    assert xrpl_ops.offer_price_label(swap_amount) == "10 BRIX"
+    # An offer priced in the BRIX pair is claimable and labeled.
+    assert xrpl_ops.offer_price_label(brix_amount) == "5 BRIX"
+    # An unknown IOU is not claimable (fail closed, unchanged).
+    assert xrpl_ops.offer_price_label(unknown_amount) is None
+    kept = xrpl_ops.filter_claimable_offers(offers, WALLET, 1_800_000_000)
+    assert [o["offer_index"] for o in kept] == ["OFFswap", "OFFbrix"]
 
 
 def test_offer_price_label_forms(monkeypatch):
@@ -308,6 +352,59 @@ def test_pending_offers_config_failure_uses_availability_error_contract(monkeypa
         "error": "offer lookup failed",
         "code": "pending_unavailable",
     }
+
+
+def test_accept_priced_offer_insufficient_brix_409(monkeypatch):
+    # Fail-closed like the marketplace buy (Buy is fail-closed via
+    # verify_sell_offer): a BRIX-priced pending offer must never reach a
+    # built payload when the caller can't afford it on-ledger — that would
+    # cost them a doomed Xaman signature instead of an honest refusal.
+    from lfg_service import app
+
+    brix_currency = "4252495800000000000000000000000000000000"
+    brix_issuer = "rBRIXISSUER"
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_CURRENCY_HEX", brix_currency)
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_ISSUER", brix_issuer)
+
+    class _Request(dict):
+        headers = {"Authorization": "Bearer test"}
+
+        async def json(self):
+            return {"offer_index": "OFFbrix"}
+
+    priced_offer = _offer(
+        offer_index="brix",
+        amount={"currency": brix_currency, "issuer": brix_issuer, "value": "10"},
+    )
+
+    async def _offers(_wallet):
+        return [priced_offer]
+
+    async def _low_balance(_wallet, _currency, _issuer):
+        return xrpl_ops.TrustlineState.PRESENT, Decimal("1")
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("no payload may be built when BRIX balance is insufficient")
+
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setattr(
+        app, "verify_session_token", lambda _token: {"id": "user", "platform": "web"}
+    )
+    monkeypatch.setattr(
+        app, "_resolve_wallet", lambda _platform, _user: asyncio.sleep(0, result=WALLET)
+    )
+    monkeypatch.setattr(app.xrpl_ops, "bot_wallet_address", lambda: "rISSUER")
+    monkeypatch.setattr(app.xrpl_ops, "get_account_nft_offers", _offers)
+    monkeypatch.setattr(app.xrpl_ops, "get_trustline_state", _low_balance)
+    monkeypatch.setattr(app, "_request_return_url", _must_not_be_called)
+    monkeypatch.setattr(app.xumm_ops, "create_accept_offer_payload", _must_not_be_called)
+
+    response = asyncio.get_event_loop().run_until_complete(
+        app.handle_pending_offer_accept(_Request())
+    )
+
+    assert response.status == 409
+    assert json.loads(response.body)["code"] == "insufficient_brix"
 
 
 def _read(name: str) -> str:

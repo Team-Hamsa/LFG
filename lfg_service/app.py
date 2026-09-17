@@ -7710,7 +7710,10 @@ async def handle_pending_offer_accept(request):
     """Build the XUMM accept payload for ONE pending offer, on click only
     (open-payload cap, #260). Fail-closed like the marketplace buy: the offer
     is re-verified on-ledger — still live, still a sell offer locked to the
-    caller — immediately before the payload is built."""
+    caller — immediately before the payload is built. A BRIX-priced offer
+    additionally checks the caller's balance first, so a doomed accept (funds
+    too low to clear on-ledger) is refused honestly instead of costing the
+    user a wasted Xaman signature."""
     if config.WEBAPP_DEV_MODE:
         return web.json_response({"error": "not available in dev mode"}, status=501)
     body = await request.json()
@@ -7725,13 +7728,33 @@ async def handle_pending_offer_accept(request):
         return web.json_response(
             {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
         )
-    live = {o["offer_index"] for o in xrpl_ops.filter_claimable_offers(offers, wallet, time.time())}
-    if offer_index not in live:
+    claimable = {
+        o["offer_index"]: o for o in xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
+    }
+    matched = claimable.get(offer_index)
+    if matched is None:
         # Verified absent (lookup succeeded above): claimed already, expired,
         # or never this wallet's — either way there is nothing to sign.
         return web.json_response(
             {"error": "offer no longer available", "code": "offer_gone"}, status=410
         )
+    amount = matched.get("amount")
+    if isinstance(amount, dict):
+        currency, issuer = amount.get("currency"), amount.get("issuer")
+        if isinstance(currency, str) and isinstance(issuer, str):
+            # filter_claimable_offers already proved this dict is one of the
+            # configured BRIX-shaped pairs and offer_price_label() parses its
+            # value cleanly (see that function) — safe to re-parse here.
+            price = Decimal(str(amount.get("value")))
+            state, balance = await xrpl_ops.get_trustline_state(wallet, currency, issuer)
+            if state == xrpl_ops.TrustlineState.PRESENT and balance is not None and balance < price:
+                return web.json_response(
+                    {
+                        "error": f"you hold {balance} BRIX; this offer costs {price} BRIX",
+                        "code": "insufficient_brix",
+                    },
+                    status=409,
+                )
     return_url = await _request_return_url(request)
     payload = await xumm_ops.create_accept_offer_payload(
         offer_index,
