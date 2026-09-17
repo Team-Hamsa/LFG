@@ -1255,7 +1255,15 @@ Refund = min(promise, observed
 `NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
 accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
 a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +
-`lfg:fee_cover:<accept hash>`. Stop blocks new promises and honors open ones;
+`lfg:fee_cover:<accept hash>`. Settlement finds the accept in the history
+archive by the bid's offer index, searching from the bid's OWN creation — the
+quote closed with that index (`fee_cover_store.bid_created_at`) less 1 h —
+never from the promise write, which a reconciled quote or a late poll can put
+hours after the fill (#515); a promise no quote links to searches with no time
+bound (offer indexes are unique). The settling account must be a broker with a
+measured rate: the allowlist's current one, or the rate the promise saved for
+that same broker, so an allowlist edit never declines a promise already open.
+Stop blocks new promises and honors open ones;
 an Update applies to promises written after it, which `record_promise` enforces
 by re-reading the campaign under its own write lock and sizing the promise
 there (a caller's stale read can never admit one at the old coverage). The
@@ -1280,10 +1288,16 @@ the margin in force at claim time, so a floor re-derived from today's
 operator fixes the cause, then requeues either with
 `scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`
 (it re-checks the chain first and refuses, exit 1, if the payout is found or
-the lookup errors).
+the lookup errors). A requeue that goes through writes a `fee_cover_audit` row
+(action `requeue`, actor `cli:<os-login>`, from/to state and the failure reason
+it clears); a refusal writes nothing.
 Report/audit: `scripts/fee_cover_report.py --network <net> --audit` (pm2
 `lfg-fee-cover-audit` / `stg-fee-cover-audit`, 03:40 UTC — registering it is an
 ops step: `pm2 start ecosystem.prod.config.js --only lfg-fee-cover-audit && pm2 save`).
+Staging rehearsal before any mainnet Start: `scripts/fee_cover_rehearsal.py`
+(testnet only, exit 2 elsewhere; script-held broker/intermediate/seller wallets
+whose seeds live only in its `--state` file, refused inside the repo) — runbook
+`docs/ops/fee-cover-rehearsal.md`.
 Refund Payments count in `sourcetag_metrics` `xrp_payment_volume.out_drops`;
 they are not marketplace volume. Ships with no campaign active.
 
