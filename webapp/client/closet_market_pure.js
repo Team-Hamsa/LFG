@@ -51,6 +51,7 @@ export function mapBookRow(row) {
     slot: row.slot,
     value: row.value,
     title: `${row.slot}: ${row.value}`,
+    imageUrl: row.image_url ?? null,
     bestAsk: row.best_ask_brix ?? null,
     bestBid: row.best_bid_brix ?? null,
     askLabel: row.best_ask_brix == null ? 'No asks' : `Ask ${row.best_ask_brix} BRIX${count(row.ask_count)}`,

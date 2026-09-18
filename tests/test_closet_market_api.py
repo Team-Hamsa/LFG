@@ -197,6 +197,66 @@ def test_orders_mine_lists_bids_on_my_traits(closet_env):
     assert body["bids_on_my_traits"][0]["source"] == "closet"
 
 
+def _stub_trait_art(monkeypatch):
+    calls = []
+
+    def resolve(cfg, slot, value):
+        calls.append((slot, value))
+        return f"/api/layer?trait={slot}&value={value}"
+
+    monkeypatch.setattr(server, "_trait_image_url", resolve)
+    return calls
+
+
+def test_closet_book_rows_carry_trait_image_url(closet_env, monkeypatch):
+    """Prod 2026-09-18: /api/closet/book rows were slot/value only, so the
+    Wanted and Closet listings chips guessed the art under the active
+    character's body (mineTraitImgSrc) and rendered blank tiles. Trait art
+    rarely lives there — the server picks the display body, as it does for
+    every other trait tile."""
+    _stub_trait_art(monkeypatch)
+    _open_bid(closet_env)
+    rows = _json(_run(server.handle_closet_book(_req("GET", "/api/closet/book"))))["rows"]
+    assert [(r["slot"], r["value"], r["image_url"]) for r in rows] == [
+        ("Head", "Crown", "/api/layer?trait=Head&value=Crown")
+    ]
+
+
+def test_closet_orders_mine_rows_carry_trait_image_url(closet_env, monkeypatch):
+    """Same blank-tile bug on Mine: my orders, bids on my traits and recent
+    fills are all trait chips, so every row needs the server's image_url."""
+    calls = _stub_trait_art(monkeypatch)
+    bidder2 = "rBidder2"
+    c = _db(closet_env)
+    es.set_closet_token(c, bidder2, f"C-{bidder2}", "00", status=ct.ACTIVE)
+    es.set_closet_contents(c, ME, [("Head", "Crown", 2), ("Eyes", "Laser", 1)], [])
+    c.commit()
+    c.close()
+    filled = _open_bid(closet_env)
+    _open_bid(closet_env, owner=bidder2)  # stays open: ME still holds a second Crown
+    fill = _run(
+        server.handle_closet_bid_fill(_req("POST", "/", match_info={"order_id": filled["id"]}))
+    )
+    assert fill.status == 200
+    ask = _run(
+        server.handle_closet_ask_create(
+            _req("POST", "/", {"slot": "Eyes", "value": "Laser", "price_brix": "5"})
+        )
+    )
+    assert ask.status == 200
+    calls.clear()
+    body = _json(_run(server.handle_closet_orders_mine(_req("GET", "/api/closet/orders/mine"))))
+    for group in ("orders", "fills", "bids_on_my_traits"):
+        assert body[group], group
+        for row in body[group]:
+            want = f"/api/layer?trait={row['slot']}&value={row['value']}"
+            assert row["image_url"] == want, group
+    # PR #549 review: the resolver probes the layer tree, and bids_on_my_traits
+    # is unbounded — Head: Crown is both a fill and an open bid here, so each
+    # distinct (slot, value) must be resolved once per request, not per row.
+    assert sorted(calls) == [("Eyes", "Laser"), ("Head", "Crown")]
+
+
 def test_fill_bid_and_status_are_party_only(closet_env, monkeypatch):
     bid = _open_bid(closet_env)
     resp = _run(

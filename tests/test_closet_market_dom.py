@@ -222,3 +222,144 @@ def test_closet_ask_other_refusal_reaches_show_error():
     assert seen["trustline"] == 0
     assert seen["errors"] == ["that trait is not available"]
     assert len(seen["calls"]) == 1
+
+
+_API_BASE = "https://api.test"
+_CHICKEN = "/api/layer?body=female&trait=Clothing&value=Chicken%20Suit%20Iridescent&thumb=1"
+_CROWN = "/api/layer?body=shared&trait=Head&value=Crown&thumb=1"
+_LASER = "/api/layer?body=male&trait=Eyes&value=Laser&thumb=1"
+
+
+def _top_level_fn(js: str, signature: str) -> str:
+    start = js.index(signature)
+    return js[start : js.index("\n}\n", start) + 3]
+
+
+def _run_closet_loaders(responses: dict) -> dict:
+    """Execute app.js's real loadClosetBook + loadClosetMine, with the real
+    mineTraitImgSrc / traitLayerSrc / closet_market_pure, under Node; returns
+    each chip list's image sources. No economy state is loaded, so any image
+    has to come from the server's image_url, not a body guess."""
+    if _NODE is None:
+        pytest.skip("node is not installed on this host")
+    js = _read("webapp/client/app.js")
+    fns = "\n".join(
+        _top_level_fn(js, sig)
+        for sig in (
+            "function traitLayerSrc(",
+            "function mineTraitImgSrc(",
+            "async function loadClosetBook(",
+            "async function loadClosetMine(",
+        )
+    )
+    script = (
+        "import * as closetPure from './webapp/client/closet_market_pure.js';\n"
+        f"const API_BASE = {json.dumps(_API_BASE)};\n"
+        f"const RESPONSES = {json.dumps(responses)};\n"
+        """
+let economyState = null;
+let closetMarketEnabled = true;
+const me = { wallet: 'rMe' };
+const seen = {};
+async function api(path) { return RESPONSES[path]; }
+function el(id) { return { id }; }
+function renderChipList(container, empty, entries) { seen[container.id] = entries.map((e) => e.imgSrc); }
+function buyBestClosetAsk() {}
+function openClosetBidForm() {}
+function cancelClosetOrder() {}
+function fillClosetBid() {}
+function viewClosetFill() {}
+"""
+        + fns
+        + """
+await loadClosetBook();
+await loadClosetMine();
+console.log(JSON.stringify(seen));
+"""
+    )
+    proc = subprocess.run(
+        [_NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        cwd=ROOT,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_closet_market_chips_render_the_server_trait_image():
+    """Prod 2026-09-18: the Wanted row for Clothing: Chicken Suit Iridescent
+    rendered an empty tile — both Closet Market loaders passed null for the
+    image, so mineTraitImgSrc could only guess the art under the active
+    character's body. They must use the server's disk-verified image_url."""
+    seen = _run_closet_loaders(
+        {
+            "/api/closet/book": {
+                "rows": [
+                    {
+                        "slot": "Clothing",
+                        "value": "Chicken Suit Iridescent",
+                        "best_ask_brix": None,
+                        "ask_count": 0,
+                        "best_bid_brix": "1000",
+                        "bid_count": 1,
+                        "image_url": _CHICKEN,
+                    },
+                    {
+                        "slot": "Head",
+                        "value": "Crown",
+                        "best_ask_brix": "12",
+                        "ask_count": 1,
+                        "best_bid_brix": None,
+                        "bid_count": 0,
+                        "image_url": _CROWN,
+                    },
+                ]
+            },
+            "/api/closet/orders/mine": {
+                "orders": [
+                    {
+                        "id": "O1",
+                        "side": "ask",
+                        "slot": "Eyes",
+                        "value": "Laser",
+                        "price_brix": "5",
+                        "state": "open",
+                        "image_url": _LASER,
+                    }
+                ],
+                "bids_on_my_traits": [
+                    {
+                        "id": "B1",
+                        "slot": "Head",
+                        "value": "Crown",
+                        "price_brix": "10",
+                        "source": "closet",
+                        "nft_id": None,
+                        "image_url": _CROWN,
+                    }
+                ],
+                "fills": [
+                    {
+                        "id": "F1",
+                        "seller": "rMe",
+                        "buyer": "rYou",
+                        "slot": "Clothing",
+                        "value": "Chicken Suit Iridescent",
+                        "price_brix": "1000",
+                        "state": "mirrored",
+                        "image_url": _CHICKEN,
+                    }
+                ],
+            },
+        }
+    )
+    assert seen == {
+        "closet-book-asks": [_API_BASE + _CROWN],
+        "closet-book-bids": [_API_BASE + _CHICKEN],
+        "mine-closet-orders": [_API_BASE + _LASER],
+        "mine-closet-incoming": [_API_BASE + _CROWN],
+        "mine-closet-fills": [_API_BASE + _CHICKEN],
+    }
