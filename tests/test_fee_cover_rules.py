@@ -177,6 +177,24 @@ def test_unallowlisted_broker_is_not_broker_settled():
     assert _refund(rate=lambda account: None).reason == "not_broker_settled"
 
 
+def test_open_promise_uses_saved_broker_rate():
+    """The promise snapshotted the broker and its measured rate when it was
+    made. An allowlist edit afterwards (the rate unmeasured again, or the
+    entry pulled) must not decline a promise the buyer was already given."""
+    promise = _promise(broker=CAFE, broker_rate=0.015890)
+    decision = _refund(promise=promise, rate=lambda account: None)
+    assert decision.reason is None
+    assert decision.refund_drops == 80_642
+    assert decision.broker == CAFE
+
+
+def test_a_saved_broker_rate_vouches_only_for_the_broker_it_was_saved_with():
+    """The fallback never admits an account the promise wasn't made against:
+    a different settler still needs the allowlist's current measured rate."""
+    promise = _promise(broker=BIDDS, broker_rate=0.015890)  # the fill came from CAFE
+    assert _refund(promise=promise, rate=lambda account: None).reason == "not_broker_settled"
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

@@ -17,7 +17,7 @@ import * as closetPure from './closet_market_pure.js?v=1';
 import * as mintPure from './mint_pure.js?v=25';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=29';
+import * as buildPure from './build_pure.js?v=30';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -3949,12 +3949,10 @@ function renderCloset() {
   grid.replaceChildren();
   const char = activeChar();
   const staged = pending();
-  // A blank has no body, so the Closet can show it no trait art at all
-  // (closetTileState hides every non-"None" tile) and equipping is a dead end.
+  renderBuildShareRow(char);
   // Dressing a blank goes through Assemble, which picks the body first — this
   // button is the only door to it from a selected blank. renderCloset owns the
   // button because every selection path ends here, with or without a GO.
-  renderBuildShareRow(char);
   const blankBtn = el('build-blank-btn');
   if (blankBtn) {
     blankBtn.hidden = !(char && char.blank);
@@ -3976,9 +3974,12 @@ function renderCloset() {
     item.className = 'closet-item';
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
-    // Compatibility: only allow equip when this asset can go on the active character.
-    // Client mirrors the server precheck (server re-verifies on commit).
-    const compatible = char && economyState.slots.includes(asset.slot);
+    // Compatibility: only allow equip when this asset can go on the active
+    // character. Client mirrors the server precheck (server re-verifies on
+    // commit). Blanks are refused there (#523) — see equipCompatible's comment
+    // for why only `blank` can decide that. The tile itself stays rendered
+    // (dimmed, .incompatible) because Extract must keep working.
+    const compatible = buildPure.equipCompatible(char, asset, economyState.slots);
     if (!compatible) item.classList.add('incompatible');
     // With a GO selected, a trait that can't render on its body is hidden
     // entirely (it reappears on a GO whose body has the art). With no GO

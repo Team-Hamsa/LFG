@@ -23,8 +23,10 @@ from typing import Any
 from lfg_core import brokers, config, db_path, fee_cover, fee_cover_store, history_store, xrpl_ops
 
 RIPPLE_EPOCH_OFFSET = 946_684_800
-# A promise is written when its bid validates; its accept cannot predate that,
-# but clocks differ between the service and ledger close times — allow slack.
+# A bid's accept cannot predate the bid, so the archive search starts at the
+# bid's own creation (its quote, fee_cover_store.bid_created_at) — never at the
+# promise write, which can trail the fill by hours (#515 FC-1). Service clocks
+# and ledger close times differ, so allow slack below that start.
 ACCEPT_LOOKBACK_SECONDS = 3600
 # The listener flushes the archive's validated cursor ahead of committing the
 # derived nft_events sale row; allow margin so an accept straddling the expiry
@@ -77,18 +79,34 @@ def normalize_tx(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def find_accept_tx(
-    hconn: sqlite3.Connection, nft_id: str, offer_index: str, since_unix: int
+    hconn: sqlite3.Connection, nft_id: str, offer_index: str, since_unix: int | None
 ) -> dict[str, Any] | None:
-    row = hconn.execute(
+    """The archived sale of `nft_id` that consumed buy offer `offer_index`, at
+    or after `since_unix`. None for `since_unix` means no time filter: an
+    NFTokenOffer's ledger index is unique, so the index alone identifies it."""
+    sql = (
         "SELECT x.raw_json FROM nft_events e JOIN xrpl_txs x ON x.tx_hash = e.tx_hash"
-        " WHERE e.nft_id = ? AND e.event = 'sale' AND e.ts >= ?"
-        " AND json_extract(x.raw_json, '$.NFTokenBuyOffer') = ? LIMIT 1",
-        (nft_id, since_unix, offer_index),
-    ).fetchone()
+        " WHERE e.nft_id = ? AND e.event = 'sale'"
+        " AND json_extract(x.raw_json, '$.NFTokenBuyOffer') = ?"
+    )
+    params: list[Any] = [nft_id, offer_index]
+    if since_unix is not None:
+        sql += " AND e.ts >= ?"
+        params.append(since_unix)
+    row = hconn.execute(sql + " LIMIT 1", params).fetchone()
     if row is None:
         return None
     tx = json.loads(row[0])
     return tx if isinstance(tx, dict) else None
+
+
+def accept_lookup_since(conn: sqlite3.Connection, offer_index: str) -> int | None:
+    """The lower bound `find_accept_tx` searches a promise's accept from: its
+    bid's creation (the quote closed with this offer index) less
+    ACCEPT_LOOKBACK_SECONDS, or None — no time filter — when no quote links to
+    it. `conn` is the app DB."""
+    created = fee_cover_store.bid_created_at(conn, offer_index)
+    return None if created is None else created - ACCEPT_LOOKBACK_SECONDS
 
 
 def cancel_seen(hconn: sqlite3.Connection, nft_id: str, offer_index: str) -> bool:
@@ -134,18 +152,14 @@ def _open_promise_and_accept(
     try:
         promise = fee_cover_store.get_promise(conn, offer_index)
         view = fee_cover_store.view_for_offer(conn, offer_index)
+        since = accept_lookup_since(conn, offer_index)
     finally:
         conn.close()
     if promise is None or promise["state"] != "open":
         return promise, None, view
     hconn = history_store.init_history_db(deps.history_db_path)
     try:
-        accept = find_accept_tx(
-            hconn,
-            str(promise["nft_id"]),
-            offer_index,
-            int(promise["created_at"]) - ACCEPT_LOOKBACK_SECONDS,
-        )
+        accept = find_accept_tx(hconn, str(promise["nft_id"]), offer_index, since)
     finally:
         hconn.close()
     return promise, accept, view
@@ -251,9 +265,13 @@ def _release_reason(deps: FeeCoverDeps, promise: dict[str, Any]) -> str | None:
     None (leave open) otherwise — fail closed."""
     nft_id = str(promise["nft_id"])
     offer_index = str(promise["offer_index"])
+    conn = fee_cover_store.connect(deps.app_db_path)
+    try:
+        since = accept_lookup_since(conn, offer_index)
+    finally:
+        conn.close()
     hconn = history_store.init_history_db(deps.history_db_path)
     try:
-        since = int(promise["created_at"]) - ACCEPT_LOOKBACK_SECONDS
         # Check if the bid was accepted (filled): settle_promise owns it.
         if find_accept_tx(hconn, nft_id, offer_index, since) is not None:
             return None

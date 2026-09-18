@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import pwd
 
 import pytest
 
@@ -109,6 +112,19 @@ def _state(app_db):
         conn.close()
 
 
+def _requeue_audit_rows(app_db):
+    conn = store.connect(app_db)
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT actor, result, details FROM fee_cover_audit WHERE action = 'requeue'"
+            )
+        ]
+    finally:
+        conn.close()
+
+
 def test_recover_cli_requeues_a_parked_failure(app_db, monkeypatch):
     _failed_refund(app_db)
     calls = _chain_lookup(monkeypatch, found=None)
@@ -116,6 +132,11 @@ def test_recover_cli_requeues_a_parked_failure(app_db, monkeypatch):
     # scanned from the claim ledger, never the deadline
     assert calls == [("ACC1", "rB", 80_642, 7000)]
     assert _state(app_db) == "owed"
+    # audited as the OS account that ran it (from the real UID, not a flag)
+    [audit] = _requeue_audit_rows(app_db)
+    assert audit["actor"] == f"cli:{pwd.getpwuid(os.getuid()).pw_name}"
+    assert audit["result"] == "requeued"
+    assert json.loads(audit["details"])["from_state"] == "failed"
     assert (
         recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 1
     )  # not failed any more

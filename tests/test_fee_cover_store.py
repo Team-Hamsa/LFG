@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -401,12 +402,61 @@ def test_requeue_failed_requires_budget_headroom(conn):
     assert store.committed_drops(conn, c.id) == 0
     # someone else takes most of the budget meanwhile
     store.record_promise(conn, c, _inp("BID2", bidder="rOther"), decline_reason=None, now=1103)
-    assert store.requeue_failed(conn, "ACCEPT1", now=1104) == "budget_exhausted"
+    assert store.requeue_failed(conn, "ACCEPT1", actor="cli:ops", now=1104) == "budget_exhausted"
     store.release_promise(conn, "BID2", "cancelled", now=1105)
-    assert store.requeue_failed(conn, "ACCEPT1", now=1106) == "requeued"
+    assert store.requeue_failed(conn, "ACCEPT1", actor="cli:ops", now=1106) == "requeued"
     row = store.get_refund(conn, "ACCEPT1")
     assert row["state"] == "owed" and row["reason"] is None and row["payout_tx_hash"] is None
-    assert store.requeue_failed(conn, "ACCEPT1", now=1107) == "not_failed"
+    assert store.requeue_failed(conn, "ACCEPT1", actor="cli:ops", now=1107) == "not_failed"
+    # only the call that moved the row left an audit row; refusals change nothing
+    requeues = [r for r in _audit_rows(conn) if r["action"] == "requeue"]
+    assert [r["result"] for r in requeues] == ["requeued"]
+
+
+def test_requeue_writes_audit_row(conn):
+    """A requeue moves money state (failed -> owed) and wipes the failure
+    reason, so it leaves a durable trail: who, from which state, to which, and
+    why the payout had been parked."""
+    c = _live(conn, budget=1_000_000, cap=1_000_000)
+    store.record_promise(conn, c, _inp("BID1"), decline_reason=None, now=1001)
+    store.fill_promise(conn, "BID1", _owed("ACCEPT1"), now=1100)
+    store.claim_for_payout(conn, "ACCEPT1", 5_000, claim_ledger=4_000, now=1101)
+    store.record_payout(
+        conn,
+        "ACCEPT1",
+        state="failed",
+        tx_hash=None,
+        last_ledger_seq=None,
+        now=1102,
+        reason="payout_expired",
+    )
+    before = conn.execute("SELECT COUNT(*) FROM fee_cover_audit").fetchone()[0]
+    assert store.requeue_failed(conn, "ACCEPT1", actor="cli:ops", now=1200) == "requeued"
+    rows = [
+        dict(r)
+        for r in conn.execute("SELECT * FROM fee_cover_audit WHERE id > ? ORDER BY id", (before,))
+    ]
+    assert len(rows) == 1
+    [row] = rows
+    assert (
+        row["network"],
+        row["actor"],
+        row["action"],
+        row["at"],
+        row["campaign_id"],
+        row["result"],
+    ) == (NET, "cli:ops", "requeue", 1200, c.id, "requeued")
+    assert json.loads(row["details"]) == {
+        "accept_tx_hash": "ACCEPT1",
+        "from_state": "failed",
+        "to_state": "owed",
+        "reason": "payout_expired",
+    }
+
+
+def test_requeue_requires_an_actor(conn):
+    with pytest.raises(ValueError):
+        store.requeue_failed(conn, "ACCEPT1", actor="  ", now=1200)
 
 
 def test_record_payout_failed_reason_defaults_and_can_be_expired(conn):
@@ -531,7 +581,7 @@ def test_a_confirmed_payout_overrides_a_row_recovery_already_parked_failed(conn)
     assert row["payout_tx_hash"] == "PAYOUT1"
     assert row["reason"] is None
     # ...and the row can no longer be requeued into a second payment.
-    assert store.requeue_failed(conn, "ACCEPT1", now=1104) == "not_failed"
+    assert store.requeue_failed(conn, "ACCEPT1", actor="cli:ops", now=1104) == "not_failed"
 
 
 def test_a_failed_payout_never_overrides_a_confirmed_one(conn):
@@ -623,6 +673,17 @@ def test_quote_lifecycle(conn):
     row = store.get_quote(conn, "S1")
     assert (row["state"], row["outcome"], row["offer_index"]) == ("closed", "promised", "BID1")
     assert store.pending_quotes(conn, NET, created_before=2000, limit=10) == []
+
+
+def test_bid_created_at_links_an_offer_index_to_its_quote(conn):
+    """The quote is written when the bid session is created, before its offer
+    index exists; closing it records the index. That is the only durable link
+    from a promise to its bid's creation time."""
+    store.record_quote(conn, _quote("S1", created_at=1000))
+    assert store.bid_created_at(conn, "BID1") is None  # pending: no offer index yet
+    store.close_quote(conn, "S1", "promised", offer_index="BID1", now=5000)
+    assert store.bid_created_at(conn, "BID1") == 1000  # the quote's creation, not its close
+    assert store.bid_created_at(conn, "UNLINKED") is None
 
 
 def test_pending_quotes_respects_the_grace_period_network_and_limit(conn):
