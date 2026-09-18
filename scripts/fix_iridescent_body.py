@@ -286,8 +286,16 @@ async def run(
 ) -> list[Result]:
     index_path = index_db or nft_index.index_db_path(network)
     app_path = app_db or db_path.app_db_path(network)
+    if not os.path.exists(index_path):
+        # init_db (below) would CREATE an empty index here, and an empty index
+        # reads as "no live token carries the typo" -- the app-DB-only branch
+        # would then rewrite LFG.Body while the ledger may still carry it.
+        raise FileNotFoundError(f"on-chain index not found: {index_path}")
     results: list[Result] = []
-    with sqlite3.connect(index_path) as index_conn, sqlite3.connect(app_path) as app_conn:
+    # init_db, not a bare sqlite3.connect: nft_index.upsert in _sync_mirrors
+    # writes every current column, so an older index file must be migrated
+    # first (e.g. the #534 raw_blank column).
+    with nft_index.init_db(index_path) as index_conn, sqlite3.connect(app_path) as app_conn:
         targets = discover_targets(index_conn, app_conn)
         print(
             f"[{network}] targets: {len(targets.tokens)} live token(s) "
