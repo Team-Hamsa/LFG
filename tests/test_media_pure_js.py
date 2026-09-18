@@ -131,3 +131,34 @@ def test_video_fallback_without_poster_is_null():
 
 def test_video_fallback_missing_label_defaults_empty():
     assert run_js("M.videoFallback('a.png', null)") == {"src": "a.png", "alt": ""}
+
+
+# --- traitArtBackdrop: standalone trait art needs a visible backdrop ---------
+
+
+def test_backdrop_face_trait_gets_default_body_of_its_class():
+    r = run_js(
+        'M.traitArtBackdrop("https://api.x/api/layer?body=female&trait=Eyebrows&value=Hmm&thumb=1")'
+    )
+    assert r["face"] is True
+    assert r["bodySrc"] == (
+        "https://api.x/api/layer?body=female&trait=Body&value=Curved%20Light&thumb=1"
+    )
+
+
+def test_backdrop_unknown_body_class_falls_back_to_male():
+    r = run_js('M.traitArtBackdrop("/api/layer?body=shared&trait=Mouth&value=Grin")')
+    assert r["bodySrc"] == "/api/layer?body=male&trait=Body&value=Straight%20Light&thumb=1"
+
+
+def test_backdrop_non_face_trait_is_checkerboard_only():
+    r = run_js('M.traitArtBackdrop("/api/layer?body=male&trait=Head&value=Cap")')
+    assert r == {"face": False, "bodySrc": None}
+
+
+@pytest.mark.parametrize(
+    "src",
+    ["", "https://cdn.x/nft/12.png", "/api/layer?body=male&trait=Body&value=Straight%20Dark"],
+)
+def test_backdrop_none_for_characters_and_bodies(src):
+    assert run_js(f"M.traitArtBackdrop({json.dumps(src)})") is None

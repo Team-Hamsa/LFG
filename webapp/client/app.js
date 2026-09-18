@@ -26,7 +26,7 @@ import * as resumePure from './resume_pure.js?v=2';
 // Node-testable (tests/test_media_pure_js.py) — grids always render the
 // static image (badged when animated); only detail/focused views upgrade to
 // the video.
-import * as mediaPure from './media_pure.js?v=2';
+import * as mediaPure from './media_pure.js?v=3';
 // Batch-harvest (#356) selection/summary decisions are pure and Node-testable
 // (tests/test_harvest_pure_js.py); the GO-picker multi-select below is the glue.
 import * as harvestPure from './harvest_pure.js?v=2';
@@ -2491,6 +2491,7 @@ function offerRow(o) {
     const img = document.createElement('img');
     img.className = 'thumb';
     img.src = src;
+    if (isTrait) decorateTraitArt(img, src);
     img.alt = isTrait ? `${o.slot}: ${o.value}` : (o.nft_number != null ? `NFT #${o.nft_number}` : 'NFT');
     row.appendChild(img);
   } else if (isCloset) {
@@ -3588,6 +3589,24 @@ function traitLayerSrc(url) {
   return url ? API_BASE + url : null;
 }
 
+// Standalone trait art gets a visible backdrop (mediaPure.traitArtBackdrop):
+// face traits over a faint default body, everything else over a checkerboard.
+// Never call this on stacked layers (dressup canvas / builder preview) — only
+// on a tile/chip/detail view showing one trait by itself.
+function decorateTraitArt(media, src) {
+  if (!media) return media;
+  media.classList.remove('trait-art', 'trait-art-face');
+  media.style.removeProperty('--trait-body');
+  const bd = mediaPure.traitArtBackdrop(src);
+  if (!bd) return media;
+  media.classList.add('trait-art');
+  if (bd.face) {
+    media.classList.add('trait-art-face');
+    media.style.setProperty('--trait-body', `url("${bd.bodySrc}")`);
+  }
+  return media;
+}
+
 // WebM layers (VP9-alpha bodies) don't render in <img> — browsers only decode
 // video containers in <video>. The client can't know a layer's format ahead of
 // the fetch (/api/layer resolves the extension server-side), so build an <img>
@@ -4077,6 +4096,7 @@ function renderCloset() {
         `${asset.slot}: ${asset.value}`,
         () => item.remove(),
       );
+      decorateTraitArt(img, img.src);
     } else {
       img = document.createElement('img');
       img.src = BLANK_IMG;
@@ -4168,6 +4188,7 @@ function renderTraitStrip() {
         `${t.slot}: ${t.value}`,
         () => chip.remove(),
       );
+      decorateTraitArt(img, img.src);
     } else {
       img = document.createElement('img');
       img.src = BLANK_IMG;
@@ -5077,6 +5098,7 @@ function renderMarketGrid(rows, { append = false } = {}) {
     card.className = 'nft-card';
     const img = document.createElement('img');
     img.src = marketRowImgSrc(vm) || BLANK_IMG;
+    decorateTraitArt(img, img.src);
     img.loading = 'lazy';
     img.alt = '';
     const name = document.createElement('span');
@@ -5234,6 +5256,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   } else {
     const still = setMedia('listing-detail-img', { image: dm.image });
     still.src = marketRowImgSrc(vm) || BLANK_IMG;
+    decorateTraitArt(still, still.src);
   }
   el('listing-detail-title').textContent = vm.title;
   el('listing-detail-price').textContent = vm.priceLabel;
@@ -5423,6 +5446,7 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
     chip.className = 'trait-chip';
     const img = document.createElement('img');
     img.src = entry.imgSrc || BLANK_IMG;
+    decorateTraitArt(img, img.src);
     img.loading = 'lazy';
     img.alt = '';
     const label = document.createElement('span');
@@ -5795,6 +5819,7 @@ function renderShopGrid(items) {
     card.className = 'nft-card';
     const img = document.createElement('img');
     img.src = shopImgSrc(item) || BLANK_IMG;
+    decorateTraitArt(img, img.src);
     img.loading = 'lazy';
     img.alt = '';
     const name = document.createElement('span');
