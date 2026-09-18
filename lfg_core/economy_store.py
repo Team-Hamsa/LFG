@@ -410,13 +410,14 @@ def closet_mirror_write(conn: sqlite3.Connection) -> Iterator[None]:
     guard reads that record, so a behind mirror could pass as current and the
     next full overwrite would erase a credit on-chain (#522). Writers inside the
     block pass `commit=False`; the block commits once, or rolls back on any
-    exception so nothing half-applied stays pending on the connection."""
+    exception — the commit's own failure (busy, I/O) included — so nothing
+    half-applied stays pending for a later commit on the connection to persist."""
     try:
         yield
+        conn.commit()
     except BaseException:
         conn.rollback()
         raise
-    conn.commit()
 
 
 def delete_closet(conn: sqlite3.Connection, owner: str) -> None:

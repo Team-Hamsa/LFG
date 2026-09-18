@@ -220,6 +220,13 @@ async def _closet_modify(nft_id: str, owner: str, url: str) -> closet_token.Modi
     ledger_index, tx_index = result.ledger_index, result.transaction_index
     if ledger_index is None:
         ledger_index, tx_index = await _validated_position_of(result.tx_hash)
+    elif tx_index is None:
+        # A ledger-only stamp cannot order a same-ledger modify (#537). Take the
+        # lookup's tx index only if it agrees on the ledger: the pair must
+        # describe this one transaction.
+        looked_up_ledger, looked_up_index = await _validated_position_of(result.tx_hash)
+        if looked_up_ledger == ledger_index:
+            tx_index = looked_up_index
     return closet_token.ModifyReceipt(
         tx_hash=result.tx_hash, ledger_index=ledger_index, transaction_index=tx_index
     )

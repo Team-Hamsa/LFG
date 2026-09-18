@@ -281,3 +281,33 @@ def test_closet_column_migration_still_raises_a_real_alter_failure():
 
     with pytest.raises(sqlite3.OperationalError, match="disk is full"):
         es.init_economy_schema(_BrokenConn())
+
+
+def test_mirror_write_rolls_back_a_block_whose_commit_fails():
+    """#535: a commit that fails (SQLITE_BUSY, an I/O error) must roll the block
+    back as well; left pending, its writes would be persisted by the next commit
+    on the connection — half a mirror, after the caller was told it failed."""
+    real = _conn()
+    es.set_closet_token(real, "rA", "N1", "AB", status="active", applied_ledger_index=1000)
+
+    class _CommitFails:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    conn = _CommitFails(real)
+    with pytest.raises(sqlite3.OperationalError), es.closet_mirror_write(conn):
+        es.set_closet_contents(conn, "rA", [("Hat", "Cap", 1)], [], commit=False)
+        es.set_closet_token(
+            conn, "rA", "N1", "CD", status="active", applied_ledger_index=1005, commit=False
+        )
+    real.commit()  # a later, unrelated commit on the same connection
+
+    assert es.read_closet_assets(real) == []
+    assert es.get_closet_token(real, "rA") == ("N1", "AB")
+    assert es.get_closet_applied_position(real, "rA") == (1000, None)
