@@ -10,7 +10,10 @@ Verifies the three invariants over the on-chain index + Closet/trait-token state
 
   python scripts/audit_trait_economy.py --network mainnet
 
-Run scripts/freeze_genesis.py first. Exit code is non-zero on any drift.
+Run scripts/freeze_genesis.py first. Exit code is non-zero on real conservation
+drift, a completeness violation or a Closet ownership anomaly. Drift whose every
+slot nets to zero is trait-swap substitution (see `classify_drift`): the run
+reports it and stays clean (#493).
 """
 
 from __future__ import annotations
@@ -50,6 +53,29 @@ def classify_drift(
     return out
 
 
+def conservation_clean(conservation: trait_economy.ConservationReport) -> bool:
+    """True unless some slot's drift fails to net to zero (#493).
+
+    `verify_conservation` stays exact: any (slot, value) the census and the
+    ledger disagree on is drift. A trait swap substitutes one value for another
+    within a slot, so its drift always nets to zero there; drift of only that
+    shape is expected, and does not make the run non-clean or alert."""
+    return not classify_drift(conservation)["real"]
+
+
+def conservation_status(conservation: trait_economy.ConservationReport) -> tuple[str, str]:
+    """("OK" | "DRIFT", detail) for the report and stdout; detail names how
+    many benign substitution rows a clean run carries."""
+    classes = classify_drift(conservation)
+    if classes["real"]:
+        return "DRIFT", ""
+    if classes["benign_swap"]:
+        return "OK", (
+            f" ({len(classes['benign_swap'])} benign swap-substitution rows, net zero per slot)"
+        )
+    return "OK", ""
+
+
 def build_alert_body(
     network: str,
     live_count: int,
@@ -62,7 +88,8 @@ def build_alert_body(
     benign swap substitution separately from real conservation drift."""
     classes = classify_drift(conservation)
     lines = [
-        f"**Trait economy audit: {'DRIFT' if not conservation.ok else 'VIOLATIONS'}** "
+        f"**Trait economy audit: "
+        f"{'DRIFT' if not conservation_clean(conservation) else 'VIOLATIONS'}** "
         f"({network}, {live_count} live characters)"
     ]
     if classes["real"]:
@@ -131,7 +158,8 @@ def format_economy_report(
     lines.append(f"- Live characters: **{live_count}**")
     lines.append(f"- Genesis editions: **{genesis_editions}**")
     lines.append(f"- Supply changes (ledger): **{len(supply_changes)}**")
-    lines.append(f"- Conservation: **{'OK' if conservation.ok else 'DRIFT'}**")
+    status, detail = conservation_status(conservation)
+    lines.append(f"- Conservation: **{status}**{detail}")
     lines.append(f"- Completeness: **{'OK' if completeness.ok else 'VIOLATIONS'}**")
     if closet_ownership is not None:
         lines.append(f"- Closet ownership: **{'OK' if closet_ownership.ok else 'ANOMALIES'}**")
@@ -260,11 +288,12 @@ def main() -> int:
         f.write(report)
 
     print(f"Network: {args.network}  live characters: {len(canonical)}")
-    print(f"Conservation: {'OK' if conservation.ok else 'DRIFT'}")
+    status, detail = conservation_status(conservation)
+    print(f"Conservation: {status}{detail}")
     print(f"Completeness: {'OK' if completeness.ok else 'VIOLATIONS'}")
     print(f"Closet ownership: {'OK' if closet_ownership.ok else 'ANOMALIES'}")
     print(f"Report: {report_path}")
-    clean = conservation.ok and completeness.ok and closet_ownership.ok
+    clean = conservation_clean(conservation) and completeness.ok and closet_ownership.ok
     if not clean and args.alert_webhook:
         post_alert(
             args.alert_webhook,

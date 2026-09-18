@@ -129,3 +129,92 @@ def test_clean_closet_ownership_does_not_fail_the_audit(tmp_path, monkeypatch):
     conn.close()
 
     assert _run_audit(tmp_path, monkeypatch) == 0
+
+
+# --- #493: a drift table of only net-zero-per-slot swap substitution is clean ---
+
+
+def _swap_edition_1_head(db: str) -> None:
+    """Edition 1's Head went None -> Crown with no supply row: a trait swap,
+    which substitutes one value for another within the slot (Head|None -1,
+    Head|Crown +1) and so nets to zero there."""
+    conn = nft_index.init_db(db)
+    rec = _char(1)
+    rec.attributes = [
+        {**a, "value": "Crown"} if a["trait_type"] == "Head" else a for a in rec.attributes
+    ]
+    nft_index.upsert(conn, rec)
+    conn.commit()
+    conn.close()
+
+
+def _run_with_webhook(tmp_path, monkeypatch) -> tuple[int, list[str]]:
+    posted: list[str] = []
+    monkeypatch.setattr(ate, "post_alert", lambda url, body: posted.append(body) or True)
+    db = str(tmp_path / "onchain_testnet.db")
+    monkeypatch.setenv("ONCHAIN_DB_PATH", db)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_trait_economy.py",
+            "--network",
+            "testnet",
+            "--report-dir",
+            str(tmp_path / "r"),
+            "--alert-webhook",
+            "https://discord.invalid/webhook",
+        ],
+    )
+    return ate.main(), posted
+
+
+def test_benign_only_drift_reports_clean_and_does_not_alert(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "onchain_testnet.db")
+    _setup_db(db)
+    _swap_edition_1_head(db)
+
+    rc, posted = _run_with_webhook(tmp_path, monkeypatch)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert posted == []
+    assert "Conservation: OK (2 benign swap-substitution rows, net zero per slot)" in out
+    (report,) = os.listdir(tmp_path / "r")
+    text = open(tmp_path / "r" / report).read()
+    assert "- Conservation: **OK** (2 benign swap-substitution rows, net zero per slot)" in text
+    assert "| Head | Crown | +1 |" in text  # the rows stay in the report for review
+
+
+def test_real_drift_still_fails_and_alerts(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "onchain_testnet.db")
+    _setup_db(db)
+    _swap_edition_1_head(db)  # benign rows alongside the real one
+    conn = nft_index.init_db(db)
+    es.init_economy_schema(conn)
+    es.set_closet_contents(conn, "rUser", [("Eyes", "Laser", 1)], [])  # created from nothing
+    conn.close()
+
+    rc, posted = _run_with_webhook(tmp_path, monkeypatch)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "Conservation: DRIFT" in out
+    assert len(posted) == 1 and posted[0].startswith("**Trait economy audit: DRIFT**")
+
+
+def test_benign_drift_with_a_completeness_violation_alerts_as_violations():
+    """The run is non-clean because of completeness, not conservation: the
+    alert must not headline benign substitution as DRIFT."""
+    report = trait_economy.ConservationReport(
+        trait_drift={("Head", "None"): -1, ("Head", "Crown"): +1}, ok=False
+    )
+    body = ate.build_alert_body(
+        "testnet",
+        2,
+        report,
+        trait_economy.CompletenessReport(orphan_bodies=[9], slot_anomalies={}, ok=False),
+        "reports/x.md",
+    )
+    assert body.startswith("**Trait economy audit: VIOLATIONS**")
+    assert "benign swap substitution" in body
