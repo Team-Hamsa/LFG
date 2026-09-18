@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from lfg_core import swap_meta, trait_economy
+from lfg_core import swap_meta, trait_config, trait_economy
 
 # A syntactically VALID classic address (derived from a throwaway keypair,
 # no funds, nobody holds the key): startup-resume refuses job records whose
@@ -109,6 +109,7 @@ class MockEconomy:
             "characters": chars,
             "closet": {"assets": assets, "token": token},
             "trait_order": swap_meta.TRAIT_ORDER,
+            "z_order": trait_config.get_config().z_table(),
             "slots": trait_economy.NON_BODY_SLOTS,
             "trait_tokens": trait_tokens,
         }

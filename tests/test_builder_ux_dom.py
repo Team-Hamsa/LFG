@@ -80,6 +80,25 @@ def test_builder_preview_reads_trait_order_unguarded_like_render_canvas():
     assert "const order = economyState.trait_order;" in canvas_body
 
 
+# Per-VALUE z (trait_config.yaml z_overrides, e.g. Wavy Eyes above Head): both
+# previews must hand /api/economy's z_order table to the shared stacker, or
+# they fall back to the fixed per-slot order and disagree with the composed
+# art. The ordering itself runs under Node in tests/test_build_pure_js.py.
+_Z_ORDER_CALL = re.compile(r"buildPure\.orderedLayers\([^;]*,\s*economyState\.z_order\)")
+
+
+def test_builder_preview_stacks_by_the_z_order_table():
+    js = _read("app.js")
+    body = _fn_body(js, "function refreshBuilderPreview()", "\nfunction renderBuilder()")
+    assert _Z_ORDER_CALL.search(body)
+
+
+def test_render_canvas_stacks_by_the_z_order_table():
+    js = _read("app.js")
+    body = _fn_body(js, "function renderCanvas(char)", "\n// --- GO picker")
+    assert _Z_ORDER_CALL.search(body)
+
+
 # ---------------------------------------------------------------------------
 # Defect 2 — switching bodies must keep still-valid selections, using the
 # server's own per-body legality list (the shared cross-body matrix), and

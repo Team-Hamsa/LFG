@@ -520,6 +520,258 @@ def test_ordered_layers_falsy_string_value_is_dropped():
 
 
 # ---------------------------------------------------------------------------
+# orderedLayers(order, valuesBySlot, zOrder) — per-VALUE z (z_overrides)
+# `zOrder` is economyState.z_order (/api/economy, TraitConfig.z_table()): each
+# layer's z plus trait_config.yaml's per-(trait_type, value) z_overrides. The
+# server composes the real art with TraitConfig.sort_attributes — a stable
+# sort by z_for over attributes normalized to trait_order — so the preview
+# must stack by the same z or e.g. Wavy Eyes draws under Head in the preview
+# while the minted art has it on top.
+# ---------------------------------------------------------------------------
+
+ORDER = [
+    "Background",
+    "Back",
+    "Body",
+    "Clothing",
+    "Mouth",
+    "Eyebrows",
+    "Eyes",
+    "Head",
+    "Accessory",
+]
+
+# Hand-typed copy of trait_config.yaml's z data as of 2026-09-18 (NOT loaded):
+# every expected stack in this section is worked out by hand from these
+# numbers. The real YAML is covered by the server-parity tests further down.
+Z_ORDER = {
+    "layers": {
+        "Background": 10,
+        "Back": 20,
+        "Body": 30,
+        "Clothing": 40,
+        "Mouth": 50,
+        "Eyebrows": 60,
+        "Eyes": 70,
+        "Head": 80,
+        "Accessory": 90,
+    },
+    "z_overrides": [
+        {"trait_type": "Eyes", "value": "Wavy", "z": 95},
+        {"trait_type": "Mouth", "value": "Rainbow Puke", "z": 95},
+        {"trait_type": "Eyes", "value": "Laser Eyes", "z": 95},
+        {"trait_type": "Eyes", "value": "Laser", "z": 95},
+        {"trait_type": "Accessory", "value": "Retardio", "z": 45},
+    ],
+}
+
+
+def _dressed(**over):
+    """A fully dressed character: an ordinary (never-overridden) value in
+    every slot, with `over` swapped in."""
+    values = {
+        "Background": "Sunset",
+        "Back": "Cape",
+        "Body": "Zombie",
+        "Clothing": "Jacket",
+        "Mouth": "Smile",
+        "Eyebrows": "Thick",
+        "Eyes": "Blue",
+        "Head": "Crown",
+        "Accessory": "Cigar",
+    }
+    values.update(over)
+    return values
+
+
+def _stack(values, z_order=Z_ORDER):
+    """Bottom-to-top slot names orderedLayers draws."""
+    expr = f"M.orderedLayers({json.dumps(ORDER)}, {json.dumps(values)}, {json.dumps(z_order)})"
+    return [layer["slot"] for layer in run_js(expr)]
+
+
+@pytest.mark.parametrize("eyes", ["Wavy", "Laser Eyes", "Laser"])
+def test_z_order_floats_effect_eyes_above_head_and_accessory(eyes):
+    assert _stack(_dressed(Eyes=eyes)) == [
+        "Background",
+        "Back",
+        "Body",
+        "Clothing",
+        "Mouth",
+        "Eyebrows",
+        "Head",
+        "Accessory",
+        "Eyes",
+    ]
+
+
+def test_z_order_floats_rainbow_puke_mouth_to_the_top():
+    assert _stack(_dressed(Mouth="Rainbow Puke")) == [
+        "Background",
+        "Back",
+        "Body",
+        "Clothing",
+        "Eyebrows",
+        "Eyes",
+        "Head",
+        "Accessory",
+        "Mouth",
+    ]
+
+
+def test_z_order_sinks_retardio_accessory_between_clothing_and_mouth():
+    assert _stack(_dressed(Accessory="Retardio")) == [
+        "Background",
+        "Back",
+        "Body",
+        "Clothing",
+        "Accessory",
+        "Mouth",
+        "Eyebrows",
+        "Eyes",
+        "Head",
+    ]
+
+
+def test_z_order_tie_keeps_trait_order():
+    # Rainbow Puke Mouth and Wavy Eyes are both z 95. Python's stable sort
+    # keeps the normalized (trait_order) input order: Mouth, then Eyes on top
+    # — NOT the z_overrides list order, which has Wavy first.
+    assert _stack(_dressed(Mouth="Rainbow Puke", Eyes="Wavy")) == [
+        "Background",
+        "Back",
+        "Body",
+        "Clothing",
+        "Eyebrows",
+        "Head",
+        "Accessory",
+        "Mouth",
+        "Eyes",
+    ]
+
+
+def test_z_override_matches_its_own_slot_only():
+    # "Laser" is overridden for Eyes; a Head that happens to share the value
+    # name must stay at Head's own z (z_for matches trait_type AND value).
+    assert _stack(_dressed(Head="Laser")) == ORDER
+
+
+def test_z_override_first_match_wins():
+    # Mirrors z_for: the first matching entry decides (95 = on top), a later
+    # duplicate (5 = under the Background) is never consulted.
+    z_order = {
+        "layers": Z_ORDER["layers"],
+        "z_overrides": [
+            {"trait_type": "Eyes", "value": "Wavy", "z": 95},
+            {"trait_type": "Eyes", "value": "Wavy", "z": 5},
+        ],
+    }
+    assert _stack(_dressed(Eyes="Wavy"), z_order)[-1] == "Eyes"
+
+
+def test_no_z_order_keeps_the_fixed_trait_order():
+    # A client newer than the API it talks to (the web surface redeploys
+    # independently of the service) gets no z_order: stack as before rather
+    # than throw and leave the canvas empty.
+    values = json.dumps(_dressed(Eyes="Wavy"))
+    for missing in ("undefined", "null"):
+        layers = run_js(f"M.orderedLayers({json.dumps(ORDER)}, {values}, {missing})")
+        assert [layer["slot"] for layer in layers] == ORDER
+
+
+def test_z_order_missing_a_drawn_slot_keeps_the_fixed_trait_order():
+    # A table that cannot key every drawn layer is not trusted at all: one
+    # unknown z would make the comparator inconsistent and scramble the stack.
+    layers = {slot: z for slot, z in Z_ORDER["layers"].items() if slot != "Back"}
+    z_order = {"layers": layers, "z_overrides": Z_ORDER["z_overrides"]}
+    assert _stack(_dressed(Eyes="Wavy"), z_order) == ORDER
+
+
+# --- Server parity: the REAL trait_config.yaml -----------------------------
+
+
+def _server_stack(cfg, values):
+    """What swap_compose composes: sort_attributes over the attributes
+    normalized to trait_order, 'None'/empty dropped (as _canonical does)."""
+    from lfg_core import swap_meta
+
+    attrs = [
+        {"trait_type": slot, "value": values[slot]}
+        for slot in swap_meta.TRAIT_ORDER
+        if values.get(slot) and values[slot] != "None"
+    ]
+    return [(a["trait_type"], a["value"]) for a in cfg.sort_attributes(attrs)]
+
+
+def _client_stacks(trait_order, z_order, cases):
+    """orderedLayers over every case in ONE node run (JSON round-tripped, as
+    the client receives /api/economy)."""
+    expr = (
+        f"{json.dumps(cases)}.map((v) => M.orderedLayers("
+        f"{json.dumps(trait_order)}, v, {json.dumps(z_order)}))"
+    )
+    return [[(layer["slot"], layer["value"]) for layer in stack] for stack in run_js(expr)]
+
+
+def test_ordered_layers_matches_server_compose_for_every_real_z_override():
+    from lfg_core import swap_meta, trait_config
+
+    cfg = trait_config.load_config(trait_config.DEFAULT_CONFIG_PATH)
+    overrides = [(o.trait_type, o.value) for o in cfg.z_overrides]
+    # A plain character (every layer at its own z), each override alone...
+    cases = [_dressed()] + [_dressed(**{slot: value}) for slot, value in overrides]
+    # ...and every pair that can be worn together (different slots), which
+    # is where equal-z ties (Rainbow Puke + Wavy) have to break the same way.
+    cases += [
+        _dressed(**{a_slot: a_val, b_slot: b_val})
+        for i, (a_slot, a_val) in enumerate(overrides)
+        for (b_slot, b_val) in overrides[i + 1 :]
+        if a_slot != b_slot
+    ]
+    client = _client_stacks(swap_meta.TRAIT_ORDER, cfg.z_table(), cases)
+    assert client == [_server_stack(cfg, values) for values in cases]
+
+
+def test_a_new_yaml_z_override_reaches_the_preview_with_no_client_change(tmp_path, monkeypatch):
+    # Regression guard for the data-driven contract: add a z_override to a
+    # copy of the real trait_config.yaml, and the /api/economy payload alone
+    # carries it to orderedLayers — no build_pure.js edit, no hardcoded list.
+    import yaml
+
+    from lfg_core import economy_store, nft_index, trait_config
+    from webapp import economy_api
+
+    with open(trait_config.DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    new = {"trait_type": "Head", "value": "Regression Hood", "z": 25}
+    raw["z_overrides"] = [*(raw.get("z_overrides") or []), new]
+    path = tmp_path / "trait_config.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    cfg = trait_config.load_config(str(path))
+    monkeypatch.setattr(trait_config, "_config", cfg)
+
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    state = json.loads(json.dumps(economy_api.read_economy_state(conn, "rOwner")))
+
+    values = _dressed(Head="Regression Hood")
+    [client] = _client_stacks(state["trait_order"], state["z_order"], [values])
+    # z 25: above Back (20), below Body (30).
+    assert [slot for slot, _ in client] == [
+        "Background",
+        "Back",
+        "Head",
+        "Body",
+        "Clothing",
+        "Mouth",
+        "Eyebrows",
+        "Eyes",
+        "Accessory",
+    ]
+    assert client == _server_stack(cfg, values)
+
+
+# ---------------------------------------------------------------------------
 # carryOverChosen(slots, slotOptions, previousChosen) -> {chosen, dropped}
 # (T31 defect 2) Body switch: keep every staged selection still legal for the
 # new body (per slotOptions — the server's own body-affinity-filtered list,
@@ -680,6 +932,20 @@ def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
     assert int(m.group(1)) >= 30, (
         "build_pure.js?v= regressed below the version that first exported "
         "equipCompatible — a cached older module breaks the Closet"
+    )
+
+
+def test_app_js_build_pure_import_is_bumped_past_the_z_order_stacker():
+    """orderedLayers took its zOrder argument at v32 — and v31 was served with
+    two different bodies (#533's, with no orderedLayers at all, then #532's
+    two-argument one: #532 merged without a bump). A browser holding either v31
+    beside a fresh app.js would throw in renderCanvas or silently drop the
+    z_overrides. A floor, like the one above."""
+    m = re.search(r"build_pure\.js\?v=(\d+)", _app_js())
+    assert m, "app.js no longer imports build_pure.js with a cache key"
+    assert int(m.group(1)) >= 32, (
+        "build_pure.js?v= regressed below the version whose orderedLayers "
+        "takes zOrder — a cached v31 mis-stacks or breaks the previews"
     )
 
 

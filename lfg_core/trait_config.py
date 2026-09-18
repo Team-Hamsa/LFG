@@ -5,6 +5,7 @@
 # The layer *stores* stay the authority on which files exist; this config is
 # the authority on which combinations are legal.
 
+import math
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -68,6 +69,19 @@ class TraitConfig:
 
     def sort_attributes(self, attrs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(attrs, key=lambda a: self.z_for(a["trait_type"], a["value"]))
+
+    def z_table(self) -> dict[str, Any]:
+        """z_for's inputs as JSON-safe data, for the client's layered previews
+        (build_pure.js orderedLayers, via /api/economy `z_order`) to sort
+        exactly like sort_attributes. Overrides stay a list in config order —
+        z_for is first-match and load_config does not reject a repeated
+        (trait_type, value), so a last-wins map would disagree with it."""
+        return {
+            "layers": {layer.name: layer.z for layer in self.layers},
+            "z_overrides": [
+                {"trait_type": o.trait_type, "value": o.value, "z": o.z} for o in self.z_overrides
+            ],
+        }
 
     def allowed_bodies(self, trait_type: str, value: str) -> frozenset[str] | None:
         entry = self.affinity.get(trait_type, {}).get(value)
@@ -174,6 +188,14 @@ def _check_bodies(bodies: Iterable[str], where: str) -> None:
         raise TraitConfigError(f"unknown body {sorted(unknown)} in {where}")
 
 
+def _check_z(z: float, where: str) -> None:
+    # float() takes .nan/.inf (and "1e999"), but z_table() serves every z to
+    # the browser via /api/economy, and json.dumps writes those as bare
+    # NaN/Infinity tokens JSON.parse rejects — the whole payload would fail.
+    if not math.isfinite(z):
+        raise TraitConfigError(f"{where} z must be a finite number, got {z!r}")
+
+
 def _check_exclusions(exclusions: Any, layer_names: set[str]) -> None:
     """Validate exclusions shape at load time. conflicts() does
     `v in values` on each rule's "values" — if that's a bare string (e.g. a
@@ -238,6 +260,8 @@ def load_config(path: str) -> TraitConfig:
     names = [layer.name for layer in layers]
     if len(names) != len(set(names)):
         raise TraitConfigError("duplicate layer name in layers")
+    for layer in layers:
+        _check_z(layer.z, f"layer {layer.name!r}")
     if not layers:
         raise TraitConfigError("layers section is required")
 
@@ -247,6 +271,7 @@ def load_config(path: str) -> TraitConfig:
     for o in z_overrides:
         if o.trait_type not in names:
             raise TraitConfigError(f"z_override for unknown layer {o.trait_type!r}")
+        _check_z(o.z, f"z_override {o.trait_type}/{o.value}")
 
     affinity: dict[str, dict[str, list[str]]] = raw.get("affinity", {}) or {}
     for trait_type, values in affinity.items():

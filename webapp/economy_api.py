@@ -69,6 +69,10 @@ def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
         "characters": chars,
         "closet": {"assets": assets, "token": closet_token},
         "trait_order": swap_meta.TRAIT_ORDER,
+        # trait_order alone would stack every value at its slot's z; this adds
+        # the per-value z_overrides (e.g. Wavy Eyes floats above Head) so the
+        # layered previews match what swap_compose actually composes.
+        "z_order": trait_config.get_config().z_table(),
         "slots": trait_economy.NON_BODY_SLOTS,
         "trait_tokens": trait_tokens,
     }

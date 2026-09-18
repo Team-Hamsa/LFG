@@ -17,7 +17,7 @@ import * as closetPure from './closet_market_pure.js?v=1';
 import * as mintPure from './mint_pure.js?v=25';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=31';
+import * as buildPure from './build_pure.js?v=32';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -3663,8 +3663,9 @@ function renderCanvas(char) {
   const shown = buildPure.applyPending(char.attributes, pending());
   const byType = Object.fromEntries(shown.map((a) => [a.trait_type, a.value]));
   // Same shared stacker the Assemble builder's preview uses (#T31 defect 1)
-  // — one z-order implementation, not two.
-  for (const { slot, value } of buildPure.orderedLayers(order, byType)) {
+  // — one z-order implementation, not two. z_order carries the per-value
+  // z_overrides (e.g. Wavy Eyes above Head), as the composed art has them.
+  for (const { slot, value } of buildPure.orderedLayers(order, byType, economyState.z_order)) {
     if (!layerComplete(char.body, value)) continue;
     canvas.appendChild(layerMediaEl(layerSrc(char.body, slot, value), ''));
   }
@@ -4917,7 +4918,7 @@ function refreshBuilderPreview() {
   // dead code that could silently reintroduce the Body-forced-first bug if
   // it were ever (wrongly) exercised.
   const order = economyState.trait_order;
-  const layers = buildPure.orderedLayers(order, { ...chosen, Body: body });
+  const layers = buildPure.orderedLayers(order, { ...chosen, Body: body }, economyState.z_order);
   preview.replaceChildren(
     ...layers.map(({ slot, value }) => layerMediaEl(layerSrc(cls, slot, value), `${slot}: ${value}`)),
   );
