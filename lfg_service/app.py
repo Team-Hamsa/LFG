@@ -5832,15 +5832,18 @@ async def _closet_market_mirror(conn: sqlite3.Connection, owner: str) -> None:
     uploaded or submitted while this owner's mirror may lack a committed
     version (#530). Both checks are needed:
       * `mirror_pending` (#184): a flow's Closet modify committed but its
-        mirror write failed. While this owner has an unmirrored fill the
+        mirror write failed. The archive check below can read that mirror as
+        current: the flow records the new URI and ledger stamp before it
+        writes the contents, and while this owner has an unmirrored fill the
         listener skips the contents rebuild (#443) yet still advances the
-        mirror's URI and ledger stamp, so the archive check below would read
-        those stale contents as current.
+        record.
       * `ensure_mirror_current`: the history archive holds a newer version of
-        this Closet than the mirror.
+        this Closet than the mirror. The archive is REQUIRED here: unlike a
+        user-facing flow, this background retry waits when the archive is
+        missing or unreadable rather than overwrite unchecked.
     Each raises a plain (not committed) ClosetError — code
-    CLOSET_MIRROR_PENDING / CLOSET_MIRROR_BEHIND — which
-    `closet_market_flow._mirror` treats as a wait, not a failed attempt."""
+    CLOSET_MIRROR_PENDING / CLOSET_MIRROR_BEHIND / CLOSET_MIRROR_UNVERIFIED —
+    which `closet_market_flow._mirror` treats as a wait, not a failed attempt."""
     deps = economy_api.build_settlement_deps(conn)
     if economy_store.get_mirror_pending(conn, owner):
         raise closet_token.ClosetError(
@@ -5848,7 +5851,9 @@ async def _closet_market_mirror(conn: sqlite3.Connection, owner: str) -> None:
             "modify's mirror write failed); refusing a full overwrite",
             code=closet_token.CLOSET_MIRROR_PENDING,
         )
-    closet_token.ensure_mirror_current(conn, owner, history_db_path=deps.history_db_path)
+    closet_token.ensure_mirror_current(
+        conn, owner, history_db_path=deps.history_db_path, require_archive=True
+    )
     assets = [
         (s, v, c) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
     ]

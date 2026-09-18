@@ -70,7 +70,7 @@ Journals: `$ECONOMY_RECORDS_DIR/closet-fill-<id>.json` and `closet-order-<id>.js
 | `indeterminate` | a backend tx outcome is unknown (or a crash left a write-ahead intent: `pending_phase` set) | if `CLOSET_MARKET_ENC_KEY` is missing, restore it and let the settlement sweep run first; once the sweep runs, none — never edit the row by hand (it resolves when the validated ledger passes `pending_lls`: memo `lfg:closet_<phase>:<id>` found = landed, absent = retried) |
 | `asset_moved` + attempts > 0 | forward payment failing | check app wallet BRIX balance (audit `owes` line); or the counterparty removed their BRIX trustline (audit `payout failing` line) — the forward retries until they re-add it |
 | `paid` + attempts > 0 | Closet mirror failing | check CDN / NFTokenModify; the listener will not rebuild this owner until mirrored (and for 5 minutes after) |
-| `paid` + error `Closet update is waiting for a Closet to catch up with the ledger…` | that side's Closet mirror may lack a version already on-chain, so its overwrite is refused (no attempt counted) | see §6 |
+| `paid` + error `Closet update is waiting for a Closet to catch up with the ledger…` | that side's Closet mirror may lack a version already on-chain, or the history archive can't be read to check, so its overwrite is refused (no attempt counted) | see §6 |
 | `refund_pending` + attempts > 0 | refund failing | app wallet balance; or the counterparty removed their BRIX trustline (audit `payout failing` line) — the refund retries until they re-add it |
 
 Any fill or order with `pending_phase` set resolves itself: memo `lfg:closet_<phase>:<id>` found = landed, validated ledger past `pending_lls` with nothing found = retried; never edit these columns by hand.
@@ -83,12 +83,23 @@ the economy flows, the step refuses first, with nothing uploaded or submitted, w
 the owner is `mirror_pending` (a committed Closet modify whose mirror write failed)
 or when the history archive holds a newer version of the Closet than the mirror.
 
+It also refuses when the history archive (`history_<net>.db`) can't be read at all:
+the file is missing, corrupt, or the read fails, for example on a lock that outlasts
+the 5-second timeout. The user-facing flows skip the check in that case (#529).
+The settlement doesn't: it retries anyway, so waiting only delays the mirror, while
+an unchecked overwrite could erase a newer version. The archive is shared, so this
+pauses the mirror step of every fill, for both sides, until it can be read again.
+The next sweep pass after that goes ahead. The residual stall below does not apply
+to this case.
+
 What it looks like:
 
 - `lfg-activity` log, a WARNING on every sweep pass:
-  `closet fill <id>: Closet update for <owner> (<side>) is waiting (closet_mirror_behind|closet_mirror_pending): …`.
+  `closet fill <id>: Closet update for <owner> (<side>) is waiting (closet_mirror_behind|closet_mirror_pending|closet_mirror_unverified): …`.
   A `closet_mirror_behind` refusal comes after
-  `Closet mirror for <owner> (<nft_id>) holds the ledger-<N> version but the archive has ledger <M>; refusing a full overwrite`.
+  `Closet mirror for <owner> (<nft_id>) holds the ledger-<N> version but the archive has ledger <M>; refusing a full overwrite`,
+  and a `closet_mirror_unverified` one after
+  `Closet stale-mirror check for <owner> cannot run: history archive <path> unavailable (<error>); refusing a full overwrite`.
 - The fill row: `state = paid`, `<side>_mirrored = 0`, `attempts` unchanged, and
   `error = Closet update is waiting for a Closet to catch up with the ledger; will retry automatically`.
   The error is written once, so `updated_ts` stops moving. After an hour the nightly

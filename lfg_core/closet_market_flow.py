@@ -62,7 +62,11 @@ MIRROR_WAIT_ERROR = (
 )
 # The not-committed ClosetError codes of those refusals (see _mirror).
 _MIRROR_WAIT_CODES = frozenset(
-    {closet_token.CLOSET_MIRROR_BEHIND, closet_token.CLOSET_MIRROR_PENDING}
+    {
+        closet_token.CLOSET_MIRROR_BEHIND,
+        closet_token.CLOSET_MIRROR_PENDING,
+        closet_token.CLOSET_MIRROR_UNVERIFIED,
+    }
 )
 
 

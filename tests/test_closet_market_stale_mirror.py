@@ -7,10 +7,13 @@
 #   * behind  — the ledger history archive holds a newer version of the Closet
 #               than the mirror (`closet_token.ensure_mirror_current`);
 #   * pending — a committed Closet modify's mirror write failed (the #184
-#               `mirror_pending` flag). While the owner has an unmirrored fill
+#               `mirror_pending` flag). The archive check alone can read that
+#               mirror as current: the flow records the new URI and stamp before
+#               it writes the contents, and while the owner has an unmirrored fill
 #               the listener skips the contents rebuild (#443) but still advances
-#               the mirror's URI and ledger stamp, so the archive check alone
-#               reads those stale contents as current.
+#               the record;
+#   * unverified — the history archive can't be read (or none is wired), so
+#               nothing shows the mirror is current.
 #
 # A refusal is a wait, not a failure: the side stays unmirrored, no attempt is
 # counted, and the settlement sweep retries it until the mirror catches up.
@@ -102,6 +105,16 @@ def _settlement_deps(c, chain, archive, records_dir):
     )
 
 
+def _wire(monkeypatch, tmp_path, chain, archive):
+    """Serve `_closet_market_mirror` the recorded Closet ops and `archive` (a
+    history archive path, or None for none wired)."""
+    monkeypatch.setattr(
+        server.economy_api,
+        "build_settlement_deps",
+        lambda c: _settlement_deps(c, chain, archive, str(tmp_path / "records")),
+    )
+
+
 def _setup(tmp_path, monkeypatch, buyer_versions):
     """A seller holding the traded unit and a buyer, each with an active Closet
     whose mirror is dated to the version the archive also holds."""
@@ -118,11 +131,7 @@ def _setup(tmp_path, monkeypatch, buyer_versions):
     closet_archive(tmp_path, SELLER_CLOSET, [("modify", SELLER_A, 900)])
     archive = closet_archive(tmp_path, BUYER_CLOSET, buyer_versions)
     chain = _Chain()
-    monkeypatch.setattr(
-        server.economy_api,
-        "build_settlement_deps",
-        lambda c: _settlement_deps(c, chain, archive, str(tmp_path / "records")),
-    )
+    _wire(monkeypatch, tmp_path, chain, archive)
     return path, chain, archive
 
 
@@ -338,10 +347,111 @@ def test_the_sweep_retries_a_waiting_fill_until_the_mirror_catches_up(
     assert chain.touched() == sorted([seller, buyer])
 
 
+# --- an unavailable history archive -----------------------------------------------
+#
+# The archive is the only evidence that a mirror is current. The user-facing flows
+# keep #529's deliberate fail-open when it is unavailable, but the settlement
+# retries in the background anyway: waiting costs a delayed mirror, while an
+# unchecked overwrite could erase a newer on-chain version.
+
+
+def _corrupt_archive(tmp_path):
+    path = tmp_path / "corrupt_history.db"
+    path.write_bytes(b"not a sqlite database " * 64)
+    return str(path)
+
+
+ARCHIVE_UNAVAILABLE = {
+    "missing": lambda tmp_path: str(tmp_path / "no_such_history.db"),
+    "unreadable": _corrupt_archive,
+    "unwired": lambda tmp_path: None,
+}
+
+
+@pytest.mark.parametrize("archive", sorted(ARCHIVE_UNAVAILABLE))
+def test_mirror_refuses_when_the_history_archive_is_unavailable(archive, tmp_path, monkeypatch):
+    path, chain, _ = _setup(tmp_path, monkeypatch, CURRENT)
+    _wire(monkeypatch, tmp_path, chain, ARCHIVE_UNAVAILABLE[archive](tmp_path))
+    c = conn(path)
+
+    with pytest.raises(ct.ClosetError) as refused:
+        run(server._closet_market_mirror(c, BUYER))
+
+    assert chain.uploads == [] and chain.modifies == []
+    assert type(refused.value) is ct.ClosetError  # plain: nothing was committed
+    assert refused.value.code == ct.CLOSET_MIRROR_UNVERIFIED
+    c.close()
+
+
+@pytest.mark.parametrize("archive", sorted(ARCHIVE_UNAVAILABLE))
+def test_settlement_waits_while_the_history_archive_is_unavailable(
+    archive, tmp_path, monkeypatch, caplog
+):
+    path, chain, real_archive = _setup(tmp_path, monkeypatch, CURRENT)
+    _wire(monkeypatch, tmp_path, chain, ARCHIVE_UNAVAILABLE[archive](tmp_path))
+    f = Fakes()
+    fl = _holder_fill(path, f)
+    d = _real_mirror_deps(path, f, tmp_path)
+    caplog.set_level(logging.WARNING)
+
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.PAID
+
+    assert chain.touched() == []  # nothing uploaded or modified, for either side
+    got = fill(path, fl["id"])
+    assert (got["seller_mirrored"], got["buyer_mirrored"]) == (0, 0)
+    assert (got["attempts"], got["error"]) == (0, cmf.MIRROR_WAIT_ERROR)
+    assert _waiting_warnings(caplog, fl["id"], ct.CLOSET_MIRROR_UNVERIFIED)
+
+    # The archive is readable again (say the listener is back): the next pass
+    # checks both sides, finds them current and mirrors them.
+    _wire(monkeypatch, tmp_path, chain, real_archive)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+    got = fill(path, fl["id"])
+    assert (got["attempts"], got["error"]) == (0, None)
+    assert chain.touched() == [BUYER, SELLER]
+
+
+@pytest.mark.parametrize("archive", sorted(ARCHIVE_UNAVAILABLE))
+def test_a_required_archive_check_refuses_when_the_archive_cannot_answer(archive, tmp_path):
+    path = str(tmp_path / "onchain.db")
+    make_db(path)
+    c = conn(path)
+
+    with pytest.raises(ct.ClosetError) as refused:
+        ct.ensure_mirror_current(
+            c, BUYER, history_db_path=ARCHIVE_UNAVAILABLE[archive](tmp_path), require_archive=True
+        )
+
+    assert type(refused.value) is ct.ClosetError
+    assert refused.value.code == ct.CLOSET_MIRROR_UNVERIFIED
+    c.close()
+
+
+@pytest.mark.parametrize("archive", sorted(ARCHIVE_UNAVAILABLE))
+def test_a_flow_style_check_still_passes_when_the_archive_cannot_answer(archive, tmp_path, caplog):
+    """Without `require_archive` (every economy flow), #529's behavior is unchanged:
+    an unavailable archive skips the check with a WARNING; none wired skips it silently."""
+    path = str(tmp_path / "onchain.db")
+    make_db(path)
+    c = conn(path)
+    caplog.set_level(logging.WARNING)
+
+    assert (
+        ct.ensure_mirror_current(c, BUYER, history_db_path=ARCHIVE_UNAVAILABLE[archive](tmp_path))
+        is None
+    )
+
+    skipped = [r for r in caplog.records if "stale-mirror check skipped" in r.getMessage()]
+    assert len(skipped) == (0 if archive == "unwired" else 1)
+    c.close()
+
+
 # --- closet_market_flow._mirror: a wait is not a failed attempt -------------------
 
 
-@pytest.mark.parametrize("code", [ct.CLOSET_MIRROR_BEHIND, ct.CLOSET_MIRROR_PENDING])
+@pytest.mark.parametrize(
+    "code", [ct.CLOSET_MIRROR_BEHIND, ct.CLOSET_MIRROR_PENDING, ct.CLOSET_MIRROR_UNVERIFIED]
+)
 def test_a_stale_mirror_refusal_is_a_wait_not_a_failed_attempt(code, tmp_path, caplog):
     path = str(tmp_path / "onchain.db")
     make_db(path)
