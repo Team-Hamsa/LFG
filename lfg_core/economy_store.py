@@ -305,6 +305,35 @@ def read_closet_bodies(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     ]
 
 
+def closet_holds_contents(
+    conn: sqlite3.Connection,
+    owner: str,
+    assets: list[tuple[str, str, int]],
+    bodies: list[int],
+) -> bool:
+    """True when `owner`'s mirrored contents are exactly `assets` + `bodies`
+    (counts <= 0 ignored, as `set_closet_contents` drops them) — i.e. the mirror
+    holds that Closet version's contents (#535)."""
+    held = {
+        (str(slot), str(value)): int(count)
+        for slot, value, count in conn.execute(
+            "SELECT slot, value, count FROM closet_assets WHERE owner = ? AND count > 0",
+            (owner,),
+        )
+    }
+    wanted: dict[tuple[str, str], int] = {}
+    for slot, value, count in assets:
+        if count > 0:
+            wanted[(slot, value)] = wanted.get((slot, value), 0) + count
+    held_bodies = sorted(
+        int(edition)
+        for (edition,) in conn.execute(
+            "SELECT edition FROM closet_bodies WHERE owner = ?", (owner,)
+        )
+    )
+    return held == wanted and held_bodies == sorted(bodies)
+
+
 def read_trait_tokens(conn: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
     return [
         (str(nft_id), str(owner), str(slot), str(value))

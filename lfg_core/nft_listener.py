@@ -253,19 +253,31 @@ def _apply_closet(
         )
         return
     resolved = isinstance(metadata, dict)
+    # Whether the record (URI + stamp) may name this version: only when the
+    # mirror's contents ARE this version's (#522/#535).
+    names_version = resolved
     # The contents and the record naming their version commit together (#535).
     with economy_store.closet_mirror_write(conn):
-        if resolved:
+        if isinstance(metadata, dict):
+            assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
             if closet_market_store.has_recent_fill(conn, owner):
                 # #443: a Closet Market fill moved a unit in the DB first; this
                 # owner's token metadata is behind until the fill's mirror modify
                 # lands (and clio may lag a few minutes past that). Rebuilding
-                # now would resurrect the moved unit.
+                # now would resurrect the moved unit. The kept contents may still
+                # BE this version (the settlement wrote it from them, and only its
+                # record write failed) — then the record names it. Otherwise it
+                # must not: this version holds a change the kept contents lack
+                # (a flow modify that came back indeterminate but landed), and a
+                # record claiming it would let the next full overwrite erase that
+                # change on-chain. Unnamed, the stale-mirror guard sees the mirror
+                # as behind and every overwrite waits.
+                names_version = economy_store.closet_holds_contents(conn, owner, assets, bodies)
                 logging.info(
                     f"_apply_closet: {owner} has a recent Closet Market fill; keeping DB contents"
+                    + ("" if names_version else " and the version they hold")
                 )
             else:
-                assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
                 economy_store.set_closet_contents(conn, owner, assets, bodies, commit=False)
         else:
             # Fail closed on UNRESOLVED metadata (fetch returned None — RPC/IPFS
@@ -284,11 +296,11 @@ def _apply_closet(
         existing = economy_store.get_closet_record(conn, owner)
         existing_offer_id = existing[3] if existing is not None else None
         uri_hex = token.get("uri_hex") or ""
-        if not resolved and existing is not None:
+        if not names_version and existing is not None:
             # The contents stayed at the version already mirrored, so its URI
-            # stays too (#522): naming the unread version over them would make a
-            # mirror that is behind the chain look current to the flows'
-            # stale-mirror guard.
+            # stays too (#522): naming the unread (or unheld) version over them
+            # would make a mirror that is behind the chain look current to the
+            # flows' stale-mirror guard.
             uri_hex = existing[1]
         economy_store.set_closet_token(
             conn,
@@ -297,8 +309,8 @@ def _apply_closet(
             uri_hex,
             status=closet_token.ACTIVE,
             offer_id=existing_offer_id,
-            applied_ledger_index=ledger_index if resolved else None,
-            applied_tx_index=tx_index if resolved else None,
+            applied_ledger_index=ledger_index if names_version else None,
+            applied_tx_index=tx_index if names_version else None,
             commit=False,
         )
 

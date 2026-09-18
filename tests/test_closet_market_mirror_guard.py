@@ -144,3 +144,140 @@ def test_listener_rebuilds_normally_once_mirrored_long_enough():
         ct.build_closet_metadata(SELLER, [("Head", "Tiara", 1)], []),
     )
     assert cms.holding_count(c, SELLER, "Head", "Tiara") == 1
+
+
+# --- #535: during a fill the mirror's record never names a version the DB lacks ---
+#
+# While an owner has an unmirrored (or just-mirrored) fill, the listener and the
+# backfill keep the DB contents (#443). The record's URI + stamp tell the flows'
+# and the settlement's stale-mirror guard which version those contents are; it
+# may name the new version only when the DB holds exactly its contents.
+
+from lfg_core import history_store  # noqa: E402
+from tests.closet_archive_helpers import closet_archive, closet_uri  # noqa: E402
+
+SELLER_CLOSET = "C-" + SELLER
+
+
+def _stamped_seller(c):
+    es.set_closet_token(
+        c,
+        SELLER,
+        SELLER_CLOSET,
+        closet_uri("u"),
+        status=ct.ACTIVE,
+        applied_ledger_index=1000,
+        applied_tx_index=1,
+    )
+
+
+def _landed_flow_version():
+    """A version the DB lacks: a flow's Closet modify came back indeterminate
+    but landed (the flow wrote no mirror) — a deposit credit on top of the
+    post-fill contents."""
+    return ct.build_closet_metadata(SELLER, [("Eyes", "Wavy", 1)], [])
+
+
+def test_listener_never_names_a_version_the_kept_contents_lack(tmp_path):
+    c = _moved_fill_conn()
+    _stamped_seller(c)
+
+    nft_listener._apply_closet(
+        c,
+        {"owner": SELLER, "nft_id": SELLER_CLOSET, "uri_hex": closet_uri("v")},
+        _landed_flow_version(),
+        ledger_index=1005,
+        tx_index=3,
+    )
+
+    assert es.get_closet_token(c, SELLER) == (SELLER_CLOSET, closet_uri("u"))
+    assert es.get_closet_applied_position(c, SELLER) == (1000, 1)
+    # So the guard sees the mirror as behind and the settlement waits instead of
+    # erasing the credit with its full overwrite.
+    archive = closet_archive(
+        tmp_path,
+        SELLER_CLOSET,
+        [("modify", closet_uri("u"), 1000, 1), ("modify", closet_uri("v"), 1005, 3)],
+    )
+    try:
+        ct.ensure_mirror_current(c, SELLER, history_db_path=archive)
+    except ct.ClosetError as e:
+        assert e.code == ct.CLOSET_MIRROR_BEHIND
+    else:
+        raise AssertionError("the guard read a mirror lacking version v as current")
+
+
+def test_listener_names_the_version_the_kept_contents_are():
+    """The settlement wrote version v from these very DB contents but its record
+    write failed: the DB holds exactly v, so the record may name it."""
+    c = _moved_fill_conn()
+    _stamped_seller(c)
+
+    nft_listener._apply_closet(
+        c,
+        {"owner": SELLER, "nft_id": SELLER_CLOSET, "uri_hex": closet_uri("v")},
+        ct.build_closet_metadata(SELLER, [], []),
+        ledger_index=1005,
+        tx_index=3,
+    )
+
+    assert es.get_closet_token(c, SELLER) == (SELLER_CLOSET, closet_uri("v"))
+    assert es.get_closet_applied_position(c, SELLER) == (1005, 3)
+
+
+def _backfill_module():
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "backfill_economy.py"
+    spec = importlib.util.spec_from_file_location("backfill_economy_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_backfill_never_names_a_version_the_kept_contents_lack(tmp_path):
+    c = _moved_fill_conn()
+    _stamped_seller(c)
+    archive = history_store.connect_readonly(
+        closet_archive(
+            tmp_path,
+            SELLER_CLOSET,
+            [("modify", closet_uri("u"), 1000, 1), ("modify", closet_uri("v"), 1005, 3)],
+        )
+    )
+    try:
+        _backfill_module()._reconcile_closet(
+            c,
+            {"owner": SELLER, "nft_id": SELLER_CLOSET, "uri_hex": closet_uri("v")},
+            _landed_flow_version(),
+            "rIssuer",
+            archive=archive,
+        )
+    finally:
+        archive.close()
+
+    assert es.get_closet_token(c, SELLER) == (SELLER_CLOSET, closet_uri("u"))
+    assert es.get_closet_applied_position(c, SELLER) == (1000, 1)
+
+
+def test_backfill_names_and_dates_the_version_the_kept_contents_are(tmp_path):
+    c = _moved_fill_conn()
+    _stamped_seller(c)
+    archive = history_store.connect_readonly(
+        closet_archive(
+            tmp_path,
+            SELLER_CLOSET,
+            [("modify", closet_uri("u"), 1000, 1), ("modify", closet_uri("v"), 1005, 3)],
+        )
+    )
+    try:
+        _backfill_module()._reconcile_closet(
+            c,
+            {"owner": SELLER, "nft_id": SELLER_CLOSET, "uri_hex": closet_uri("v")},
+            ct.build_closet_metadata(SELLER, [], []),
+            "rIssuer",
+            archive=archive,
+        )
+    finally:
+        archive.close()
+
+    assert es.get_closet_token(c, SELLER) == (SELLER_CLOSET, closet_uri("v"))
+    assert es.get_closet_applied_position(c, SELLER) == (1005, 3)

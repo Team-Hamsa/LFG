@@ -142,31 +142,41 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
-    rebuilt = False
+    # Whether the record may name the snapshot's version: the mirror's contents
+    # are that version's (rebuilt from it here, or already exactly it).
+    names_version = True
     # Contents, record and re-dated stamp describe one version: one
     # transaction, so a failure part-way leaves the old mirror whole (#535).
     with economy_store.closet_mirror_write(conn):
+        existing = economy_store.get_closet_record(conn, owner)
+        assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
         if closet_market_store.has_recent_fill(conn, owner):
             # #443: DB is ahead of the token until the fill's mirror lands — see
-            # nft_listener._apply_closet.
-            print(f"skip contents for {owner}: recent Closet Market fill")
+            # nft_listener._apply_closet. The record names the snapshot's
+            # version only when the kept contents ARE it (#535): naming a
+            # version they lack would let the stale-mirror guard pass the next
+            # full overwrite, which would erase that version's change on-chain.
+            # (With no record yet there is nothing to keep, so its URI is
+            # written — but left undated unless the contents are that version.)
+            names_version = economy_store.closet_holds_contents(conn, owner, assets, bodies)
+            print(
+                f"skip contents for {owner}: recent Closet Market fill"
+                + ("" if names_version else "; keeping the version they hold")
+            )
         else:
-            assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
             economy_store.set_closet_contents(conn, owner, assets, bodies, commit=False)
-            rebuilt = True
         status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
-        existing = economy_store.get_closet_record(conn, owner)
         existing_offer_id = existing[3] if existing is not None else None
         economy_store.set_closet_token(
             conn,
             owner,
             token["nft_id"],
-            token.get("uri_hex") or "",
+            (token.get("uri_hex") or "") if names_version or existing is None else existing[1],
             status=status,
             offer_id=existing_offer_id,
             commit=False,
         )
-        if rebuilt:
+        if names_version:
             # #522: this snapshot comes from clio, the source that can still
             # serve the PREVIOUS Closet URI right after a modify validates, so
             # the stamp that described the mirror BEFORE this rewrite must not
