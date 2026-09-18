@@ -21,7 +21,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 from xrpl.wallet import Wallet
 
 from lfg_core import closet_market_store as cms
-from lfg_core import config, market_ops
+from lfg_core import config, economy_flow, market_ops, market_store
 
 
 class HouseConfigError(RuntimeError):
@@ -249,3 +249,124 @@ def check_ready(
             f"{len(stuck)} item(s) need attention ({', '.join(sorted(stuck))}); resolve "
             "them from their Deposit journals before the migration continues"
         )
+
+
+_RETRYABLE = (PLANNED, FAILED)
+
+
+@dataclass
+class MigrationDeps:
+    economy: economy_flow.EconomyDeps
+    app_wallet: str
+    house: str
+    fee_bps: int
+    plan_path: str
+
+
+async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
+    """Burn each planned token into the house Closet. True once nothing is left
+    to deposit; False when it stopped on a failure (the item's error says why)."""
+    items = state["items"]
+    todo = sorted(n for n, e in items.items() if e["status"] in _RETRYABLE)
+    if not todo:
+        return True
+    conn = deps.economy.conn
+    if house_busy(conn, deps.house):
+        raise MigrationRefused(
+            "the house has a live order or an unfinished fill, so the service may be "
+            "rewriting its Closet; deposits only run before the house lists anything"
+        )
+    for nft_id in todo:
+        entry = items[nft_id]
+        info = await deps.economy.trait_info_fn(nft_id)  # type: ignore[misc]
+        if info is None:
+            entry.update(status=FAILED, error="could not look up the token on-ledger")
+            save_state(deps.plan_path, state)
+            return False
+        if info.get("is_burned") or info.get("owner") != deps.app_wallet:
+            entry.update(
+                status=SKIPPED,
+                error=f"no longer held by the app wallet (owner {info.get('owner')}, "
+                f"burned {bool(info.get('is_burned'))})",
+            )
+            save_state(deps.plan_path, state)
+            continue
+        session = economy_flow.DepositSession(
+            owner=deps.app_wallet, nft_id=nft_id, credit_to=deps.house
+        )
+        await economy_flow.run_deposit(session, deps.economy)
+        entry.update(journal_id=session.id, burn_hash=session.burn_hash)
+        if session.state == economy_flow.DONE:
+            # The burn deleted the sell offer on-ledger, but the listener does not
+            # close listings on a burn; without this the row lingers until the
+            # nightly market sweep.
+            market_store.close_listing(conn, entry["offer_index"], "cancelled")
+            entry.update(status=DEPOSITED if entry["action"] == LIST else HELD, error=None)
+            save_state(deps.plan_path, state)
+            continue
+        burned = bool(session.burn_hash or session.pending_tx_hash)
+        entry.update(status=NEEDS_ATTENTION if burned else FAILED, error=session.error)
+        save_state(deps.plan_path, state)
+        return False
+    return True
+
+
+def _unrecorded_ask(
+    conn: sqlite3.Connection, house: str, key: tuple[str, str], state: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A house ask for this key that no plan entry records, posted since this
+    plan started: a crash between create_ask and the plan save. Adopting it keeps
+    a re-run from listing the same unit twice."""
+    recorded = {e.get("order_id") for e in state["items"].values()}
+    rows = conn.execute(
+        "SELECT id FROM closet_orders WHERE owner = ? AND side = 'ask' AND slot = ? "
+        "AND value = ? AND state != 'cancelled' AND created_ts >= ? "
+        "ORDER BY created_ts, id",
+        (house, key[0], key[1], state["started"]),
+    ).fetchall()
+    for (order_id,) in rows:
+        if order_id not in recorded:
+            return cms.get_order(conn, order_id)
+    return None
+
+
+def list_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
+    """Post an ask for each deposited unit at its old price, crossing any open
+    bid at or above it (the service's sweep settles the fill). Runs only once
+    every deposit is done; it never touches the Closet token, so it cannot race
+    the service. True when every deposited unit is listed."""
+    items = state["items"]
+    waiting = [n for n, e in items.items() if e["status"] in (*_RETRYABLE, NEEDS_ATTENTION)]
+    if waiting:
+        raise MigrationRefused(
+            f"{len(waiting)} item(s) not deposited yet; listing waits for every deposit"
+        )
+    conn = deps.economy.conn
+    for nft_id in sorted(n for n, e in items.items() if e["status"] == DEPOSITED):
+        entry = items[nft_id]
+        key = (entry["slot"], entry["value"])
+        order = _unrecorded_ask(conn, deps.house, key, state)
+        if order is None:
+            try:
+                order = cms.create_ask(
+                    conn,
+                    owner=deps.house,
+                    slot=key[0],
+                    value=key[1],
+                    price_brix=entry["price_brix"],
+                    platform=None,
+                )
+            except cms.OrderError as exc:
+                entry["error"] = str(exc)
+                save_state(deps.plan_path, state)
+                return False
+        fill = (
+            cms.cross_incoming(conn, order["id"], fee_bps=deps.fee_bps)
+            if order["state"] == cms.OPEN
+            else None
+        )
+        entry.update(
+            status=LISTED, order_id=order["id"], fill_id=fill["id"] if fill else None, error=None
+        )
+        save_state(deps.plan_path, state)
+    return True
