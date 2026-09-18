@@ -114,3 +114,12 @@ def test_a_failed_accept_clears_the_offer_for_the_next_run(tmp_path):
     with pytest.raises(hc.MigrationRefused, match="tecOBJECT_NOT_FOUND"):
         _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))
     assert es.get_closet_record(conn, HOUSE)[3] is None
+
+
+def test_setup_confirms_a_landed_accept_without_resubmitting(tmp_path):
+    chain = _Chain(line={"limit": "1000000000"})
+    chain.accepted = True  # a previous run's accept landed; the DB hasn't caught up
+    conn, deps = _setup_deps(tmp_path, chain)
+    es.set_closet_token(conn, HOUSE, "C-house", "AB", status=ct.PENDING_ACCEPT, offer_id="OLD")
+    assert _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))["closet"] == ct.ACTIVE
+    assert chain.submitted == []

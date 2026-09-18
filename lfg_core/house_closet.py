@@ -429,6 +429,11 @@ async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[st
 
     econ, conn = deps.economy, deps.economy.conn
     rec = es.get_closet_record(conn, house)
+    if rec is not None and rec[2] != ct.ACTIVE:
+        # A previous run's accept may have landed before the listener caught
+        # up: confirm on-ledger before paying for a second accept.
+        if await ct.confirm_accept(conn, house, owner_fn=econ.closet_owner_fn) == ct.ACTIVE:  # type: ignore[arg-type]
+            rec = es.get_closet_record(conn, house)
     if rec is not None and rec[2] == ct.ACTIVE:
         steps["closet"] = ct.ACTIVE
         return steps
