@@ -238,6 +238,105 @@ input[type="text"]:focus {
 }
 input::placeholder { color: var(--muted); }
 
+/* --- Selects (dropdowns) ---
+   Every <select> gets the text inputs' calm treatment: dark fill, hairline
+   border, blue focus. color-scheme keeps the OS-drawn option list dark in
+   browsers that skip the customizable select below. The chevron is a
+   same-origin file, not a data: URI, so the Activity CSP can't block it. */
+
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  color-scheme: dark;
+  max-width: 100%;
+  padding: 12px 38px 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111 url(assets/select-chevron.svg) no-repeat right 14px center / 12px 8px;
+  color: var(--text);
+  /* 16px: iOS zooms the page into any focused control with smaller text. */
+  font: 500 1rem/1.25 'Inter', system-ui, sans-serif;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color var(--speed), box-shadow var(--speed);
+}
+select:hover { border-color: var(--blue); }
+select:focus-visible {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(72, 144, 192, .25);
+}
+select:disabled { opacity: .45; cursor: not-allowed; border-color: var(--line); }
+select option { background: var(--surface); color: var(--text); }
+
+/* Customizable select (Chromium 135+: Chrome/Edge, Android webviews, and
+   Electron apps such as Discord desktop once built on 135+) lets us draw the
+   open list too. Safari/iOS, Firefox and older Chromium skip this block and
+   keep the dark native list above. */
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  /* One line, like a native select: a long label runs under the chevron's
+     fade and is clipped at the border. The UA forces overflow: visible on a
+     base-select, so contain: paint does the clipping — the focus ring and
+     the open list (top layer) sit outside it. */
+  select {
+    display: inline-grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0; /* the icon's fade is the gap */
+    white-space: nowrap;
+    contain: paint;
+    padding-right: 14px;
+    background-image: none;
+  }
+  select::picker-icon {
+    content: '';
+    width: 26px; /* 14px fade + the 12px chevron */
+    height: 20px;
+    margin-right: -14px; /* reach over the right padding so no text shows past it */
+    padding-right: 14px;
+    background:
+      url(assets/select-chevron.svg) no-repeat right 14px center / 12px 8px,
+      linear-gradient(90deg, rgba(17, 17, 17, 0), #111 14px);
+    transition: scale var(--speed);
+  }
+  select:open::picker-icon { scale: 1 -1; }
+  select:open {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(72, 144, 192, .25);
+  }
+
+  ::picker(select) {
+    min-inline-size: anchor-size(width);
+    margin: 6px 0;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .6);
+    scrollbar-width: thin;
+    scrollbar-color: #3a3a3a transparent;
+  }
+  select option {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    transition: background-color var(--speed);
+  }
+  select option:hover { background: var(--surface-2); }
+  select option:focus-visible {
+    background: var(--surface-2);
+    outline: 2px solid var(--blue);
+    outline-offset: -2px;
+  }
+  select option:checked { font-weight: 600; }
+  select option::checkmark { order: 1; margin-left: auto; color: var(--yellow); }
+  select option:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
+}
+
 /* --- Buttons ---
    One primary per view; it gets the sticker. Everything else stays calm. */
 
@@ -946,7 +1045,9 @@ button.back:hover { color: var(--text); border: none; }
   display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; text-align: left;
 }
 .market-filters input[type="text"] { flex: 1 1 100px; margin: 0; }
-.market-filters select { flex: 1 1 100px; }
+/* Sized to the label (the text inputs fill the rest): a 100px basis cut
+   "Price: low → high" off at the select's 16px text. */
+.market-filters select { flex: 0 1 auto; }
 .market-filters button { margin: 0; flex: 0 0 auto; }
 .market-card-price {
   display: block; color: var(--yellow); font-size: .72rem; font-weight: 700;
@@ -1222,4 +1323,8 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   background: #3ecf8e; color: #111; font-size: .62rem; font-weight: 800;
   padding: 2px 6px; border-radius: 999px; pointer-events: none;
 }
-#closet-bid-form-panel select { width: 100%; margin: 4px 0 10px; }
+/* Sized to the choice and centered under its label, not full-bleed like the
+   price input. Block-level keeps each label on its own line; grid rather
+   than block because the customizable select lays out its label + chevron
+   on the grid set above (a native select treats it as plain block). */
+#closet-bid-form-panel select { display: grid; width: fit-content; margin: 4px auto 10px; }
