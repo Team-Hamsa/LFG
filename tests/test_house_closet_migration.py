@@ -5,10 +5,9 @@ from cryptography.fernet import Fernet
 
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
-from lfg_core import config
+from lfg_core import config, market_store
 from lfg_core import economy_store as es
 from lfg_core import house_closet as hc
-from lfg_core import market_store
 from lfg_core.market_store import MarketListing, upsert_listing
 from lfg_core.nft_index import init_db as init_onchain_db
 

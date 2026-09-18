@@ -462,8 +462,6 @@ async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[st
         # The stored offer is gone or unusable: clear it so the next run makes
         # a fresh one for the same token.
         es.set_closet_token(conn, house, nft_id, uri_hex, status=status, offer_id=None)
-        raise MigrationRefused(
-            f"accepting the Closet offer failed: {result}; re-run --apply-setup"
-        )
+        raise MigrationRefused(f"accepting the Closet offer failed: {result}; re-run --apply-setup")
     steps["closet"] = status
     return steps

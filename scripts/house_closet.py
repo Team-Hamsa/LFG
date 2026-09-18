@@ -26,12 +26,12 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.dirname(__file__))
 
+import _economy_deps as deps  # noqa: E402
 from xrpl.asyncio.transaction import submit_and_wait  # noqa: E402
 from xrpl.models.requests import AccountInfo, AccountLines  # noqa: E402
 from xrpl.models.transactions import Transaction  # noqa: E402
 from xrpl.wallet import Wallet  # noqa: E402
 
-import _economy_deps as deps  # noqa: E402
 from lfg_core import config, xrpl_ops  # noqa: E402
 from lfg_core import house_closet as hc  # noqa: E402
 
