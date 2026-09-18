@@ -446,6 +446,64 @@ def test_sync_closet_stamps_the_ledger_its_modify_validated_in():
     assert es.get_closet_applied_ledger(c, "rB") == 2000
 
 
+def test_sync_closet_stamps_the_tx_index_its_modify_validated_at():
+    """#537: the flow's own version is positioned by (ledger, tx index), so a
+    same-ledger modify the listener reaches later can be ordered against it."""
+    c = _seeded_conn()
+
+    async def modify(nft_id: str, owner: str, url: str) -> bt.ModifyReceipt:
+        return bt.ModifyReceipt(tx_hash="SYNCHASH", ledger_index=2000, transaction_index=6)
+
+    f = _SyncFakes()
+    _run(bt.sync_closet(c, "rB", [("Hat", "Cap", 1)], [], upload_fn=f.upload, modify_fn=modify))
+
+    assert es.get_closet_applied_position(c, "rB") == (2000, 6)
+
+
+def test_sync_closet_never_mirrors_a_version_it_cannot_date():
+    """#536: the modify committed, but neither its result nor the lookup by hash
+    said which ledger. Mirroring it anyway names the new URI over the previous
+    version's stamp, and a lagging listener event from between the two versions
+    would then pass the monotonic check and roll the mirror back. Fail closed:
+    report committed-but-unmirrored and leave the mirror whole, so the flow
+    flags it pending and the listener dates the version from its own tx."""
+    c = _seeded_conn()
+    es.set_closet_token(
+        c,
+        "rB",
+        "NFT_SYNC",
+        "AABB",
+        status=bt.ACTIVE,
+        applied_ledger_index=1500,
+        applied_tx_index=2,
+    )
+    es.set_closet_contents(c, "rB", [("Hat", "Old", 1)], [])
+
+    async def modify(nft_id: str, owner: str, url: str) -> bt.ModifyReceipt:
+        return bt.ModifyReceipt(tx_hash="SYNCHASH", ledger_index=None)
+
+    f = _SyncFakes()
+    with pytest.raises(bt.ClosetMirrorError) as ei:
+        _run(
+            bt.sync_closet(
+                c,
+                "rB",
+                [("Hat", "Cap", 1)],
+                [],
+                upload_fn=f.upload,
+                modify_fn=modify,
+                persist_contents=True,
+            )
+        )
+
+    assert ei.value.tx_hash == "SYNCHASH"
+    assert es.get_closet_token(c, "rB") == ("NFT_SYNC", "AABB")
+    assert es.get_closet_applied_position(c, "rB") == (1500, 2)
+    assert {(s, v): n for o, s, v, n in es.read_closet_assets(c) if o == "rB"} == {
+        ("Hat", "Old"): 1
+    }
+
+
 def test_sync_closet_without_a_known_ledger_keeps_the_stamp():
     """A modify that reports only its hash (no validated ledger) still moves
     the URI; the stamp it cannot improve stays."""
@@ -661,5 +719,68 @@ def test_mirror_guard_passes_when_the_archive_has_no_version_of_the_closet(tmp_p
 
     c = _mirror(closet_uri("b"), applied_ledger_index=1000)
     path = closet_archive(tmp_path, "SOME_OTHER_TOKEN", [("modify", closet_uri("z"), 2000)])
+
+    bt.ensure_mirror_current(c, "rUser", history_db_path=path)
+
+
+# --- #537: order Closet versions by (ledger, tx index), not ledger alone ---
+
+
+def _mirror_at(uri_hex: str, ledger_index: int, tx_index: int | None) -> sqlite3.Connection:
+    c = _conn()
+    es.set_closet_token(
+        c,
+        "rUser",
+        MIRROR_CLOSET,
+        uri_hex,
+        status=bt.ACTIVE,
+        applied_ledger_index=ledger_index,
+        applied_tx_index=tx_index,
+    )
+    return c
+
+
+def test_mirror_guard_refuses_a_newer_version_from_the_same_ledger(tmp_path):
+    """Two Closet modifies validated in ledger 1005; the mirror holds the first
+    (tx index 4) and the archive has the second (9). By ledger alone they look
+    the same age, and the full overwrite would erase the second."""
+    c = _mirror_at(closet_uri("c"), 1005, 4)
+    path = _archive(
+        tmp_path, ("modify", closet_uri("c"), 1005, 4), ("modify", closet_uri("d"), 1005, 9)
+    )
+
+    with pytest.raises(bt.ClosetError) as ei:
+        bt.ensure_mirror_current(c, "rUser", history_db_path=path)
+    assert ei.value.code == "closet_mirror_behind"
+
+
+def test_mirror_guard_passes_the_newest_version_of_a_shared_ledger(tmp_path):
+    c = _mirror_at(closet_uri("d"), 1005, 9)
+    path = _archive(
+        tmp_path, ("modify", closet_uri("c"), 1005, 4), ("modify", closet_uri("d"), 1005, 9)
+    )
+
+    bt.ensure_mirror_current(c, "rUser", history_db_path=path)
+
+
+def test_mirror_guard_dates_an_unstamped_mirror_by_its_archived_tx_index(tmp_path):
+    """No stamp: the archive's own position for the mirror's URI dates it, tx
+    index included."""
+    c = _mirror(closet_uri("c"))
+    path = _archive(
+        tmp_path, ("modify", closet_uri("c"), 1005, 4), ("modify", closet_uri("d"), 1005, 9)
+    )
+
+    with pytest.raises(bt.ClosetError) as ei:
+        bt.ensure_mirror_current(c, "rUser", history_db_path=path)
+    assert ei.value.code == "closet_mirror_behind"
+
+
+def test_mirror_guard_keeps_ledger_order_when_the_tx_index_is_unknown(tmp_path):
+    """A #522 stamp carries the ledger only. Nothing orders it within ledger
+    1005, so it cannot be shown to be behind a version from that ledger —
+    exactly the ledger-only behavior it had before."""
+    c = _mirror_at(closet_uri("unarchived"), 1005, None)
+    path = _archive(tmp_path, ("modify", closet_uri("d"), 1005, 9))
 
     bt.ensure_mirror_current(c, "rUser", history_db_path=path)

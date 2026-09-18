@@ -124,11 +124,21 @@ class MintNFTResult:
 
 @dataclass(frozen=True)
 class ModifyNFTResult:
-    """A validated NFTokenModify: its hash and the ledger it validated in (None
-    when the validated result did not report one)."""
+    """A validated NFTokenModify: its hash, the ledger it validated in, and its
+    TransactionIndex within that ledger (#537) — each None when the validated
+    result did not report it."""
 
     tx_hash: str
     ledger_index: int | None
+    transaction_index: int | None = None
+
+
+def _validated_int(value: Any) -> int | None:
+    """A non-negative integer field of a validated result, or None (a bool, a
+    string or a negative value is never a ledger position)."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 @dataclass(frozen=True)
@@ -2490,7 +2500,8 @@ async def modify_nft(
     or None. `platform` records the originating surface in the memo (#54).
 
     `return_details=True` opts into a `ModifyNFTResult` that also carries the
-    ledger the modify validated in (the Closet mirror stamp, #522)."""
+    ledger the modify validated in and its TransactionIndex there (the Closet
+    mirror stamp, #522/#537)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = rpc_client()
@@ -2513,10 +2524,14 @@ async def modify_nft(
         tx_hash: str = result["hash"]
         logging.info(f"NFT modified: {nft_id} ({tx_hash})")
         if return_details:
-            ledger_index = result.get("ledger_index")
-            if isinstance(ledger_index, bool) or not isinstance(ledger_index, int):
-                ledger_index = None
-            return ModifyNFTResult(tx_hash=tx_hash, ledger_index=ledger_index)
+            meta = result.get("meta")
+            return ModifyNFTResult(
+                tx_hash=tx_hash,
+                ledger_index=_validated_int(result.get("ledger_index")),
+                transaction_index=_validated_int(
+                    meta.get("TransactionIndex") if isinstance(meta, dict) else None
+                ),
+            )
         return tx_hash
 
     except IndeterminateResultError:

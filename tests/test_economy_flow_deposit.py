@@ -254,6 +254,33 @@ def test_deposit_mirror_failure_completes_pending_mirror(tmp_path):
     assert record["mirror_pending"] is True
 
 
+def test_deposit_whose_closet_modify_cannot_be_dated_completes_pending_mirror(tmp_path):
+    """#536: the credit committed on-chain but no ledger dates that Closet
+    version. The mirror is left for the listener (which dates it from the tx)
+    and flagged pending, so no later op full-overwrites the Closet from it in
+    the meantime."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait_token(conn)
+    f = _F()
+    f.owner_for["TRAIT9"] = "rUser"
+
+    async def undated_modify(nft_id: str, owner: str, url: str) -> ct.ModifyReceipt:
+        f.modifies += 1
+        return ct.ModifyReceipt(tx_hash="MOD", ledger_index=None)
+
+    deps = _deps(conn, f, tmp_path)
+    deps.closet_modify_fn = undated_modify
+    session = ef.DepositSession(owner="rUser", nft_id="TRAIT9")
+    _run(ef.run_deposit(session, deps))
+
+    assert session.state == ef.DONE
+    record = json.loads((tmp_path / f"deposit-{session.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MOD"
+    assert es.get_mirror_pending(conn, "rUser")
+    assert es.get_closet_token(conn, "rUser") == ("CLOSET", "AB")  # not claimed undated
+
+
 def test_deposit_indeterminate_journals_and_fails(tmp_path):
     """closet_modify raises (credit outcome unknown): fail-closed — FAILED,
     journal deposit_sync_indeterminate with slot/value preserved so an admin

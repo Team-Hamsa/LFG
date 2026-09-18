@@ -209,38 +209,51 @@ async def _closet_modify(nft_id: str, owner: str, url: str) -> closet_token.Modi
     compensation, reconcile from chain) instead of collapsing an unknown outcome
     to a plain ClosetError ('did NOT commit'). A definitive, validated failure
     still returns None → plain ClosetError; a success returns the tx hash with
-    the ledger it validated in, which sync_closet stamps on the mirror (#522)."""
+    the ledger it validated in and its TransactionIndex there, which sync_closet
+    stamps on the mirror (#522/#537)."""
     try:
         result = await xrpl_ops.modify_nft(nft_id, owner, url, return_details=True)
     except xrpl_ops.IndeterminateResultError as e:
         raise closet_token.ClosetIndeterminateError(str(e)) from e
     if result is None:
         return None
-    ledger_index = result.ledger_index
+    ledger_index, tx_index = result.ledger_index, result.transaction_index
     if ledger_index is None:
-        ledger_index = await _validated_ledger_of(result.tx_hash)
-    return closet_token.ModifyReceipt(tx_hash=result.tx_hash, ledger_index=ledger_index)
+        ledger_index, tx_index = await _validated_position_of(result.tx_hash)
+    return closet_token.ModifyReceipt(
+        tx_hash=result.tx_hash, ledger_index=ledger_index, transaction_index=tx_index
+    )
 
 
-async def _validated_ledger_of(tx_hash: str) -> int | None:
-    """The ledger a committed transaction validated in, looked up by hash (#522).
+def _position_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+async def _validated_position_of(tx_hash: str) -> tuple[int | None, int | None]:
+    """The (ledger, TransactionIndex) a committed transaction validated at,
+    looked up by hash (#522/#537); (None, None) when the lookup cannot say.
 
     `modify_nft`'s own result normally reports it. When it does not, the Closet
     mirror would name the NEW URI while still carrying the stamp of the previous
     version, and a delayed listener event from a ledger in between would pass the
-    monotonic check and roll the mirror back. Best effort: the modify has already
-    committed, so a failed lookup just leaves that version undated."""
+    monotonic check and roll the mirror back. The modify has already committed,
+    so a failed lookup cannot fail it: it reports the version undated, and
+    sync_closet then leaves the mirror for the listener to date (#536)."""
     try:
         result = await xrpl_ops.get_tx(tx_hash)
     except Exception as e:
         logging.warning(f"could not resolve the validated ledger of {tx_hash}: {e}")
-        return None
+        return None, None
     if not isinstance(result, dict) or not result.get("validated"):
-        return None
-    ledger_index = result.get("ledger_index")
-    if isinstance(ledger_index, bool) or not isinstance(ledger_index, int):
-        return None
-    return ledger_index
+        return None, None
+    ledger_index = _position_int(result.get("ledger_index"))
+    if ledger_index is None:
+        return None, None
+    meta = result.get("meta")
+    tx_index = _position_int(meta.get("TransactionIndex") if isinstance(meta, dict) else None)
+    return ledger_index, tx_index
 
 
 async def _trait_info(nft_id: str) -> dict[str, Any] | None:

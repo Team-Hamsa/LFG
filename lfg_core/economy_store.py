@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
 from typing import Any
 
 from lfg_core import closet_market_store, config, trait_economy
@@ -89,7 +91,8 @@ CREATE TABLE IF NOT EXISTS closet_tokens (
     offer_id       TEXT,
     mirror_pending INTEGER DEFAULT 0,
     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    applied_ledger_index INTEGER   -- ledger of the Closet version uri_hex names (#522)
+    applied_ledger_index INTEGER,  -- ledger of the Closet version uri_hex names (#522)
+    applied_tx_index     INTEGER   -- its TransactionIndex within that ledger (#537)
 );
 CREATE TABLE IF NOT EXISTS supply_changes (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +127,7 @@ def _migrate_bucket_tables(conn: sqlite3.Connection) -> None:
 _ADDED_CLOSET_COLUMNS = (
     ("mirror_pending", "INTEGER DEFAULT 0"),
     ("applied_ledger_index", "INTEGER"),
+    ("applied_tx_index", "INTEGER"),
 )
 
 
@@ -133,7 +137,9 @@ def _migrate_closet_columns(conn: sqlite3.Connection) -> None:
     but whose local mirror write failed (`complete_pending_mirror`); an index DB
     created before this column needs it added. `applied_ledger_index` (#522) is
     the validated ledger of the Closet version the mirror holds; NULL (every row
-    written before it existed) means unknown.
+    written before it existed) means unknown. `applied_tx_index` (#537) is that
+    version's TransactionIndex within the ledger, so two Closet modifies in one
+    ledger still order; NULL means unknown (every row stamped before it existed).
 
     The PRAGMA check makes ADD COLUMN idempotent, and a lost race on it is
     tolerated: the service, the listener and the crons each open this index, so
@@ -336,11 +342,14 @@ def set_closet_contents(
     owner: str,
     assets: list[tuple[str, str, int]],
     bodies: list[int],
+    *,
+    commit: bool = True,
 ) -> None:
     """Replace ALL of `owner`'s loose-asset and loose-body rows in one
     transaction. Used by both the flows (optimistic write) and the listener
     (rebuild from the Closet NFToken's metadata). Rows with count <= 0 are
-    dropped so the mirror never carries empty entries."""
+    dropped so the mirror never carries empty entries. `commit=False` leaves
+    the write to an enclosing `closet_mirror_write` (#535)."""
     _reject_project_account(owner)
     conn.execute("DELETE FROM closet_assets WHERE owner = ?", (owner,))
     conn.execute("DELETE FROM closet_bodies WHERE owner = ?", (owner,))
@@ -357,6 +366,27 @@ def set_closet_contents(
     # on-chain Closet again, so clear any outstanding mirror_pending flag (#184)
     # in the SAME transaction — a rollback (half-applied mirror) leaves it set.
     conn.execute("UPDATE closet_tokens SET mirror_pending = 0 WHERE owner = ?", (owner,))
+    if commit:
+        conn.commit()
+
+
+@contextlib.contextmanager
+def closet_mirror_write(conn: sqlite3.Connection) -> Iterator[None]:
+    """One owner's Closet mirror write as ONE transaction (#535).
+
+    A mirror is a Closet version: its contents (`closet_assets`), the URI that
+    names it and the (ledger, tx index) stamp that dates it (`closet_tokens`).
+    Committed separately, a crash between the writes could leave contents from
+    one version under another version's record — and the flows' stale-mirror
+    guard reads that record, so a behind mirror could pass as current and the
+    next full overwrite would erase a credit on-chain (#522). Writers inside the
+    block pass `commit=False`; the block commits once, or rolls back on any
+    exception so nothing half-applied stays pending on the connection."""
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
     conn.commit()
 
 
@@ -381,37 +411,62 @@ def set_closet_token(
     status: str = "pending_accept",
     offer_id: str | None = None,
     applied_ledger_index: int | None = None,
+    applied_tx_index: int | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     """Record/update an owner's Closet NFToken id, URI, lifecycle status, and the
     outstanding accept offer id (kept so the UI can re-show the Xaman accept).
+    `commit=False` leaves the write to an enclosing `closet_mirror_write` (#535).
 
     `applied_ledger_index` stamps the validated ledger of the version `uri_hex`
-    names (#522). A writer that does not know it passes None, which keeps the
-    stored stamp: whatever it writes is at least as new as that version."""
+    names (#522), and `applied_tx_index` its TransactionIndex in that ledger
+    (#537; None = unknown). A writer that does not know the ledger passes None,
+    which keeps the stored stamp: whatever it writes is at least as new as that
+    version. The pair is kept or replaced WHOLE — one version's ledger is never
+    paired with another version's tx index."""
     _reject_project_account(owner)
     conn.execute(
         """
         INSERT INTO closet_tokens
-            (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index,
+             applied_tx_index, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(owner) DO UPDATE SET
             nft_id=excluded.nft_id, uri_hex=excluded.uri_hex,
             status=excluded.status, offer_id=excluded.offer_id,
+            applied_tx_index=CASE WHEN excluded.applied_ledger_index IS NULL
+                THEN closet_tokens.applied_tx_index ELSE excluded.applied_tx_index END,
             applied_ledger_index=COALESCE(
                 excluded.applied_ledger_index, closet_tokens.applied_ledger_index
             ),
             updated_at=CURRENT_TIMESTAMP
         """,
-        (owner, nft_id, uri_hex, status, offer_id, applied_ledger_index),
+        (
+            owner,
+            nft_id,
+            uri_hex,
+            status,
+            offer_id,
+            applied_ledger_index,
+            applied_tx_index if applied_ledger_index is not None else None,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def set_closet_applied_ledger(
-    conn: sqlite3.Connection, owner: str, ledger_index: int | None
+    conn: sqlite3.Connection,
+    owner: str,
+    ledger_index: int | None,
+    tx_index: int | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     """Re-date (or, with None, forget) which Closet version the owner's mirror
-    holds (#522) — unlike `set_closet_token`, this never keeps the old stamp.
+    holds (#522), as its (ledger, tx index) position (#537; a None `tx_index`
+    means unknown) — unlike `set_closet_token`, this never keeps the old stamp.
 
     For a writer that REPLACED the contents from a source it cannot date itself:
     the clio snapshot `scripts/backfill_economy.py` reads lags a just-validated
@@ -419,21 +474,36 @@ def set_closet_applied_ledger(
     was written, and `closet_token.ensure_mirror_current` would read a behind
     mirror as current. `None` (nothing dates the version) is the honest fallback;
     a ledger from the history archive is better, because it also lets the
-    listener refuse an OLDER modify that would undo the rebuild."""
+    listener refuse an OLDER modify that would undo the rebuild. `commit=False`
+    leaves the write to an enclosing `closet_mirror_write` (#535)."""
     conn.execute(
-        "UPDATE closet_tokens SET applied_ledger_index = ? WHERE owner = ?",
-        (ledger_index, owner),
+        "UPDATE closet_tokens SET applied_ledger_index = ?, applied_tx_index = ? WHERE owner = ?",
+        (ledger_index, tx_index if ledger_index is not None else None, owner),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_closet_applied_ledger(conn: sqlite3.Connection, owner: str) -> int | None:
     """The validated ledger of the Closet version the owner's mirror holds
     (#522), or None when there is no row or that ledger is unknown."""
+    position = get_closet_applied_position(conn, owner)
+    return None if position is None else position[0]
+
+
+def get_closet_applied_position(
+    conn: sqlite3.Connection, owner: str
+) -> tuple[int, int | None] | None:
+    """The (ledger, tx index) of the Closet version the owner's mirror holds
+    (#537; the tx index is None when unknown), or None when there is no row or
+    the version's ledger is unknown."""
     row = conn.execute(
-        "SELECT applied_ledger_index FROM closet_tokens WHERE owner = ?", (owner,)
+        "SELECT applied_ledger_index, applied_tx_index FROM closet_tokens WHERE owner = ?",
+        (owner,),
     ).fetchone()
-    return None if row is None or row[0] is None else int(row[0])
+    if row is None or row[0] is None:
+        return None
+    return int(row[0]), None if row[1] is None else int(row[1])
 
 
 def set_closet_status(conn: sqlite3.Connection, owner: str, status: str) -> None:

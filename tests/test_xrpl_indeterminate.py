@@ -194,14 +194,71 @@ def test_closet_modify_definitive_failure_stays_none(monkeypatch):
     assert _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json")) is None
 
 
-def _validated_in_ledger(tx_hash: str, ledger_index: int) -> _Resp:
+def _validated_in_ledger(tx_hash: str, ledger_index: int, tx_index: int | None = None) -> _Resp:
+    meta: dict = {"TransactionResult": "tesSUCCESS"}
+    if tx_index is not None:
+        meta["TransactionIndex"] = tx_index
     return _Resp(
         {
             "hash": tx_hash,
             "ledger_index": ledger_index,
             "validated": True,
-            "meta": {"TransactionResult": "tesSUCCESS"},
+            "meta": meta,
         }
+    )
+
+
+def test_modify_opt_in_details_include_the_validated_tx_index(monkeypatch):
+    """#537: two Closet modifies can validate in one ledger; the TransactionIndex
+    orders them."""
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops,
+        "submit_and_wait",
+        lambda tx, client, wallet, **k: _validated_in_ledger("H1", 777, tx_index=5),
+    )
+
+    result = _run(xrpl_ops.modify_nft("NFTID", "rOwner", "https://x/new.json", return_details=True))
+
+    assert result == xrpl_ops.ModifyNFTResult(tx_hash="H1", ledger_index=777, transaction_index=5)
+
+
+def test_closet_modify_reports_the_ledger_and_tx_index_it_validated_at(monkeypatch):
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops,
+        "submit_and_wait",
+        lambda tx, client, wallet, **k: _validated_in_ledger("H1", 777, tx_index=5),
+    )
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert result == closet_token.ModifyReceipt(tx_hash="H1", ledger_index=777, transaction_index=5)
+
+
+def test_closet_modify_resolves_a_missing_position_from_the_tx_lookup(monkeypatch):
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated(tx_hash="H3")
+    )
+
+    async def fake_get_tx(tx_hash):
+        return {"validated": True, "ledger_index": 4242, "meta": {"TransactionIndex": 11}}
+
+    monkeypatch.setattr(deps.xrpl_ops, "get_tx", fake_get_tx)
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert result == closet_token.ModifyReceipt(
+        tx_hash="H3", ledger_index=4242, transaction_index=11
     )
 
 

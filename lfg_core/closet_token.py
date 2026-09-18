@@ -28,15 +28,44 @@ MIRROR_BEHIND_MESSAGE = (
 # Asset triples are (slot, value, count); bodies are edition ints.
 Asset = tuple[str, str, int]
 
+# Where a Closet version validated: (ledger_index, TransactionIndex). The tx
+# index is None when unknown (a #522 ledger-only stamp) (#537).
+VersionPosition = tuple[int, int | None]
+
+
+def version_is_newer(a: VersionPosition, b: VersionPosition) -> bool:
+    """True when the Closet version at `a` is strictly newer than the one at `b`:
+    a later ledger, or the same ledger with a later TransactionIndex (#537 — two
+    Closet modifies can validate in one ledger). An unknown tx index cannot
+    order two versions of one ledger, so it never reads as newer: the
+    ledger-only answer the stamp gave before tx indexes were recorded."""
+    if a[0] != b[0]:
+        return a[0] > b[0]
+    return a[1] is not None and b[1] is not None and a[1] > b[1]
+
+
+def _describe(position: VersionPosition) -> str:
+    ledger, tx_index = position
+    return f"ledger {ledger}" if tx_index is None else f"ledger {ledger} tx {tx_index}"
+
 
 @dataclass(frozen=True)
 class ModifyReceipt:
-    """A validated Closet NFTokenModify: its hash and the ledger it validated in
-    (None when the submit result did not say). The ledger stamps the mirrored
-    version so the listener applies Closet versions monotonically (#522)."""
+    """A validated Closet NFTokenModify: its hash, the ledger it validated in and
+    its TransactionIndex there (each None when the submit result did not say).
+    The (ledger, tx index) position stamps the mirrored version so the listener
+    applies Closet versions monotonically (#522/#537)."""
 
     tx_hash: str
     ledger_index: int | None = None
+    transaction_index: int | None = None
+
+
+# ClosetError message of a committed Closet modify no ledger dates (#536).
+UNDATED_MODIFY_MESSAGE = (
+    "Closet URI modified on-chain but its validated ledger is unknown; "
+    "leaving the mirror for the listener to date"
+)
 
 
 # Injected XRPL/CDN operations (real wrappers in EconomyDeps; fakes in tests):
@@ -45,7 +74,10 @@ MintFn = Callable[[str], Awaitable[str | None]]  # url -> nft_id
 OfferFn = Callable[[str, str], Awaitable[str | None]]  # (nft_id, owner) -> offer_id
 AcceptFn = Callable[[str], Awaitable[dict[str, Any] | None]]  # offer_id -> XUMM payload
 ModifyFn = Callable[[str, str, str], Awaitable[str | None]]  # (nft_id, owner, url) -> tx hash
-# The Closet modify may also report the ledger it validated in.
+# The Closet modify may also report where it validated: a ModifyReceipt. A
+# receipt WITHOUT a ledger means "committed, but I could not date it", and
+# sync_closet then fails closed (#536); a bare hash is a modify fn that never
+# dates its writes (test doubles), mirrored unstamped as before.
 ClosetModifyFn = Callable[[str, str, str], Awaitable[str | ModifyReceipt | None]]
 ExistsFn = Callable[[str], Awaitable[bool]]  # nft_id -> does it exist on-ledger?
 OwnerFn = Callable[[str], Awaitable[str | None]]  # nft_id -> current owner address or None
@@ -324,9 +356,10 @@ def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None)
     archive: the listener derives it from the tx stream, so it cannot lag a
     validated modify the way clio `nft_info` can. The mirror is behind when the
     archive's newest version of the Closet is newer than the version the mirror
-    holds — dated by the mirror's ledger stamp or by the ledger at which the
-    archive saw the mirror's URI. A mirror that is the newest archived version,
-    or whose version nothing dates, is not refused.
+    holds — dated by the mirror's stamp or by where the archive saw the mirror's
+    URI, as (ledger, tx index) positions (#537: a newer version from the SAME
+    ledger is still newer). A mirror that is the newest archived version, or
+    whose version nothing dates, is not refused.
 
     Raises a plain, not-committed ClosetError with code CLOSET_MIRROR_BEHIND:
     call it before anything is submitted; the user retries once the listener
@@ -341,7 +374,7 @@ def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None)
     try:
         with contextlib.closing(history_store.connect_readonly(history_db_path)) as archive:
             newest = history_store.latest_uri_version(archive, nft_id)
-            seen = history_store.uri_version_ledger(archive, nft_id, mirror_uri)
+            seen = history_store.uri_version_position(archive, nft_id, mirror_uri)
     except (OSError, sqlite3.Error) as e:
         logging.warning(
             f"Closet stale-mirror check skipped for {owner}: history archive "
@@ -350,17 +383,18 @@ def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None)
         return
     if newest is None:
         return
+    newest_at: VersionPosition = (newest.ledger_index, newest.transaction_index)
     dated = [
-        ledger
-        for ledger in (economy_store.get_closet_applied_ledger(conn, owner), seen)
-        if ledger is not None
+        position
+        for position in (economy_store.get_closet_applied_position(conn, owner), seen)
+        if position is not None
     ]
-    if not dated or newest.ledger_index <= max(dated):
+    if not dated or not all(version_is_newer(newest_at, position) for position in dated):
         return
+    held = ", ".join(_describe(position) for position in dated)
     logging.warning(
-        f"Closet mirror for {owner} ({nft_id}) holds the ledger-{max(dated)} version but the "
-        f"archive has ledger {newest.ledger_index}; refusing a full overwrite "
-        f"({CLOSET_MIRROR_BEHIND})"
+        f"Closet mirror for {owner} ({nft_id}) holds the version at {held} but the archive "
+        f"has {_describe(newest_at)}; refusing a full overwrite ({CLOSET_MIRROR_BEHIND})"
     )
     raise ClosetError(MIRROR_BEHIND_MESSAGE, code=CLOSET_MIRROR_BEHIND)
 
@@ -373,20 +407,31 @@ async def sync_closet(
     *,
     upload_fn: UploadFn,
     modify_fn: ClosetModifyFn,
+    persist_contents: bool = False,
 ) -> str:
     """Recompose the Closet NFToken's metadata from the given contents and
     NFTokenModify its URI in place (the token id is stable). Persists the new
     URI and returns the modify tx hash. When `modify_fn` returns a
-    `ModifyReceipt`, the version's validated ledger is stamped with the URI
-    (#522), so a lagging listener cannot roll this write back.
+    `ModifyReceipt`, the version's validated (ledger, tx index) is stamped with
+    the URI (#522/#537), so a lagging listener cannot roll this write back.
+
+    `persist_contents=True` also writes `assets`/`bodies` to the mirror, in the
+    SAME transaction as the URI and stamp (#535): the flows' mirror of their own
+    version is all-or-nothing, never new contents under the old record or the
+    new record over the old contents. A caller whose contents are already in
+    the DB (the Closet Market settlement) leaves it False.
 
     Phase-aware failure taxonomy (#107):
     - plain ClosetError — the modify definitively did NOT commit (no record,
       or modify_fn returned falsy); on-chain compensation is safe.
     - ClosetIndeterminateError — modify_fn raised; commit status unknown.
-    - ClosetMirrorError(tx_hash) — the modify COMMITTED but the local
-      closet_tokens write failed (rolled back first, so nothing half-applied
-      is left pending on the shared connection).
+    - ClosetMirrorError(tx_hash) — the modify COMMITTED but the local mirror
+      write failed (rolled back first, so nothing half-applied is left
+      pending on the shared connection), or was never attempted because the
+      receipt could not date the version (#536): a mirror naming an undated
+      version would carry the PREVIOUS version's stamp, and a lagging listener
+      event from between the two could roll it back. Either way the mirror is
+      left for the listener, which dates the version from its own tx.
     A raise from upload_fn happens before any ledger effect and propagates
     RAW (callers treat it as ledger-failed)."""
     record = economy_store.get_closet_record(conn, owner)
@@ -404,22 +449,30 @@ async def sync_closet(
         ) from e
     tx_hash: str | None = result.tx_hash if isinstance(result, ModifyReceipt) else result
     ledger_index = result.ledger_index if isinstance(result, ModifyReceipt) else None
+    tx_index = result.transaction_index if isinstance(result, ModifyReceipt) else None
     if not tx_hash:
         raise ClosetError("failed to modify Closet NFToken URI")
+    if isinstance(result, ModifyReceipt) and ledger_index is None:
+        logging.warning(f"Closet modify {tx_hash} for {owner} validated at an unknown ledger")
+        raise ClosetMirrorError(UNDATED_MODIFY_MESSAGE, tx_hash)
     try:
-        economy_store.set_closet_token(
-            conn,
-            owner,
-            nft_id,
-            _hex(url),
-            status=status,
-            offer_id=offer_id,
-            applied_ledger_index=ledger_index,
-        )
+        with economy_store.closet_mirror_write(conn):
+            if persist_contents:
+                economy_store.set_closet_contents(conn, owner, assets, bodies, commit=False)
+            economy_store.set_closet_token(
+                conn,
+                owner,
+                nft_id,
+                _hex(url),
+                status=status,
+                offer_id=offer_id,
+                applied_ledger_index=ledger_index,
+                applied_tx_index=tx_index,
+                commit=False,
+            )
     except Exception as e:
-        conn.rollback()
         raise ClosetMirrorError(
-            f"Closet URI modified on-chain but the closet_tokens mirror write failed: {e}",
+            f"Closet URI modified on-chain but the Closet mirror write failed: {e}",
             tx_hash,
         ) from e
     return tx_hash

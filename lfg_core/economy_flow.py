@@ -379,26 +379,20 @@ async def _sync_then_persist(
       (burn-back / modify-back) is safe.
     - bt.ClosetIndeterminateError: the modify outcome is unknown; fail-closed —
       no on-chain compensation, reconcile from chain.
-    - bt.ClosetMirrorError(tx_hash): the modify COMMITTED, only a local DB
-      write failed. The shared connection is rolled back before the raise, so
-      the mirror is left stale-but-consistent (never half-applied) until the
-      listener rebuilds it from the token's on-chain metadata. Do NOT undo
-      anything on-chain."""
-    asset_list = _assets_to_list(assets)
-    tx_hash = await bt.sync_closet(
+    - bt.ClosetMirrorError(tx_hash): the modify COMMITTED, only the local
+      mirror write failed. The contents, URI and version stamp are written as
+      ONE transaction (#535) and rolled back together, so the mirror is left
+      stale-but-consistent (never half-applied) until the listener rebuilds it
+      from the token's on-chain metadata. Do NOT undo anything on-chain."""
+    return await bt.sync_closet(
         deps.conn,
         owner,
-        asset_list,
+        _assets_to_list(assets),
         [],
         upload_fn=deps.closet_upload_fn,
         modify_fn=deps.closet_modify_fn,
+        persist_contents=True,
     )
-    try:
-        es.set_closet_contents(deps.conn, owner, asset_list, [])
-    except Exception as e:
-        deps.conn.rollback()
-        raise bt.ClosetMirrorError(f"closet contents mirror failed: {e}", tx_hash) from e
-    return tx_hash
 
 
 def _effective_genesis(conn: Any) -> te.Genesis:

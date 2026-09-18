@@ -160,6 +160,69 @@ def test_closet_tokens_applied_ledger_column_self_migrates():
     assert es.get_closet_applied_ledger(c, "rA") == 77
 
 
+def test_closet_stamp_is_the_ledger_and_tx_index_of_the_mirrored_version():
+    """#537: two Closet modifies can validate in ONE ledger, so the mirrored
+    version is positioned by (ledger, transaction index), not ledger alone."""
+    c = _conn()
+    es.set_closet_token(
+        c, "rA", "N1", "AB", status="active", applied_ledger_index=1000, applied_tx_index=7
+    )
+
+    assert es.get_closet_applied_position(c, "rA") == (1000, 7)
+    assert es.get_closet_applied_ledger(c, "rA") == 1000
+
+
+def test_closet_stamp_never_pairs_one_versions_ledger_with_anothers_tx_index():
+    """The pair describes ONE version. A write that knows the ledger of its
+    version but not the tx index must not inherit the previous version's index,
+    and a write that knows neither keeps the stored pair whole."""
+    c = _conn()
+    es.set_closet_token(
+        c, "rA", "N1", "AB", status="active", applied_ledger_index=1000, applied_tx_index=7
+    )
+
+    es.set_closet_token(c, "rA", "N1", "CD", status="active", applied_ledger_index=1005)
+    assert es.get_closet_applied_position(c, "rA") == (1005, None)
+
+    es.set_closet_token(c, "rA", "N1", "EF", status="active")
+    assert es.get_closet_applied_position(c, "rA") == (1005, None)
+
+
+def test_closet_restamp_replaces_the_whole_position():
+    c = _conn()
+    es.set_closet_token(
+        c, "rA", "N1", "AB", status="active", applied_ledger_index=1000, applied_tx_index=7
+    )
+
+    es.set_closet_applied_ledger(c, "rA", 1010, 3)
+    assert es.get_closet_applied_position(c, "rA") == (1010, 3)
+
+    es.set_closet_applied_ledger(c, "rA", None)
+    assert es.get_closet_applied_position(c, "rA") is None
+
+
+def test_closet_tokens_tx_index_column_self_migrates():
+    """#537: an index DB stamped by #522 (ledger only) gains the tx-index column
+    on open; its rows keep their ledger and read an unknown (None) tx index."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE closet_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            status TEXT DEFAULT 'pending_accept', offer_id TEXT,
+            mirror_pending INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            applied_ledger_index INTEGER
+        );
+        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, applied_ledger_index)
+            VALUES ('rA', 'N1', 'AB', 'active', 990);
+    """)
+    c.commit()
+
+    es.init_economy_schema(c)
+
+    assert es.get_closet_applied_position(c, "rA") == (990, None)
+
+
 def _legacy_closet_tokens_conn() -> sqlite3.Connection:
     """A pre-#522 index DB: closet_tokens without applied_ledger_index."""
     c = sqlite3.connect(":memory:")
