@@ -81,13 +81,30 @@ export function wcRequestId(link) {
 }
 
 // What to POST to /api/sign/{id}/result for a Joey `xrpl_signTransaction`
-// response. `hash` is present only when the wallet actually SUBMITTED the
-// transaction; a submit that failed inside the wallet returns the signed
-// tx_json with no hash, which is a failure — never report it as success.
+// response. A submitted transaction's hash comes back at the top level or
+// inside the signed tx_json (the WalletConnect XRPL shape). Reporting it is
+// safe either way: the server believes a hash only once it is validated
+// on-ledger. With no hash there is nothing to verify, which is a failure,
+// never a success; the wallet's own error message is carried through when it
+// sent one (#514).
 export function wcResultAction(resp) {
-  const hash = resp && resp.hash;
-  if (typeof hash === 'string' && hash) return { hash };
+  // Each candidate is checked on its own: a truthy but unusable top-level
+  // `hash` must not mask a valid one inside tx_json.
+  const hash = [resp && resp.hash, resp && resp.tx_json && resp.tx_json.hash]
+    .find((value) => typeof value === 'string' && value);
+  if (hash) return { hash };
+  const message = resp && resp.error && resp.error.message;
+  if (typeof message === 'string' && message) return { error: message };
   return { error: 'no hash returned' };
+}
+
+// Warning before the pay screen supersedes a Joey payment request (#513).
+// Cancelling only retires OUR sign request; the request stays open in Joey,
+// and approving it there later still takes the money. `resolved` is true once
+// Joey has answered this request. Null when there is nothing to warn about.
+export function joeyCancelWarning({ deliveryUrl, resolved } = {}) {
+  if (!isWcLink(deliveryUrl) || resolved) return null;
+  return 'This request is still open in Joey. Reject it in Joey first — approving it later still charges you.';
 }
 
 // A user declining in Joey arrives as a WalletConnect JSON-RPC error rather

@@ -10,6 +10,7 @@ import base64
 import contextlib
 import dataclasses
 import datetime
+import fcntl
 import functools
 import hashlib
 import hmac
@@ -72,6 +73,7 @@ from lfg_core import (
     mint_flow,
     nft_index,
     owner_lock,
+    payment_ledger,
     rarity,
     share_clicks,
     shop,
@@ -6985,6 +6987,21 @@ def _preflight_refusal(preflight: xrpl_ops.DestinationPreflight) -> str | None:
     return None
 
 
+def _insufficient_xrp_response(short: mint_flow.InsufficientXrp) -> web.Response:
+    """409 for an XRP mint payment the wallet provably cannot fund (#514),
+    refused before any sign request exists. `insufficient_xrp` is a
+    pass-through code, so Discord and Telegram show `error` verbatim."""
+    return web.json_response(
+        {
+            "code": "insufficient_xrp",
+            "error": "Not enough XRP to pay for this mint.",
+            "needed_drops": short.needed_drops,
+            "spendable_drops": short.spendable_drops,
+        },
+        status=409,
+    )
+
+
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -7184,10 +7201,20 @@ async def handle_mint_start(request):
     # stalled XRPL/XUMM API can't hang /api/mint — on timeout the session
     # falls back to the XRP path with the static detect link.
     try:
-        await asyncio.wait_for(session.prepare_payment(), timeout=8)
+        await asyncio.wait_for(session.prepare_payment(preflight), timeout=8)
     except asyncio.CancelledError:
         _cleanup_cancelled_mint_admission(session)
         raise
+    except mint_flow.InsufficientXrp as short:
+        # #514: the pre-flight snapshot proves the wallet cannot fund the XRP
+        # payment, so no sign request was built (it could only fail on-ledger).
+        # Refused like a pre-flight refusal: terminal, headroom back.
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            session.state = mint_flow.FAILED
+            session.error = "insufficient_xrp"
+        mint_flow.settle_headroom(session)
+        session.mark_published()  # a deliberate refusal, not a pipeline failure
+        return _insufficient_xrp_response(short)
     except asyncio.TimeoutError:
         logging.warning("prepare_payment timed out; falling back to XRP path")
     except Exception as e:
@@ -7252,8 +7279,8 @@ async def handle_mint_start(request):
 async def handle_bulk_mint_start(request):
     """Start a bulk mint job (#215): one K x payment, then a background task
     mints K units in sequence. Mirrors handle_mint_start's ordering — every
-    suspending value (request body parse, push token, return URL, and the
-    threaded headroom clamp) is resolved BEFORE the one-active-job check so
+    suspending value (request body parse, push token, return URL, the funding
+    snapshot, and the threaded headroom clamp) is resolved BEFORE the one-active-job check so
     no await sits between the check and the insert below (the guard is only
     race-free while that window stays await-free). prepare_payment() is
     deliberately awaited AFTER the insert — a concurrent request already
@@ -7279,6 +7306,19 @@ async def handle_bulk_mint_start(request):
 
     if qty < 1:
         return web.json_response({"error": "invalid_quantity"}, status=400)
+
+    # #514: one account_info snapshot so prepare_payment can refuse an XRP
+    # payment the wallet provably cannot fund. Taken before the headroom clamp
+    # (nothing is reserved while it runs) and before the one-active-job check
+    # (that window stays await-free). Bounded; a failed lookup refuses nothing.
+    try:
+        snapshot: xrpl_ops.DestinationPreflight | None = await asyncio.wait_for(
+            xrpl_ops.destination_preflight(request["wallet"]),
+            timeout=_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logging.warning(f"bulk mint funding snapshot unavailable; not checking XRP funding: {e}")
+        snapshot = None
 
     job = bulk_mint_flow.BulkMintJob(
         discord_id=user["id"],
@@ -7316,7 +7356,15 @@ async def handle_bulk_mint_start(request):
     bulk_sessions[job.id] = job
 
     try:
-        await asyncio.wait_for(job.prepare_payment(), timeout=8)
+        await asyncio.wait_for(job.prepare_payment(snapshot), timeout=8)
+    except mint_flow.InsufficientXrp as short:
+        # #514: the wallet cannot fund price x quantity, and no sign request
+        # was built (nor any job record: that is persisted only after this).
+        if job.state == bulk_mint_flow.AWAITING_PAYMENT:
+            job.state = bulk_mint_flow.FAILED
+            job.error = "insufficient_xrp"
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
+        return _insufficient_xrp_response(short)
     except Exception as e:
         # Never leave a non-terminal job with no task in bulk_sessions — that
         # would permanently wedge this user's bulk slot (every future POST
@@ -9655,6 +9703,39 @@ def _ledger_tx_time(tx: dict[str, Any], result: dict[str, Any]) -> float | None:
     return None
 
 
+async def _verify_request_tx(
+    row: dict[str, Any], tx_hash: str, result: dict[str, Any]
+) -> tuple[dict[str, Any], bool, bool]:
+    """Check a VALIDATED `tx` lookup against the sign request it claims to settle.
+
+    Returns `(tx, matched, reused)`. `tx` is the on-ledger transaction. `matched`
+    holds only when it is exactly what the row asked for: the row's signer and
+    type, every field we set, a hash no other request has claimed, and a close
+    time that is not before the request existed. `reused` says another request
+    already claimed the hash.
+    """
+    tx = dict(result.get("tx_json") or result)
+    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
+    # name we signed so the comparison below is apples to apples.
+    if "DeliverMax" in tx and "Amount" not in tx:
+        tx["Amount"] = tx["DeliverMax"]
+    stored = row["txjson"] or {}
+    # The hash must belong to THIS request: not a transaction already claimed
+    # by another row, and not one that closed before we even asked for it.
+    tx_time = _ledger_tx_time(tx, result)
+    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, row["id"])
+    matched = not (
+        tx.get("Account") != row["wallet"]
+        or tx.get("TransactionType") != stored.get("TransactionType")
+        or not _semantic_match(stored, tx)
+        or reused
+        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
+        or tx_time is None
+        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
+    )
+    return tx, matched, reused
+
+
 def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | None:
     """Shared ownership gate: 404 for unknown/not-a-tx, 403 for someone else's."""
     if row is None or row.get("purpose") != "tx":
@@ -9731,6 +9812,282 @@ async def handle_sign_request(request):
     )
 
 
+# A late hash posted before its transaction validated gets one bounded
+# background re-check per (request, hash) (#513).
+_LATE_RECHECK_INTERVAL_SECONDS = 4.0
+_LATE_RECHECK_MAX_SECONDS = 180.0
+# Ceiling on re-checks in flight at once. Posting a result is ordinary
+# per-request work with no rate limit of its own, and one caller with a
+# resolved row of their own could otherwise post N distinct hashes and leave
+# N pollers running for minutes, each spending ledger lookups. Past the
+# ceiling a late hash is still logged and answered; it just is not re-checked.
+_LATE_RECHECK_MAX_INFLIGHT = 32
+# …and a per-wallet share of that ceiling, so filling it is not a way to stop
+# everyone else's late payments from being re-checked. Keyed by wallet so one
+# caller's several resolved rows count together.
+_LATE_RECHECK_MAX_PER_WALLET = 4
+_late_signature_rechecks: dict[tuple[str, str, str], asyncio.Task[None]] = {}
+
+
+def _save_late_signature_record(
+    record: dict[str, Any], request: dict[str, Any]
+) -> tuple[str, bool]:
+    """Journal a late signature (#513) in ECONOMY_RECORDS_DIR, next to the
+    other records an admin reconciles by hand.
+
+    One file per TRANSACTION, not per sign request: a Payment carries nothing
+    that ties it to one request, so the same payment matches every resolved
+    row of the same shape, and a record each would read as that many refunds.
+    The first claim writes the file — built complete in a temp file and
+    hard-linked into place, which never clobbers, so concurrent posts create
+    it exactly once — and later claims append their request to it.
+
+    Returns `(path, created)`; `created` is False when this transaction was
+    already on record. Raises on a disk failure."""
+    records_dir = config.ECONOMY_RECORDS_DIR
+    os.makedirs(records_dir, exist_ok=True)
+    path = os.path.join(records_dir, f"late-signature-{record['tx_hash']}.json")
+    fd, tmp = tempfile.mkstemp(dir=records_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({**record, "requests": [request]}, f, indent=2)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            _append_late_signature_request(path, request)
+            return path, False
+        return path, True
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+def _append_late_signature_request(path: str, request: dict[str, Any]) -> None:
+    """Add another sign request that claimed an already-recorded payment.
+
+    The record is the only evidence of a payment owed back, so it is never
+    rewritten in place: the updated document is written to a temp file and
+    replaces it atomically, leaving the original untouched if anything fails
+    midway. Writers serialize on a sidecar lock file — not on the record,
+    whose inode is replaced — so a concurrent append cannot be lost."""
+    with open(f"{path}.lock", "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(path) as f:
+                record = json.load(f)
+            requests = record.setdefault("requests", [])
+            if any(r.get("request_id") == request["request_id"] for r in requests):
+                return
+            requests.append(request)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as out:
+                    json.dump(record, out, indent=2)
+                os.replace(tmp, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+async def _check_late_signature(row: dict[str, Any], tx_hash: str) -> None:
+    """A hash posted for a sign request that is no longer pending (#513).
+
+    Cancelling a WalletConnect request only retires OUR row: the request stays
+    open in Joey, and approving it there later still submits the transaction.
+    The row stays resolved (whatever flow asked for it is gone), but a
+    VALIDATED, SUCCESSFUL transaction that is exactly what the row asked for
+    means the wallet paid for nothing. Record it for a manual refund. Never
+    raises and never touches the row; the caller answers 409 either way.
+    """
+    try:
+        result = await xrpl_ops.get_tx(tx_hash)
+    except Exception as exc:
+        _log_unverifiable_late_hash(row, tx_hash, exc)
+        return
+    if (result or {}).get("validated"):
+        await _record_late_signature(row, tx_hash, result)
+        return
+    # Joey returns the hash right after submitting, so the post usually beats
+    # validation. Keep checking in the background — and say so now, so a
+    # payment we could not confirm never passes silently.
+    logging.error(
+        f"late signature check: tx {tx_hash} posted by {row['wallet']} for {row['state']} "
+        f"sign request {row['id']} is not validated yet — re-checking for up to "
+        f"{int(_LATE_RECHECK_MAX_SECONDS)}s"
+    )
+    _spawn_late_signature_recheck(row, tx_hash, result)
+
+
+def _log_unverifiable_late_hash(row: dict[str, Any], tx_hash: str, exc: Exception) -> None:
+    logging.error(
+        f"late signature check: could not verify tx {tx_hash} posted by {row['wallet']} for "
+        f"{row['state']} sign request {row['id']} — check it on-ledger",
+        exc_info=exc,
+    )
+
+
+def _spawn_late_signature_recheck(
+    row: dict[str, Any], tx_hash: str, first_result: dict[str, Any] | None
+) -> None:
+    """Start the bounded background re-check for a late hash that had not
+    validated when it was posted. One per (request, hash): reposts share it.
+    Tracked so it is never GC'd mid-poll and on_cleanup can cancel it."""
+    wallet = row["wallet"]
+    key = (wallet, row["id"], tx_hash)
+    if key in _late_signature_rechecks:
+        return
+    mine = sum(1 for held, _request, _hash in _late_signature_rechecks if held == wallet)
+    if mine >= _LATE_RECHECK_MAX_PER_WALLET:
+        logging.warning(
+            f"late signature re-check for {tx_hash} not scheduled: "
+            f"{wallet} already has {mine} in flight"
+        )
+        return
+    if len(_late_signature_rechecks) >= _LATE_RECHECK_MAX_INFLIGHT:
+        logging.warning(
+            f"late signature re-check for {tx_hash} not scheduled: "
+            f"{len(_late_signature_rechecks)} already in flight"
+        )
+        return
+    task = asyncio.create_task(_recheck_late_signature(row, tx_hash, first_result))
+    _late_signature_rechecks[key] = task
+
+    def _forget(done: asyncio.Task[None]) -> None:
+        if _late_signature_rechecks.get(key) is done:
+            del _late_signature_rechecks[key]
+
+    task.add_done_callback(_forget)
+
+
+def _last_ledger_sequence(result: dict[str, Any] | None) -> int | None:
+    tx = (result or {}).get("tx_json") or result or {}
+    last_ledger = tx.get("LastLedgerSequence")
+    return last_ledger if isinstance(last_ledger, int) else None
+
+
+async def _recheck_late_signature(
+    row: dict[str, Any], tx_hash: str, first_result: dict[str, Any] | None
+) -> None:
+    """Poll a late hash every _LATE_RECHECK_INTERVAL_SECONDS. Stop when it
+    validates (then record it like any late signature), when the validated
+    ledger has passed its LastLedgerSequence (it can never validate), or after
+    _LATE_RECHECK_MAX_SECONDS."""
+    deadline = time.monotonic() + _LATE_RECHECK_MAX_SECONDS
+    last_ledger = _last_ledger_sequence(first_result)
+    lookup_error: Exception | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_LATE_RECHECK_INTERVAL_SECONDS)
+        # Read the validated index BEFORE the lookup: if it was already past
+        # LastLedgerSequence and the lookup still finds no validated tx, the
+        # tx was not in any ledger it could have been in.
+        closed: int | None = None
+        if last_ledger is not None:
+            try:
+                closed = await xrpl_ops.current_validated_ledger_index()
+            except Exception:
+                closed = None
+        try:
+            result = await xrpl_ops.get_tx(tx_hash)
+        except Exception as exc:
+            lookup_error = exc
+            continue
+        lookup_error = None
+        if (result or {}).get("validated"):
+            await _record_late_signature(row, tx_hash, result)
+            return
+        last_ledger = _last_ledger_sequence(result) or last_ledger
+        if last_ledger is not None and closed is not None and closed > last_ledger:
+            return
+    if lookup_error is not None:
+        _log_unverifiable_late_hash(row, tx_hash, lookup_error)
+
+
+async def _stop_late_signature_rechecks(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: cancel late-signature re-checks still polling
+    (#513). A re-check only reads the ledger and writes a journal file, so
+    cancelling one costs that record at most (the #517 sweep's case)."""
+    rechecks = list(_late_signature_rechecks.values())
+    for task in rechecks:
+        task.cancel()
+    for task in rechecks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _record_late_signature(row: dict[str, Any], tx_hash: str, result: dict[str, Any]) -> None:
+    """Journal a VALIDATED late transaction and raise the refund alarm, if it
+    is a successful, exact match for the row. Never raises."""
+    request_id, wallet = row["id"], row["wallet"]
+    try:
+        tx, matched, _reused = await _verify_request_tx(row, tx_hash, result)
+    except Exception as exc:
+        _log_unverifiable_late_hash(row, tx_hash, exc)
+        return
+    if not matched or (result.get("meta") or {}).get("TransactionResult") != "tesSUCCESS":
+        return
+    tx_type = tx.get("TransactionType")
+    if tx_type != "Payment":
+        # Only a Payment can owe a refund; a late TrustSet or offer moves no
+        # money, and alarming on one only sent an admin hunting for a payment.
+        logging.info(
+            f"late signature {request_id}: {tx_type} {tx_hash} validated after the request "
+            f"resolved; no payment to refund"
+        )
+        return
+    amount, destination = tx.get("Amount"), tx.get("Destination")
+    # A late payment may already have been honoured: any waiting session for
+    # the same amount can claim it on-ledger, so the record carries the
+    # consumed-payment row (None = unclaimed, absent = the read failed).
+    consumed: dict[str, Any] | None = None
+    consumed_known = True
+    try:
+        consumed = await asyncio.to_thread(payment_ledger.consumed_payment, tx_hash)
+    except Exception:
+        consumed_known = False
+        logging.warning(f"late signature {tx_hash}: consumed-payment lookup failed", exc_info=True)
+    record = {
+        "tx_hash": tx_hash,
+        "wallet": wallet,
+        "transaction_type": tx_type,
+        "destination": destination,
+        "amount": amount,
+        "currency": amount.get("currency") if isinstance(amount, dict) else "XRP",
+        "network": config.XRPL_NETWORK,
+        "consumed_payment": consumed,
+        "consumed_payment_known": consumed_known,
+        "recorded_at": time.time(),
+    }
+    request_entry = {
+        "request_id": request_id,
+        "request_state": row["state"],
+        "txjson": row["txjson"],
+        "noticed_at": time.time(),
+    }
+    try:
+        path, created = await asyncio.to_thread(_save_late_signature_record, record, request_entry)
+    except Exception:
+        # The log line below is then the only trace of the payment.
+        logging.error(f"late signature record write failed: {traceback.format_exc()}")
+        path, created = "(record NOT written)", True
+    if not created:
+        # The same payment, claimed by another resolved request: one payment,
+        # one alarm. The extra request id is appended to the record above.
+        logging.info(
+            f"late signature {request_id}: tx {tx_hash} is already recorded at {path}; "
+            f"this request was added to it"
+        )
+        return
+    logging.error(
+        f"LATE SIGNATURE: {wallet} signed {row['state']} sign request {request_id} anyway; "
+        f"tx {tx_hash} validated tesSUCCESS ({amount} to {destination}). Before refunding, "
+        f"check consumed_payments in the app DB for this hash — a session may have claimed "
+        f"it, and an unclaimed non-XRP payment stays spendable as a mint credit for "
+        f"MINT_CREDIT_TTL_SECONDS. Record: {path}"
+    )
+
+
 @require_wallet
 async def handle_sign_result(request):
     """Record the outcome of a WalletConnect sign request (#447).
@@ -9764,6 +10121,10 @@ async def handle_sign_result(request):
         # retrying a lost response, not a conflict.
         if tx_hash is not None and row.get("txid") == tx_hash:
             return web.json_response({"state": row["state"], "txid": row["txid"]})
+        if tx_hash is not None:
+            # A different hash for a resolved row: typically Joey approving a
+            # request the app already cancelled. The answer stays 409.
+            await _check_late_signature(row, tx_hash)
         return web.json_response(
             {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
             status=409,
@@ -9798,25 +10159,8 @@ async def handle_sign_result(request):
             )
         return web.json_response({"state": "pending", "code": "tx_not_found"}, status=202)
 
-    tx = dict(result.get("tx_json") or result)
-    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
-    # name we signed so the comparison below is apples to apples.
-    if "DeliverMax" in tx and "Amount" not in tx:
-        tx["Amount"] = tx["DeliverMax"]
-    stored = row["txjson"] or {}
-    # The hash must belong to THIS request: not a transaction already claimed
-    # by another row, and not one that closed before we even asked for it.
-    tx_time = _ledger_tx_time(tx, result)
-    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, request_id)
-    if (
-        tx.get("Account") != row["wallet"]
-        or tx.get("TransactionType") != stored.get("TransactionType")
-        or not _semantic_match(stored, tx)
-        or reused
-        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
-        or tx_time is None
-        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
-    ):
+    _tx, matched, reused = await _verify_request_tx(row, tx_hash, result)
+    if not matched:
         logging.warning(
             f"sign result {request_id}: on-ledger tx {tx_hash} does not match the request"
             f"{' (hash already claimed)' if reused else ''}"
@@ -9852,6 +10196,9 @@ async def handle_sign_result(request):
     # is abandoned, and whatever flow was waiting on it is gone. Retire it as
     # expired rather than resurrecting it.
     if time.time() > row["expires_at"] + _SIGN_RESULT_GRACE_SECONDS:
+        # The money moved all the same, so journal it exactly like a hash
+        # posted for an already-resolved row (#513).
+        await _record_late_signature(row, tx_hash, result)
         return await _record_sign_outcome(
             request_id,
             "expired",
@@ -11319,6 +11666,7 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)
     app.on_cleanup.append(_stop_sponsored_burn_worker)
+    app.on_cleanup.append(_stop_late_signature_rechecks)
     return app
 
 

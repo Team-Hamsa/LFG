@@ -15,6 +15,7 @@ recorded), so they are never spendable as credits.
 import logging
 import sqlite3
 import time
+from typing import Any
 
 from lfg_core import config
 
@@ -101,6 +102,29 @@ def try_consume(tx_hash: str, sender: str, destination: str, claimant: str | Non
     finally:
         if conn is not None:
             conn.close()
+
+
+def consumed_payment(tx_hash: str) -> dict[str, Any] | None:
+    """The consumed-payment row for `tx_hash` (sender, destination, claimant,
+    consumed_at), or None when no flow has claimed that payment.
+
+    Raises sqlite3.Error when the ledger cannot be read: "nothing claimed it"
+    must never be inferred from a failed read — a late-signature record (#513)
+    says whether a payment was already honoured, and a wrong answer there is a
+    refund that should not have been paid."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT tx_hash, sender, destination, consumed_at, claimant"
+            " FROM consumed_payments WHERE tx_hash = ?",
+            (tx_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = ("tx_hash", "sender", "destination", "consumed_at", "claimant")
+        return dict(zip(keys, row, strict=True))
+    finally:
+        conn.close()
 
 
 def find_claimed(claimant: str) -> bool | None:

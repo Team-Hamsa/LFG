@@ -162,7 +162,7 @@ def _post_start_request():
     return _PlainRequest()
 
 
-async def _prepare_static_link_only(self):
+async def _prepare_static_link_only(self, _snapshot=None):
     """prepare_payment 'succeeded' but XUMM never created the sign request:
     the static detect link is set (it always is — do NOT gate on it), while
     payment_uuid stays None. Exactly the prod-incident shape (#262)."""
@@ -227,7 +227,7 @@ def test_mint_start_fail_fast_preserves_concurrent_cancel(dev_auth, monkeypatch)
     terminal CANCELLED with FAILED — and mark_published (set by
     handle_mint_cancel) keeps the deliberate cancel out of the firehose."""
 
-    async def cancelled_mid_prepare(self):
+    async def cancelled_mid_prepare(self, _snapshot=None):
         await _prepare_static_link_only(self)
         # Simulate handle_mint_cancel landing during the prepare window
         # (its exact two steps: cancel() then mark_published()).
@@ -253,7 +253,7 @@ def test_mint_start_cancel_during_prepare_with_payload_never_launches(dev_auth, 
     not launch run_mint_session for the terminal session — launching would
     resurrect a mint the user backed out of."""
 
-    async def cancelled_after_payload(self):
+    async def cancelled_after_payload(self, _snapshot=None):
         self.pay_with, self.pay_amount = "XRP", "10"
         self.payment_link = "https://xumm.app/sign/u1"
         self.payment_uuid = "u1"
@@ -330,7 +330,7 @@ def test_mint_start_cancel_during_reserve_releases_headroom(dev_auth, monkeypatc
 
     monkeypatch.setattr(server.headroom, "try_reserve", cancelling_try_reserve)
 
-    async def payload_created(self):
+    async def payload_created(self, _snapshot=None):
         # XUMM created the payload fine -> skips the payment_uuid-None settle;
         # only the state-terminal pre-launch branch remains to release.
         self.pay_with, self.pay_amount = "XRP", "10"

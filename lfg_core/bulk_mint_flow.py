@@ -250,10 +250,12 @@ class BulkMintJob:
             "issuer": config.TOKEN_ISSUER_ADDRESS,
         }
 
-    async def prepare_payment(self) -> None:
+    async def prepare_payment(self, snapshot: xrpl_ops.DestinationPreflight | None = None) -> None:
         """Detect LFGO vs XRP path (same rule as single mint) at K x price and
-        build the XUMM payment payload."""
-        balance = await xrpl_ops.get_trustline_balance(
+        build the XUMM payment payload. Same XRP funding check as single mint
+        (#514): a `snapshot` proving the wallet cannot pay K x price raises
+        InsufficientXrp before any payload exists."""
+        line_state, balance = await xrpl_ops.get_trustline_state(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
         total_lfgo = Decimal(config.MINT_PRICE_LFGO) * self.quantity
@@ -263,6 +265,10 @@ class BulkMintJob:
         else:
             self.pay_with, self.unit_price = "XRP", config.MINT_PRICE_XRP
             self.pay_amount = str(Decimal(config.MINT_PRICE_XRP) * self.quantity)
+            # Same fail-open rule as single mint: an UNKNOWN line state is a
+            # failed lookup, never grounds to refuse (see MintSession).
+            if line_state is not xrpl_ops.TrustlineState.UNKNOWN:
+                mint_flow.refuse_unfunded_xrp_payment(snapshot, self.pay_amount)
         p = self._payment_params()
         payload = await xumm_ops.create_payment_payload(
             p["destination"],

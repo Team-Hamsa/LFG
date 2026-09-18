@@ -231,10 +231,17 @@ def test_accept_offer_payload_omits_account_when_unknown(monkeypatch):
 
 
 def _stub_balance(monkeypatch, balance):
-    async def fake_balance(address, currency, issuer):
-        return balance
+    """Stub the tri-state line lookup the mint path reads: a balance means a
+    line is PRESENT, None means the ledger says there is none (ABSENT). A
+    failed lookup (UNKNOWN) is covered in tests/test_mint_one_unit.py."""
+    state = (
+        xrpl_ops.TrustlineState.PRESENT if balance is not None else xrpl_ops.TrustlineState.ABSENT
+    )
 
-    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", fake_balance)
+    async def fake_state(address, currency, issuer):
+        return state, balance
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_state", fake_state)
 
 
 def test_mint_session_threads_return_url(monkeypatch):

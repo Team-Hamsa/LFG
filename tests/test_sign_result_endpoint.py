@@ -4,14 +4,20 @@
 # back; a claimed hash is only believed once it is VERIFIED on-ledger against
 # the txjson we asked for.
 import asyncio
+import contextlib
+import fcntl
 import json
+import logging
+import pathlib
+import sqlite3
+import threading
 import time
 
 import pytest
 from xrpl.wallet import Wallet
 
 import lfg_service.app as app
-from lfg_core import memos
+from lfg_core import memos, payment_ledger
 from lfg_core.signing import store
 
 DEV_OWNER = Wallet.create().classic_address
@@ -55,6 +61,19 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(app.mock_economy, "DEV_OWNER", DEV_OWNER, raising=False)
     monkeypatch.setattr(store, "DATABASE", str(tmp_path / "sign.db"))
+    # Late-signature journal records (#513) land in a per-test directory.
+    monkeypatch.setattr(app.config, "ECONOMY_RECORDS_DIR", str(tmp_path / "records"))
+    # A late hash posted before it validates gets one bounded background
+    # re-check: poll fast, cap it short, keep the task registry per-test, and
+    # never ask a real ledger for its index.
+    monkeypatch.setattr(app, "_late_signature_rechecks", {})
+    monkeypatch.setattr(app, "_LATE_RECHECK_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 0.2)
+
+    async def _no_ledger_index():
+        return None
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _no_ledger_index)
     store.ensure_table()
 
 
@@ -629,3 +648,535 @@ def test_lost_txid_race_still_ends_mismatch(monkeypatch):
     assert store.get(second["id"])["txid"] is None
     assert store.get(first["id"])["state"] == "signed"
     assert store.get(first["id"])["txid"] == HASH
+
+
+# --- late signatures (#513) --------------------------------------------------
+#
+# Cancelling a WalletConnect request only retires OUR row (cancel_xumm_payload
+# on a wc- id): the request stays open in Joey, and approving it there later
+# still submits the payment. The row stays resolved and the answer stays 409,
+# but a hash proving a VALIDATED, SUCCESSFUL transaction that is exactly what
+# the row asked for means the wallet paid for nothing — it is journaled for a
+# manual refund (owner decision D7).
+
+_ALREADY_RESOLVED_CANCELLED = {
+    "error": "already resolved",
+    "code": "already_resolved",
+    "state": "cancelled",
+}
+
+
+def _mint_payment():
+    """A mint payment as the XRP path requests it: to the app's payment wallet."""
+    return {
+        "TransactionType": "Payment",
+        "Account": DEV_OWNER,
+        "Destination": app.xrpl_ops.bot_wallet_address(),
+        "Amount": "5000000",
+        "SourceTag": 2606160021,
+        "Memos": _memos(),
+    }
+
+
+def _cancelled_payment_row():
+    row = _row(txjson=_mint_payment())
+    store.set_state(row["id"], "cancelled")  # what cancelling a wc- payload does
+    return row
+
+
+def _late_records_for_hash(tmp_path, tx_hash):
+    """Late-signature records on disk for one transaction, matched by content
+    so the test does not depend on how the files are named. One payment is one
+    record, however many sign requests claimed it."""
+    root = tmp_path / "records"
+    if not root.is_dir():
+        return []
+    return [
+        record
+        for path in sorted(root.iterdir())
+        if path.suffix == ".json"
+        for record in [json.loads(path.read_text())]
+        if record.get("tx_hash") == tx_hash
+    ]
+
+
+def _late_records(tmp_path, request_id, tx_hash):
+    """Those records that name this sign request."""
+    return [
+        record
+        for record in _late_records_for_hash(tmp_path, tx_hash)
+        if any(r.get("request_id") == request_id for r in record.get("requests", []))
+    ]
+
+
+def _error_logs_naming(caplog, *needles):
+    return [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.ERROR and all(n in rec.getMessage() for n in needles)
+    ]
+
+
+def _assert_row_untouched(request_id):
+    got = store.get(request_id)
+    assert got["state"] == "cancelled"
+    assert got["txid"] is None
+
+
+def _not_validated(kind="pending"):
+    """What `tx` answers before a submitted transaction validates."""
+    if kind == "not_found":
+        return {"error": "txnNotFound"}
+    result = _rippled_shape(_mint_payment())  # LastLedgerSequence 99
+    result["validated"] = False
+    result["tx_json"]["validated"] = False
+    result.pop("meta")
+    return result
+
+
+def _fake_tx_sequence(monkeypatch, *results):
+    """get_tx answers each call with the next result; the last one repeats.
+    Returns the list of hashes looked up."""
+    calls = []
+
+    async def _get_tx(tx_hash):
+        calls.append(tx_hash)
+        return results[min(len(calls), len(results)) - 1]
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+    return calls
+
+
+def _late_post(rid):
+    return app.handle_sign_result(_Req(body={"hash": HASH}, match={"request_id": rid}))
+
+
+def _post_and_settle(rid, timeout=5):
+    """POST a hash, then wait out every late-signature re-check it scheduled,
+    on the same loop (a re-check left pending would die with the loop)."""
+
+    async def go():
+        response = await _late_post(rid)
+        pending = list(app._late_signature_rechecks.values())
+        if pending:
+            await asyncio.wait_for(asyncio.gather(*pending), timeout)
+        return response
+
+    return _run(go())
+
+
+def test_late_hash_on_cancelled_row_is_recorded(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH.lower()})
+    assert r.status == 409
+    assert _body(r) == _ALREADY_RESOLVED_CANCELLED
+    records = _late_records(tmp_path, row["id"], HASH)
+    assert len(records) == 1
+    assert records[0]["wallet"] == DEV_OWNER
+    assert records[0]["amount"] == "5000000"
+    assert records[0]["destination"] == app.xrpl_ops.bot_wallet_address()
+    assert records[0]["currency"] == "XRP"
+    assert records[0]["consumed_payment"] is None  # nothing claimed it
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:", row["id"], DEV_OWNER, HASH)
+    _assert_row_untouched(row["id"])
+
+
+def test_one_payment_is_one_record_across_every_request_it_matches(monkeypatch, tmp_path, caplog):
+    """A Payment carries nothing that ties it to ONE sign request, so a real
+    payment matches every resolved row of the same shape. It is still one
+    payment: one record, one alarm, and every request id on that record."""
+    rows = [_cancelled_payment_row() for _ in range(3)]
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        for row in rows:
+            assert _post(row["id"], {"hash": HASH}).status == 409
+    records = _late_records_for_hash(tmp_path, HASH)
+    assert len(records) == 1
+    assert [r["request_id"] for r in records[0]["requests"]] == [row["id"] for row in rows]
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_late_payment_record_carries_the_consumed_state(monkeypatch, tmp_path, caplog):
+    """A late payment a mint already claimed is not a refund at all, so the
+    record carries the consumed-payment row and the alarm says where to look."""
+    row = _cancelled_payment_row()
+    payment_ledger.try_consume(
+        HASH, DEV_OWNER, app.xrpl_ops.bot_wallet_address(), claimant="mint:abc"
+    )
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    (record,) = _late_records_for_hash(tmp_path, HASH)
+    assert record["consumed_payment"]["claimant"] == "mint:abc"
+    (alarm,) = _error_logs_naming(caplog, "LATE SIGNATURE:", HASH)
+    assert "consumed_payments" in alarm.getMessage()
+
+
+def _recorded_path(tmp_path):
+    (path,) = (tmp_path / "records").glob("late-signature-*.json")
+    return str(path)
+
+
+def test_a_failed_append_leaves_the_record_intact(monkeypatch, tmp_path):
+    """The record is the only evidence of a payment owed back, and a second
+    matching request has to be added to it. A write that dies midway must not
+    take the original with it."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    assert _post(row["id"], {"hash": HASH}).status == 409
+    path = _recorded_path(tmp_path)
+
+    def _dies_midway(_obj, fp, **_kwargs):
+        fp.write('{"half written')
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app.json, "dump", _dies_midway)
+    with pytest.raises(OSError):
+        app._append_late_signature_request(path, {"request_id": "wc-second"})
+    monkeypatch.undo()
+
+    record = json.loads(pathlib.Path(path).read_text())  # still valid JSON
+    assert [r["request_id"] for r in record["requests"]] == [row["id"]]
+
+
+def test_appending_to_a_record_waits_for_the_lock(monkeypatch, tmp_path):
+    """Two requests claiming one payment read-modify-write the same record, so
+    appends are serialized: without that, one of them is silently lost."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    assert _post(row["id"], {"hash": HASH}).status == 409
+    path = _recorded_path(tmp_path)
+    appended = threading.Thread(
+        target=app._append_late_signature_request, args=(path, {"request_id": "wc-second"})
+    )
+    with open(f"{path}.lock", "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        appended.start()
+        appended.join(0.3)
+        assert appended.is_alive()  # blocked while another writer holds it
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+    appended.join(5)
+    assert not appended.is_alive()
+    record = json.loads(pathlib.Path(path).read_text())
+    assert [r["request_id"] for r in record["requests"]] == [row["id"], "wc-second"]
+
+
+def test_consumed_lookup_failure_is_recorded_as_unknown(monkeypatch, tmp_path, caplog):
+    """An unreadable consumed-payment ledger must not read as "unclaimed" —
+    nor break the answer: the record says the state is unknown."""
+    row = _cancelled_payment_row()
+
+    def _boom(_tx_hash):
+        raise sqlite3.Error("ledger unreadable")
+
+    monkeypatch.setattr(app.payment_ledger, "consumed_payment", _boom)
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    (record,) = _late_records_for_hash(tmp_path, HASH)
+    assert record["consumed_payment_known"] is False
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_non_payment_late_signature_raises_no_refund_alarm(monkeypatch, tmp_path, caplog):
+    """A late TrustSet or offer moves no money — alarming on one only sent an
+    admin looking for a payment to refund ("… (None to None)")."""
+    row = _row()  # the TrustSet TXJSON
+    store.set_state(row["id"], "cancelled")
+    _fake_tx(monkeypatch, result=_onledger())
+    with caplog.at_level(logging.ERROR):
+        assert _post(row["id"], {"hash": HASH}).status == 409
+    assert _late_records_for_hash(tmp_path, HASH) == []
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:") == []
+
+
+def test_matched_payment_past_the_grace_is_recorded(monkeypatch, tmp_path, caplog):
+    """Posted while the row was still pending but long past its grace: the row
+    retires `expired` as before, and the payment is journaled all the same."""
+    row = _row(txjson=_mint_payment(), ttl=-(app._SIGN_RESULT_GRACE_SECONDS + 30))
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH})
+    assert r.status == 410 and _body(r)["code"] == "expired"
+    assert store.get(row["id"])["state"] == "expired"
+    assert len(_late_records_for_hash(tmp_path, HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+@pytest.mark.parametrize("lookup", ["not_found", "pending"])
+def test_late_hash_not_validated_not_recorded(monkeypatch, tmp_path, caplog, lookup):
+    """A hash that has not validated is re-checked and never recorded on what
+    the re-check sees. The hash is still logged when we answer, so a payment
+    we could not confirm is never silent."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)  # ended by the test, not a timer
+    calls = []
+    gate: dict = {}
+
+    async def _get_tx(tx_hash):
+        calls.append(tx_hash)
+        polled = gate.get("polled")
+        if polled is not None and len(calls) > 1:
+            polled.set()  # the re-check has issued a poll of its own
+        return _not_validated(lookup)
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+
+    async def go():
+        gate["polled"] = asyncio.Event()
+        response = await _late_post(row["id"])
+        (recheck,) = app._late_signature_rechecks.values()
+        await asyncio.wait_for(gate["polled"].wait(), 10)
+        recheck.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await recheck
+        return response
+
+    with caplog.at_level(logging.ERROR):
+        r = _run(go())
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert len(calls) > 1  # the post's own lookup, then the re-check's poll
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    assert _error_logs_naming(caplog, row["id"], HASH)  # logged, not silent
+    assert _error_logs_naming(caplog, "LATE SIGNATURE:") == []  # but not a refund alarm
+    _assert_row_untouched(row["id"])
+
+
+def test_late_recheck_gives_up_at_its_cap(monkeypatch, tmp_path):
+    """A transaction that never validates must not leave a poller running: the
+    re-check ends by itself and records nothing."""
+    row = _cancelled_payment_row()
+    _fake_tx_sequence(monkeypatch, _not_validated())  # cap 0.2 s from the fixture
+    r = _post_and_settle(row["id"])  # settles by waiting the re-check out
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert app._late_signature_rechecks == {}
+    assert _late_records(tmp_path, row["id"], HASH) == []
+
+
+def test_one_wallet_cannot_fill_every_recheck_slot(monkeypatch):
+    """The global ceiling alone would let one caller with a resolved row of
+    their own hold every slot for minutes, so another wallet's genuine late
+    payment would never be re-checked. Each wallet gets its own share."""
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_PER_WALLET", 1)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_INFLIGHT", 32)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx(monkeypatch, result=_not_validated())
+    hog = {"id": "wc-hog", "wallet": DEV_OWNER, "state": "cancelled", "txjson": _mint_payment()}
+    other = {"id": "wc-other", "wallet": OTHER, "state": "cancelled", "txjson": _mint_payment()}
+
+    async def go():
+        for tx_hash in ("B" * 64, "C" * 64):
+            app._spawn_late_signature_recheck(hog, tx_hash, None)
+        held_by_one_wallet = len(app._late_signature_rechecks)
+        app._spawn_late_signature_recheck(other, "D" * 64, None)
+        after_other = len(app._late_signature_rechecks)
+        rechecks = list(app._late_signature_rechecks.values())
+        for recheck in rechecks:
+            recheck.cancel()
+        for recheck in rechecks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await recheck
+        return held_by_one_wallet, after_other
+
+    held_by_one_wallet, after_other = _run(go())
+    assert held_by_one_wallet == 1  # the second hash from that wallet got no slot
+    assert after_other == 2  # and another wallet still gets one
+
+
+def test_late_rechecks_are_capped(monkeypatch, tmp_path, caplog):
+    """POST /api/sign/{id}/result is unmetered per-request work, and each
+    re-check polls the ledger for minutes. One caller posting distinct hashes
+    must not be able to fan out pollers without limit."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_INFLIGHT", 2)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx(monkeypatch, result=_not_validated())
+
+    async def go():
+        responses = [
+            await app.handle_sign_result(_Req(body={"hash": h}, match={"request_id": row["id"]}))
+            for h in ("B" * 64, "C" * 64, "D" * 64)
+        ]
+        inflight = list(app._late_signature_rechecks.values())
+        for recheck in inflight:
+            recheck.cancel()
+        for recheck in inflight:
+            with contextlib.suppress(asyncio.CancelledError):
+                await recheck
+        return responses, len(inflight)
+
+    with caplog.at_level(logging.WARNING):
+        responses, inflight = _run(go())
+    assert [r.status for r in responses] == [409, 409, 409]  # the answer never changes
+    assert inflight == 2
+    assert any(
+        "in flight" in rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING
+    )
+    assert _late_records_for_hash(tmp_path, "D" * 64) == []
+
+
+def test_late_hash_validated_on_a_later_poll_is_recorded(monkeypatch, tmp_path, caplog):
+    """Joey returns the hash right after submitting, so the post usually beats
+    validation. The bounded re-check records the payment once it validates."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 10)
+    calls = _fake_tx_sequence(
+        monkeypatch, _not_validated(), _not_validated(), _rippled_shape(_mint_payment())
+    )
+    with caplog.at_level(logging.ERROR):
+        r = _post_and_settle(row["id"])
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert len(calls) == 3
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", row["id"], DEV_OWNER, HASH)) == 1
+    _assert_row_untouched(row["id"])
+
+
+def test_late_recheck_stops_once_the_ledger_passes_last_ledger_sequence(monkeypatch, tmp_path):
+    """Past its LastLedgerSequence an unvalidated transaction can never
+    validate, so the re-check ends there instead of polling out its cap."""
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx_sequence(monkeypatch, _not_validated())  # LastLedgerSequence 99
+
+    async def _ledger_index():
+        return 100
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger_index)
+    r = _post_and_settle(row["id"], timeout=2)  # far inside the 30 s cap
+    assert r.status == 409
+    assert app._late_signature_rechecks == {}
+    assert _late_records(tmp_path, row["id"], HASH) == []
+
+
+def test_duplicate_late_posts_share_one_recheck(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 10)
+    landed = {"validated": False}
+    pending, validated = _not_validated(), _rippled_shape(_mint_payment())
+
+    async def _get_tx(_tx_hash):
+        return validated if landed["validated"] else pending
+
+    monkeypatch.setattr(app.xrpl_ops, "get_tx", _get_tx)
+    started = []
+    real_recheck = app._recheck_late_signature
+    gate: dict = {}
+
+    async def _counted_recheck(*args):
+        started.append(asyncio.current_task())
+        gate["running"].set()
+        await real_recheck(*args)
+
+    monkeypatch.setattr(app, "_recheck_late_signature", _counted_recheck)
+
+    async def go():
+        gate["running"] = asyncio.Event()
+        for _ in range(3):
+            assert (await _late_post(row["id"])).status == 409
+        await asyncio.wait_for(gate["running"].wait(), 10)  # every spawn has run
+        landed["validated"] = True
+        await asyncio.wait_for(asyncio.gather(*started), 5)
+
+    with caplog.at_level(logging.ERROR):
+        _run(go())
+    assert len(started) == 1
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_concurrent_late_posts_record_and_alarm_once(monkeypatch, tmp_path, caplog):
+    """Two posts of one validated late hash racing into the journal: exactly
+    one creates the record, so the refund alarm fires once."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    # Hold both writers inside the write until both have got that far, so
+    # their creates really race instead of running one after the other.
+    barrier = threading.Barrier(2, timeout=5)
+    real_dump = json.dump
+
+    def _racing_dump(obj, fp, **kwargs):
+        barrier.wait()
+        return real_dump(obj, fp, **kwargs)
+
+    monkeypatch.setattr(app.json, "dump", _racing_dump)
+
+    async def go():
+        return await asyncio.gather(_late_post(row["id"]), _late_post(row["id"]))
+
+    with caplog.at_level(logging.ERROR):
+        responses = _run(go())
+    assert [r.status for r in responses] == [409, 409]
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+
+
+def test_cleanup_cancels_pending_late_rechecks(monkeypatch):
+    row = _cancelled_payment_row()
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 60)
+    _fake_tx_sequence(monkeypatch, _not_validated())
+
+    async def go():
+        await _late_post(row["id"])
+        (recheck,) = app._late_signature_rechecks.values()
+        await app._stop_late_signature_rechecks(None)
+        return recheck
+
+    recheck = _run(go())
+    assert recheck.cancelled()
+    assert app._late_signature_rechecks == {}
+    assert app._stop_late_signature_rechecks in app.create_app().on_cleanup
+
+
+@pytest.mark.parametrize(
+    "field,value", [("Destination", OTHER), ("Amount", "4000000")], ids=["destination", "amount"]
+)
+def test_late_hash_mismatched_tx_not_recorded(monkeypatch, tmp_path, field, value):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment(), **{field: value}))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_repost_idempotent(monkeypatch, tmp_path, caplog):
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, result=_rippled_shape(_mint_payment()))
+    with caplog.at_level(logging.ERROR):
+        first = _post(row["id"], {"hash": HASH})
+        second = _post(row["id"], {"hash": HASH})
+    assert first.status == second.status == 409
+    assert _body(second) == _ALREADY_RESOLVED_CANCELLED
+    assert len(_late_records(tmp_path, row["id"], HASH)) == 1
+    # One refund alarm per payment: a repost must not read as a second charge.
+    assert len(_error_logs_naming(caplog, "LATE SIGNATURE:", HASH)) == 1
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_that_failed_on_ledger_not_recorded(monkeypatch, tmp_path):
+    """A tec result is final but moved nothing beyond the fee. The 9 late prod
+    payments were all tecUNFUNDED_PAYMENT, and none of them was owed a refund."""
+    row = _cancelled_payment_row()
+    result = _rippled_shape(_mint_payment())
+    result["meta"] = {"TransactionResult": "tecUNFUNDED_PAYMENT"}
+    _fake_tx(monkeypatch, result=result)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    _assert_row_untouched(row["id"])
+
+
+def test_late_hash_lookup_failure_still_answers_409(monkeypatch, tmp_path, caplog):
+    """An unreachable ledger proves nothing either way: the answer stays 409,
+    and the unverifiable hash is left in the error log for a manual check."""
+    row = _cancelled_payment_row()
+    _fake_tx(monkeypatch, exc=RuntimeError("rpc down"))
+    with caplog.at_level(logging.ERROR):
+        r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r) == _ALREADY_RESOLVED_CANCELLED
+    assert _late_records(tmp_path, row["id"], HASH) == []
+    assert _error_logs_naming(caplog, row["id"], HASH)
+    _assert_row_untouched(row["id"])

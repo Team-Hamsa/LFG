@@ -232,7 +232,7 @@ def _forbid_spending(monkeypatch):
     def _reserve(*_a, **_k):
         raise AssertionError("sponsored admission must not run for a refused wallet")
 
-    async def _prepare(_self):
+    async def _prepare(_self, _snapshot=None):
         raise AssertionError("paid preparation must not run for a refused wallet")
 
     monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", _reserve)
@@ -306,7 +306,7 @@ def test_unresolved_preflight_declines_sponsorship_but_still_allows_paying(
 
     monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", _reserve)
 
-    async def _prepare(self):
+    async def _prepare(self, _snapshot=None):
         self.pay_with = "XRP"
         self.pay_amount = "10"
         self.payment_link = "https://xumm.app/sign/paid"
@@ -336,7 +336,7 @@ def test_a_timeout_is_not_a_refusal(_service_env, monkeypatch):
     monkeypatch.setattr(server.xrpl_ops, "destination_preflight", _hang)
     monkeypatch.setattr(server, "_PREFLIGHT_TIMEOUT_SECONDS", 0.01)
 
-    async def _prepare(self):
+    async def _prepare(self, _snapshot=None):
         self.pay_with = "XRP"
         self.pay_amount = "10"
         self.payment_uuid = "paid"
@@ -401,7 +401,8 @@ def test_a_healthy_wallet_is_still_admitted(_service_env, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "code", ["wallet_unfunded", "wallet_blocks_nft_offers", "wallet_reserve_short"]
+    "code",
+    ["wallet_unfunded", "wallet_blocks_nft_offers", "wallet_reserve_short", "insufficient_xrp"],
 )
 def test_surfaces_render_the_refusal_not_the_generic_409(code):
     """Discord and Telegram both go through friendly_error, whose 409 branch
@@ -489,4 +490,51 @@ def test_a_cancel_landing_during_the_preflight_wins_over_a_refusal(_service_env,
     assert body["state"] == mint_flow.CANCELLED
     assert "code" not in body  # not a wallet refusal
     assert session.state == mint_flow.CANCELLED
+    assert headroom.reserved_for(_service_env.app_db, f"mint:{session.id}") == 0
+
+
+# --- the paid path: an XRP payment the wallet cannot fund (#514) -------------
+
+
+def test_unfunded_xrp_payment_is_refused_before_any_sign_request(_service_env, monkeypatch):
+    """A deliverable wallet whose spendable XRP cannot cover the mint gets a
+    409 naming the shortfall, and no Xaman/Joey payment request is ever built.
+    Before #514 it got a request that could only fail tecUNFUNDED_PAYMENT."""
+    # 5 XRP - (1 + 1 x 0.2) XRP reserve = 3.8 XRP spendable < 10 XRP + fee
+    _stub_preflight(monkeypatch, balance_drops=5_000_000, owner_count=1)
+    monkeypatch.setattr(
+        server.sponsored_mint, "reserve_if_eligible", lambda *a, **k: _not_admitted()
+    )
+    monkeypatch.setattr(server.config, "MINT_PRICE_XRP", "10")
+    monkeypatch.setattr(server.config, "XRPL_RESERVE_BASE_DROPS", BASE)
+    monkeypatch.setattr(server.config, "XRPL_RESERVE_INC_DROPS", INC)
+    monkeypatch.setattr(mint_flow, "PAYMENT_FEE_DROPS", 12)
+
+    async def _no_lfgo(*_args, **_kwargs):
+        return xrpl_ops.TrustlineState.ABSENT, None
+
+    built = []
+
+    async def _payload(*_args, **kwargs):
+        built.append(kwargs)
+        return {"xumm_url": "lfg-wc://wc-pay", "uuid": "wc-pay"}
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_state", _no_lfgo)
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", _payload)
+    monkeypatch.setattr(server, "_run_mint_session_and_publish", _parked)
+
+    response = _run(server.handle_mint_start(_PostRequest()))
+
+    assert response.status == 409
+    assert json.loads(response.body) == {
+        "code": "insufficient_xrp",
+        "error": "Not enough XRP to pay for this mint.",
+        "needed_drops": 10_000_012,
+        "spendable_drops": 3_800_000,
+    }
+    assert built == []
+    session = next(iter(server.mint_sessions.values()))
+    assert session.state == mint_flow.FAILED
+    assert session.error == "insufficient_xrp"
+    assert session.task is None
     assert headroom.reserved_for(_service_env.app_db, f"mint:{session.id}") == 0

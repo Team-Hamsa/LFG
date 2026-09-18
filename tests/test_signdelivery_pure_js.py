@@ -174,11 +174,28 @@ def test_wc_request_id_extracts_the_id_or_null():
     assert run_js("M.wcRequestId('lfg-wc://')") is None
 
 
-# wcResultAction(resp): Joey returns {tx_json, hash?}. `hash` is present only
-# when the wallet actually submitted; a submit failure inside the wallet comes
-# back with no hash at all and must be reported as an error, never as success.
+# wcResultAction(resp): a submitted Joey transaction carries its hash either at
+# the top level or inside the signed tx_json (the WalletConnect XRPL shape,
+# #514). A response with no hash at all must be reported as an error, never as
+# success, and the server still verifies any hash on-ledger before believing it.
 def test_wc_result_action_reports_the_hash_when_submitted():
     assert run_js("M.wcResultAction({tx_json: {}, hash: 'AB12'})") == {"hash": "AB12"}
+
+
+def test_wc_result_action_reads_the_hash_inside_tx_json():
+    assert run_js("M.wcResultAction({tx_json: {hash: 'AB'}})") == {"hash": "AB"}
+
+
+def test_wc_result_action_skips_an_unusable_top_level_hash():
+    # A truthy non-string `hash` must not mask a valid one inside tx_json, or
+    # a submitted payment is reported as a failure and never verified.
+    assert run_js("M.wcResultAction({hash: 123, tx_json: {hash: 'AB'}})") == {"hash": "AB"}
+
+
+def test_wc_result_action_carries_the_wallets_error_message():
+    assert run_js("M.wcResultAction({error: {message: 'User rejected'}})") == {
+        "error": "User rejected"
+    }
 
 
 def test_wc_result_action_reports_an_error_without_a_hash():
@@ -186,7 +203,36 @@ def test_wc_result_action_reports_an_error_without_a_hash():
     assert run_js("M.wcResultAction({tx_json: {}})") == no_hash
     assert run_js("M.wcResultAction({tx_json: {}, hash: ''})") == no_hash
     assert run_js("M.wcResultAction({tx_json: {}, hash: 123})") == no_hash
+    assert run_js("M.wcResultAction({tx_json: {hash: 123}})") == no_hash
     assert run_js("M.wcResultAction(null)") == no_hash
+
+
+# joeyCancelWarning({deliveryUrl, resolved}) (#513): cancelling a Joey payment
+# only retires OUR sign request. The request stays open in Joey, and approving
+# it there later still takes the money, so while it is unresolved the pay
+# screen's quantity stepper, regenerate and cancel warn first. Xaman requests
+# are cancelled at XUMM itself and need no warning.
+JOEY_WARNING = (
+    "This request is still open in Joey. Reject it in Joey first — approving it later "
+    "still charges you."
+)
+
+
+def test_joey_cancel_warning_for_an_open_joey_request():
+    assert (
+        run_js("M.joeyCancelWarning({deliveryUrl: 'lfg-wc://x', resolved: false})") == JOEY_WARNING
+    )
+
+
+def test_joey_cancel_warning_not_for_a_xaman_request():
+    assert (
+        run_js("M.joeyCancelWarning({deliveryUrl: 'https://xumm.app/sign/x', resolved: false})")
+        is None
+    )
+
+
+def test_joey_cancel_warning_not_once_joey_answered():
+    assert run_js("M.joeyCancelWarning({deliveryUrl: 'lfg-wc://x', resolved: true})") is None
 
 
 # isWcRejection(err): a user declining in Joey surfaces as a WalletConnect

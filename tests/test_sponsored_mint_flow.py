@@ -141,7 +141,7 @@ def _not_admitted(reason):
 
 
 def _paid_prepare():
-    async def prepare(self):
+    async def prepare(self, _snapshot=None):
         self.pay_with = "XRP"
         self.pay_amount = "10"
         self.payment_link = "https://xumm.app/sign/paid"
@@ -177,7 +177,7 @@ def test_mint_start_does_not_promise_free_before_reservation_commits(monkeypatch
         observed["before_commit"] = session.to_dict()
         return _admitted()
 
-    async def forbidden_prepare(_self):
+    async def forbidden_prepare(_self, _snapshot=None):
         raise AssertionError("paid preparation must not run after admission")
 
     async def fake_wrapper(session):
@@ -234,7 +234,7 @@ def test_mint_start_does_not_rebind_a_live_sessions_reservation(_service_env, mo
         rebind_calls.append((args, kwargs))
         raise AssertionError("a live session still owns this reservation")
 
-    async def prepare_paid(self):
+    async def prepare_paid(self, _snapshot=None):
         self.pay_with = "XRP"
         self.pay_amount = "10"
         self.payment_link = "https://xumm.app/sign/paid"
@@ -471,7 +471,7 @@ def test_failed_startup_recovery_disables_sponsorship_but_keeps_paid_mint_availa
     async def failed_resume():
         raise RuntimeError("recovery unavailable")
 
-    async def prepare(self):
+    async def prepare(self, _snapshot=None):
         await _paid_prepare()(self)
 
     async def finish(session):
@@ -1801,7 +1801,7 @@ def test_non_admission_uses_existing_paid_preparation_path(monkeypatch, outcome)
             raise outcome
         return outcome
 
-    async def prepare(self):
+    async def prepare(self, _snapshot=None):
         calls.append("prepare")
         await _paid_prepare()(self)
 
@@ -1831,7 +1831,7 @@ def test_non_admission_uses_existing_paid_preparation_path(monkeypatch, outcome)
 
 
 def test_bulk_mint_never_consults_sponsorship(monkeypatch):
-    async def prepare(self):
+    async def prepare(self, _snapshot=None):
         self.pay_with = "XRP"
         self.unit_price = "10"
         self.pay_amount = "10"
@@ -1866,7 +1866,7 @@ def test_sponsored_payment_methods_never_construct_a_payment(monkeypatch):
     async def forbidden(*args, **kwargs):
         raise AssertionError("payment boundary was reached")
 
-    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", forbidden)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_state", forbidden)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", forbidden)
 
     with pytest.raises(RuntimeError, match="sponsored"):
