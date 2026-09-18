@@ -9,9 +9,9 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=29';
+import * as marketPure from './market_pure.js?v=30';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
-import * as closetPure from './closet_market_pure.js?v=1';
+import * as closetPure from './closet_market_pure.js?v=2';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=25';
@@ -5174,7 +5174,7 @@ function renderListingHistory(items) {
 // overlay (cheapest first; the one currently shown is marked). Picking one
 // re-opens the overlay on that offer while keeping the group context so the
 // list stays put — Buy always acts on whichever offer is shown.
-function renderListingOffers(offers, activeOfferIndex, groupOffers, total) {
+function renderListingOffers(offers, activeKey, groupOffers, total) {
   const box = el('listing-detail-offers');
   box.replaceChildren();
   if (!offers || offers.length < 2) { box.hidden = true; return; }
@@ -5192,7 +5192,7 @@ function renderListingOffers(offers, activeOfferIndex, groupOffers, total) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'listing-offer-row';
-    const active = o.offer_index === activeOfferIndex;
+    const active = marketPure.listingKey(o) === activeKey;
     if (active) { btn.classList.add('active'); btn.setAttribute('aria-current', 'true'); }
     const price = document.createElement('span');
     price.className = 'market-card-price';
@@ -5220,7 +5220,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   // offers + total back in via `groupOffers`/`groupTotal`.
   const offers = groupOffers || (vm.count > 1 ? vm.offers : null);
   const offersTotal = groupOffers ? groupTotal : vm.count;
-  const requestId = vm.offerIndex || vm.nftId;
+  const requestId = vm.key;
   activeListingId = requestId;
   lastListingTrigger = document.activeElement;
   // #298: the detail view is where animation belongs — upgrade to the MP4
@@ -5285,7 +5285,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     action.disabled = false;
     action.onclick = () => { closeListingDetail(); openBuyFlow(row).catch((e) => showError(e.message)); };
   }
-  renderListingOffers(offers, vm.offerIndex, offers, offersTotal);
+  renderListingOffers(offers, vm.key, offers, offersTotal);
   renderListingHistory([]);
   // #283: bids apply to characters only, and only when the viewer isn't the
   // seller (external listings included — that's the point: act on them here).
@@ -5910,19 +5910,9 @@ async function loadClosetBook() {
   const data = await api('/api/closet/book');
   const rows = data.rows.map(closetPure.mapBookRow);
   const chip = (r, label) => ({ imgSrc: mineTraitImgSrc(r.slot, r.value, null), label: `${r.title} — ${label}`, payload: r });
-  renderChipList(el('closet-book-asks'), el('closet-book-asks-empty'),
-    rows.filter((r) => r.bestAsk != null).map((r) => chip(r, r.askLabel)), 'Buy', buyBestClosetAsk);
+  // Closet asks are bought from Browse > Traits, beside the NFT listings.
   renderChipList(el('closet-book-bids'), el('closet-book-bids-empty'),
     rows.filter((r) => r.bestBid != null).map((r) => chip(r, r.bidLabel)), 'Bid', (r) => openClosetBidForm(r.slot, r.value));
-}
-
-async function buyBestClosetAsk(r) {
-  const levels = await api(`/api/closet/book?slot=${encodeURIComponent(r.slot)}&value=${encodeURIComponent(r.value)}`);
-  const ask = closetPure.bestAskFor(levels, me && me.wallet);
-  if (!ask) { showError('No listing you can buy right now.'); return; }
-  const ok = await confirmDialog({ title: `Buy ${r.title}?`, text: `${ask.price_brix} BRIX — it goes straight into your Closet.`, confirmLabel: 'Buy' });
-  if (!ok) return;
-  await marketFlow('closet_fill', `/api/closet/ask/${ask.id}/buy`, {}, closetFillRender);
 }
 
 function fillSelect(selectEl, options, selected) {
@@ -6303,6 +6293,14 @@ async function acceptBid(bid) {
 
 async function openBuyFlow(row) {
   const vm = marketPure.mapListingRow(row);
+  if (vm.closet) {
+    // A Closet ask: one Xaman payment moves the trait from the seller's
+    // Closet into the buyer's (paid in XRP when the buyer is short on BRIX).
+    const ok = await confirmDialog({ title: `Buy ${vm.title}?`, text: closetPure.buyDisclosure(vm.amountBrix), confirmLabel: 'Buy now' });
+    if (!ok) return;
+    await marketFlow('closet_fill', `/api/closet/ask/${encodeURIComponent(vm.orderId)}/buy`, {}, closetFillRender);
+    return;
+  }
   let text;
   if (vm.amountBrix != null) {
     // #239: trait listings are BRIX-denominated; the on-ramp (if needed) is

@@ -32,6 +32,10 @@ export function askDisclosure(priceBrix, feeBps) {
   return `You'll receive ${net} BRIX${fee} when it sells. Listing is free and instant — unlist any time.`;
 }
 
+export function buyDisclosure(priceBrix) {
+  return `${priceBrix} BRIX — it goes straight into your Closet. Not enough BRIX? You'll pay in XRP instead.`;
+}
+
 export function bidDisclosure(priceBrix, ttlDays) {
   const amount = priceBrix == null ? 'your BRIX' : `${priceBrix} BRIX`;
   return `Locks ${amount} in an on-ledger escrow until a holder fills it, you cancel, or it expires in ${ttlDays} days. `
@@ -68,11 +72,6 @@ export function bookLine(book) {
   if (book.best_bid_brix != null) parts.push(`best bid ${book.best_bid_brix} BRIX`);
   if (book.best_ask_brix != null) parts.push(`best ask ${book.best_ask_brix} BRIX`);
   return parts.length ? `Closet market: ${parts.join(' · ')}` : '';
-}
-
-export function bestAskFor(levels, wallet) {
-  const asks = (levels && levels.asks) || [];
-  return asks.find((a) => a.owner !== wallet) || null;
 }
 
 export function keySlots(keys) {

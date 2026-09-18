@@ -344,6 +344,14 @@ def listing_price(row: Any) -> Decimal:
     return Decimal(row["amount_drops"] or 0)
 
 
+def listing_key(row: Any) -> str:
+    """A browse row's unique id, used to break sort ties: an NFT listing's
+    offer_index, or ``closet:<order id>`` for a Closet ask, which has no
+    offer (Browse > Traits merges both)."""
+    offer_index = row["offer_index"]
+    return offer_index if offer_index is not None else f"closet:{row['order_id']}"
+
+
 # #481: cap on the per-group `offers[]` a grouped browse row embeds. Pagination
 # bounds GROUPS, not offers, so without this one popular (slot, value) could
 # serialize the whole browse cache into a single page. `count` stays the true
@@ -361,7 +369,7 @@ def group_trait_rows(
     that ignores the group fields still renders and buys a real offer),
     plus `count`, `floor_brix` (the cheapest price, as the row's own
     `amount_brix` string) and `offers` — every listing in the group as its
-    own dict, cheapest first, ties by offer_index. External (destination-
+    own dict, cheapest first, ties by listing_key. External (destination-
     locked, #131) rows are never merged: they are read-only price discovery
     with their own marketplace link, so each keeps its own row. Neither is a
     legacy XRP-denominated trait row (no `amount_brix`; awaiting the
@@ -381,12 +389,12 @@ def group_trait_rows(
         key: tuple[Any, ...] = (
             (r.get("slot"), r.get("value"), None)
             if mergeable
-            else (r.get("slot"), r.get("value"), r["offer_index"])
+            else (r.get("slot"), r.get("value"), listing_key(r))
         )
         buckets.setdefault(key, []).append(r)
     out: list[dict[str, Any]] = []
     for members in buckets.values():
-        offers = sorted(members, key=lambda r: (listing_price(r), r["offer_index"]))
+        offers = sorted(members, key=lambda r: (listing_price(r), listing_key(r)))
         head = dict(offers[0])
         head["count"] = len(offers)
         head["floor_brix"] = offers[0].get("amount_brix")

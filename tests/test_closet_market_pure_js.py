@@ -73,17 +73,6 @@ def test_book_row_and_badges():
     )
 
 
-def test_best_ask_skips_own():
-    levels = {
-        "asks": [
-            {"id": "A", "owner": "rMe", "price_brix": "1"},
-            {"id": "B", "owner": "rYou", "price_brix": "2"},
-        ]
-    }
-    assert run_js(f"M.bestAskFor({json.dumps(levels)}, 'rMe').id") == "B"
-    assert run_js(f"M.bestAskFor({json.dumps({'asks': []})}, 'rMe')") is None
-
-
 def test_keys_group_by_slot():
     keys = [
         {"slot": "Head", "value": "Crown"},
@@ -139,4 +128,10 @@ def test_chip_labels():
     )
     assert (
         run_js("M.closetAssetLabel({slot: 'Head', value: 'Crown', count: 3})") == "Head: Crown ×3"
+    )
+
+
+def test_buy_disclosure_names_the_price_and_the_xrp_fallback():
+    assert run_js("M.buyDisclosure('4')") == (
+        "4 BRIX — it goes straight into your Closet. Not enough BRIX? You'll pay in XRP instead."
     )

@@ -199,3 +199,60 @@ def test_ensure_schema_tolerates_concurrent_duplicate_column():
     cols = {r[1] for r in conn.execute("PRAGMA table_info(closet_orders)")}
     assert "user_lls" in cols
     conn.close()
+
+
+def test_open_asks_lists_only_open_asks_oldest_first():
+    """Browse > Traits merges these into its listings: an ask being cancelled,
+    sold (matched by a payment) or a bid is never a buyable listing."""
+    c = _conn()
+    es.set_closet_contents(c, SELLER, [("Head", "Crown", 3), ("Eyes", "Laser", 1)], [])
+    newer = cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="12.5", platform=None, now=200
+    )
+    older = cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="9", platform=None, now=100
+    )
+    unlisted = cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="8", platform=None, now=150
+    )
+    cms.cancel_ask(c, unlisted["id"], SELLER)
+    sold = cms.create_ask(
+        c, owner=SELLER, slot="Eyes", value="Laser", price_brix="3", platform=None, now=300
+    )
+    fill = cms.create_take_fill(c, sold["id"], BUYER, fee_bps=0, platform=None)
+    assert cms.claim_ask_for_payment(c, fill["id"], "PAYHASH") == cms.FUNDED
+    bid = cms.create_pending_bid(
+        c,
+        owner=BUYER,
+        slot="Head",
+        value="Crown",
+        price_brix="7",
+        platform=None,
+        condition="C",
+        fulfillment_enc="S",
+        cancel_after=9,
+        payload_uuid=None,
+        xumm_url=None,
+        qr_url=None,
+        push=None,
+    )
+    cms.mark_bid_open(c, bid["id"], escrow_tx_hash="E1", escrow_owner_seq=3)
+
+    assert cms.open_asks(c) == [
+        {
+            "id": older["id"],
+            "owner": SELLER,
+            "slot": "Head",
+            "value": "Crown",
+            "price_brix": "9",
+            "created_ts": 100,
+        },
+        {
+            "id": newer["id"],
+            "owner": SELLER,
+            "slot": "Head",
+            "value": "Crown",
+            "price_brix": "12.5",
+            "created_ts": 200,
+        },
+    ]

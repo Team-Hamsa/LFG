@@ -450,6 +450,16 @@ def book_summary(
     return sorted(keys.values(), key=lambda r: (r["slot"], r["value"]))
 
 
+def open_asks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every buyable ask, oldest first — Browse > Traits lists these beside the
+    NFT trait listings."""
+    return _many(
+        conn,
+        "SELECT id, owner, slot, value, price_brix, created_ts FROM closet_orders "
+        "WHERE state = 'open' AND side = 'ask' ORDER BY created_ts, id",
+    )
+
+
 def book_levels(conn: sqlite3.Connection, slot: str, value: str) -> dict[str, Any]:
     rows = _many(
         conn,
