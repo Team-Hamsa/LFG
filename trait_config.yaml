@@ -12,6 +12,9 @@ layers:
   - {name: Eyes,       z: 70}
   - {name: Head,       z: 80}
   - {name: Accessory,  z: 90}
+# Per-value z. The Activity's layered previews (Dressing Room canvas, Assemble
+# builder) read layers + z_overrides from /api/economy `z_order`, so an edit
+# here needs no client change — just the service restart any edit needs.
 z_overrides:
   - {trait_type: Eyes,  value: Wavy,         z: 95}
   - {trait_type: Mouth, value: Rainbow Puke, z: 95}

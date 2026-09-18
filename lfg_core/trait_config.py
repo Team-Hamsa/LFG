@@ -69,6 +69,19 @@ class TraitConfig:
     def sort_attributes(self, attrs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(attrs, key=lambda a: self.z_for(a["trait_type"], a["value"]))
 
+    def z_table(self) -> dict[str, Any]:
+        """z_for's inputs as JSON-safe data, for the client's layered previews
+        (build_pure.js orderedLayers, via /api/economy `z_order`) to sort
+        exactly like sort_attributes. Overrides stay a list in config order —
+        z_for is first-match and load_config does not reject a repeated
+        (trait_type, value), so a last-wins map would disagree with it."""
+        return {
+            "layers": {layer.name: layer.z for layer in self.layers},
+            "z_overrides": [
+                {"trait_type": o.trait_type, "value": o.value, "z": o.z} for o in self.z_overrides
+            ],
+        }
+
     def allowed_bodies(self, trait_type: str, value: str) -> frozenset[str] | None:
         entry = self.affinity.get(trait_type, {}).get(value)
         return frozenset(entry) if entry is not None else None

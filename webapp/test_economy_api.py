@@ -136,6 +136,33 @@ def test_read_economy_state_excludes_other_owners():
     assert "bodies" not in state["closet"]
 
 
+# A deliberately tiny trait config (not the repo's) so the expected z_order is
+# hand-derived here and can only match if the payload reads the LIVE config.
+_Z_CONFIG = """
+version: 1
+layers:
+  - {name: Background, z: 10}
+  - {name: Body, z: 30}
+  - {name: Eyes, z: 70}
+z_overrides:
+  - {trait_type: Eyes, value: Wavy, z: 95}
+"""
+
+
+def test_read_economy_state_carries_the_live_z_table(tmp_path, monkeypatch):
+    # The layered previews (Dressing Room canvas + Assemble builder) sort by
+    # this — per-value z_overrides included — so the client stacks layers the
+    # way swap_compose composes them.
+    path = tmp_path / "trait_config.yaml"
+    path.write_text(_Z_CONFIG)
+    monkeypatch.setattr(trait_config, "_config", trait_config.load_config(str(path)))
+    state = economy_api.read_economy_state(_seed_conn(), "rOwner")
+    assert state["z_order"] == {
+        "layers": {"Background": 10.0, "Body": 30.0, "Eyes": 70.0},
+        "z_overrides": [{"trait_type": "Eyes", "value": "Wavy", "z": 95.0}],
+    }
+
+
 def test_equip_session_dict():
     s = economy_flow.EquipSession(owner="rOwner", character=_char(), changes=[("Head", "Halo")])
     s.state = economy_flow.DONE

@@ -151,6 +151,44 @@ def test_sort_attributes_moves_override_on_top(tmp_path):
     ]
 
 
+# z_table() is the client's copy of z_for's inputs: the layered previews
+# (build_pure.js orderedLayers, fed via /api/economy `z_order`) sort by it, so
+# a z_override added to the YAML reaches the preview with no client change.
+
+
+def test_z_table_carries_every_layer_z_and_each_override(tmp_path):
+    assert _cfg(tmp_path).z_table() == {
+        "layers": {
+            "Background": 10.0,
+            "Back": 20.0,
+            "Body": 30.0,
+            "Clothing": 40.0,
+            "Mouth": 50.0,
+            "Eyebrows": 60.0,
+            "Eyes": 70.0,
+            "Head": 80.0,
+            "Accessory": 90.0,
+        },
+        "z_overrides": [{"trait_type": "Eyes", "value": "Wavy", "z": 95.0}],
+    }
+
+
+def test_z_table_keeps_duplicate_overrides_in_config_order(tmp_path):
+    # load_config does not reject a repeated (trait_type, value), and z_for is
+    # FIRST-match — so the table must keep every entry in order (not collapse
+    # them into a last-wins map) for the client's first-match to agree.
+    dup = GOOD.replace(
+        "  - {trait_type: Eyes, value: Wavy, z: 95}",
+        "  - {trait_type: Eyes, value: Wavy, z: 95}\n  - {trait_type: Eyes, value: Wavy, z: 5}",
+    )
+    cfg = trait_config.load_config(_write(tmp_path, dup))
+    assert cfg.z_for("Eyes", "Wavy") == 95
+    assert cfg.z_table()["z_overrides"] == [
+        {"trait_type": "Eyes", "value": "Wavy", "z": 95.0},
+        {"trait_type": "Eyes", "value": "Wavy", "z": 5.0},
+    ]
+
+
 def test_affinity_queries(tmp_path):
     cfg = _cfg(tmp_path)
     assert cfg.allowed_bodies("Clothing", "Summer Dress") == frozenset({"female"})

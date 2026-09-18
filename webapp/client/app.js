@@ -3663,8 +3663,9 @@ function renderCanvas(char) {
   const shown = buildPure.applyPending(char.attributes, pending());
   const byType = Object.fromEntries(shown.map((a) => [a.trait_type, a.value]));
   // Same shared stacker the Assemble builder's preview uses (#T31 defect 1)
-  // — one z-order implementation, not two.
-  for (const { slot, value } of buildPure.orderedLayers(order, byType)) {
+  // — one z-order implementation, not two. z_order carries the per-value
+  // z_overrides (e.g. Wavy Eyes above Head), as the composed art has them.
+  for (const { slot, value } of buildPure.orderedLayers(order, byType, economyState.z_order)) {
     if (!layerComplete(char.body, value)) continue;
     canvas.appendChild(layerMediaEl(layerSrc(char.body, slot, value), ''));
   }
@@ -4917,7 +4918,7 @@ function refreshBuilderPreview() {
   // dead code that could silently reintroduce the Body-forced-first bug if
   // it were ever (wrongly) exercised.
   const order = economyState.trait_order;
-  const layers = buildPure.orderedLayers(order, { ...chosen, Body: body });
+  const layers = buildPure.orderedLayers(order, { ...chosen, Body: body }, economyState.z_order);
   preview.replaceChildren(
     ...layers.map(({ slot, value }) => layerMediaEl(layerSrc(cls, slot, value), `${slot}: ${value}`)),
   );

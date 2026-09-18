@@ -212,11 +212,37 @@ export function missingSlots(slots, slotOptions) {
 // pairs to actually draw, bottom layer first, dropping any slot that is
 // unset or explicitly "None". A caller that force-prepends Body (or
 // otherwise re-derives its own order) is a second, divergent stacker.
-export function orderedLayers(order, valuesBySlot) {
+//
+// `zOrder` is economyState.z_order (TraitConfig.z_table(): each layer's z
+// plus trait_config.yaml's per-(trait_type, value) z_overrides). The layers
+// are sorted by it the way the server's sort_attributes composes the real
+// art, so e.g. Wavy Eyes (z 95) draws above Head/Accessory and Retardio
+// (z 45) below Mouth. Equal z keeps `order`: the server stably sorts
+// attributes already normalized to trait_order. Without a table that keys
+// every drawn layer (a client newer than the API it talks to), the fixed
+// `order` stands.
+export function orderedLayers(order, valuesBySlot, zOrder) {
   const values = valuesBySlot || {};
-  return (order || [])
+  const layers = (order || [])
     .map((slot) => ({ slot, value: values[slot] }))
     .filter(({ value }) => Boolean(value) && value !== 'None');
+  const zs = layers.map(({ slot, value }) => layerZ(zOrder, slot, value));
+  if (!zs.every(Number.isFinite)) return layers;
+  return layers
+    .map((layer, i) => ({ layer, z: zs[i], i }))
+    .sort((a, b) => a.z - b.z || a.i - b.i)
+    .map(({ layer }) => layer);
+}
+
+// TraitConfig.z_for, line for line: the FIRST z_override matching both slot
+// and value wins, else the slot's own layer z. Anything that is not a finite
+// number (no table, unknown slot) makes orderedLayers keep the fixed order.
+function layerZ(zOrder, slot, value) {
+  if (!zOrder) return undefined;
+  for (const o of zOrder.z_overrides || []) {
+    if (o.trait_type === slot && o.value === value) return o.z;
+  }
+  return (zOrder.layers || {})[slot];
 }
 
 // --- Body switch keeps valid traits (T31 defect 2) -----------------------

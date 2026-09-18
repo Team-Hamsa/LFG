@@ -265,3 +265,26 @@ def test_seeded_characters_carry_video_url():
     assert all("video_url" in c for c in st["characters"])
     assert any(c["video_url"] for c in st["characters"])
     assert any(c["video_url"] is None for c in st["characters"])
+
+
+def test_read_state_carries_the_live_z_table(tmp_path, monkeypatch):
+    """Dev mode mirrors economy_api's prod shape: the client's layered
+    previews sort by `z_order` (per-value z_overrides included), read from the
+    live trait config — a tiny literal one here, so the match is hand-derived."""
+    from lfg_core import trait_config
+
+    path = tmp_path / "trait_config.yaml"
+    path.write_text(
+        "version: 1\n"
+        "layers:\n"
+        "  - {name: Background, z: 10}\n"
+        "  - {name: Accessory, z: 90}\n"
+        "z_overrides:\n"
+        "  - {trait_type: Accessory, value: Retardio, z: 45}\n"
+    )
+    monkeypatch.setattr(trait_config, "_config", trait_config.load_config(str(path)))
+    st = mock_economy.MockEconomy().read_state(mock_economy.DEV_OWNER)
+    assert st["z_order"] == {
+        "layers": {"Background": 10.0, "Accessory": 90.0},
+        "z_overrides": [{"trait_type": "Accessory", "value": "Retardio", "z": 45.0}],
+    }
