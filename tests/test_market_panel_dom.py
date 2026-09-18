@@ -304,3 +304,49 @@ def test_trait_listing_detail_is_compact():
     for m in grids:
         preludes = _enclosing_preludes(css, m.end() - 1)
         assert any(p.startswith("@container listing-detail") for p in preludes), preludes
+
+
+def _direct_parent_ids(html: str) -> dict:
+    """Map each element id to the id of its direct parent element."""
+    from html.parser import HTMLParser
+
+    void = {"area", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
+
+    class Parents(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stack: list = []
+            self.parents: dict = {}
+
+        def handle_starttag(self, tag, attrs):
+            own = dict(attrs).get("id")
+            if own:
+                self.parents[own] = self.stack[-1][1] if self.stack else None
+            if tag not in void:
+                self.stack.append((tag, own))
+
+        def handle_endtag(self, tag):
+            while self.stack:
+                if self.stack.pop()[0] == tag:
+                    break
+
+    p = Parents()
+    p.feed(html)
+    return p.parents
+
+
+def test_standalone_card_inputs_are_capped_not_full_bleed():
+    """Discord desktop 2026-09-18: at >=760px the app widens to 880px, and the
+    global `input[type="text"] { width: 100% }` stretched the lone price box on
+    Place a bid and List for sale to ~790px. A text input sitting directly in a
+    card is capped instead."""
+    rule = re.search(r'\.card > input\[type="text"\]\s*\{([^}]*)\}', _stylesheet())
+    assert rule, 'no `.card > input[type="text"]` rule'
+    cap = re.search(r"max-width:\s*(\d+)px", rule.group(1))
+    assert cap and int(cap.group(1)) <= 320
+    # The amount reads centered, like the rest of the card.
+    assert re.search(r"text-align:\s*center", rule.group(1))
+    # The cap only reaches inputs that are direct children of their card.
+    parents = _direct_parent_ids(_read("index.html"))
+    assert parents["closet-bid-price"] == "closet-bid-form-panel"
+    assert parents["market-list-price"] == "market-list-form-panel"

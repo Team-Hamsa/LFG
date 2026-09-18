@@ -231,6 +231,12 @@ input[type="text"] {
   font-size: .9rem;
   transition: border-color var(--speed), box-shadow var(--speed);
 }
+/* A text input on its own in a card (the price box on Place a bid / List
+   for sale) sizes with the form instead of the card, which reaches ~790px
+   once the app widens at >=760px (Discord desktop), and centers its text
+   like the rest of the card. Inputs that share a row (filters, the listing
+   bid form) keep their flex sizing. */
+.card > input[type="text"] { max-width: 280px; text-align: center; }
 input[type="text"]:focus {
   outline: none;
   border-color: var(--blue);
