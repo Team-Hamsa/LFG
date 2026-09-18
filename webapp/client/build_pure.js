@@ -22,11 +22,13 @@ export function pickDefaultCharacter(characters) {
 //   state — 'active' (currently selected) | 'selectable' | 'indexing'
 //           (disabled: no body means every layer fetch would 400)
 export function goTileState(char, activeNftId) {
-  // A harvested blank has NO Body metadata (its index `body` is ''), yet it is
-  // fully indexed: renderCanvas draws its own silhouette image and fetches no
-  // layers, so the "no body -> every layer fetch would 400" disable must not
-  // apply to it. Without this, every blank rendered as a disabled "indexing…"
-  // tile and could never be selected to be rebuilt.
+  // A blank wears no Body, yet it is fully indexed: renderCanvas draws its own
+  // silhouette image and fetches no layers, so the "no body -> every layer
+  // fetch would 400" disable must not apply to it. Without this, every blank
+  // rendered as a disabled "indexing…" tile and could never be selected to be
+  // rebuilt. Note `char.body` is NOT how you recognize a blank (#523) — it is a
+  // body CLASS, and detect_body() falls through to "skeleton" for a blank's
+  // all-"None" attributes rather than returning ''; only `blank` says so.
   const indexed = Boolean(char.body) || Boolean(char.blank);
   return {
     label: `#${char.edition == null ? '?' : char.edition}`,
@@ -110,6 +112,19 @@ export function netChanges(character, pending) {
   return Object.keys(staged)
     .filter((slot) => staged[slot] !== currentValue(character, slot))
     .map((slot) => ({ slot, value: staged[slot] }));
+}
+
+// Can this loose Closet asset be equipped onto the active character? A BLANK is
+// never equippable (#523): dressing one slot leaves a partly dressed character
+// and credits a phantom "None" to every other slot, which the conservation
+// audit reads as drift — Assemble ("Build this GO") is the only supported way
+// to dress a blank. `blank` is the ONLY field that says so. A blank's `body` is
+// a body CLASS, not '' — detect_body() has no "no body" answer and falls
+// through to "skeleton" for its all-"None" attributes — so neither a body check
+// nor closetTileState()'s visibility can stand in for this.
+export function equipCompatible(character, asset, slots) {
+  if (!character || character.blank) return false;
+  return (slots || []).includes(asset && asset.slot);
 }
 
 // Presentation state for one Closet tile (asset {slot, value}) given the

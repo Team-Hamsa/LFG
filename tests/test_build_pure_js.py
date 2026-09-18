@@ -6,6 +6,7 @@
 # No lfg_core import at module top -> no env-guard preamble needed.
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -37,6 +38,20 @@ def run_js(expr: str):
     )
     assert proc.returncode == 0, f"node script failed:\n{script}\n--- stderr ---\n{proc.stderr}"
     return json.loads(proc.stdout)
+
+
+def _app_js() -> str:
+    with open(os.path.join(ROOT, "webapp", "client", "app.js"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _render_closet_src() -> str:
+    """Only the body of renderCloset() — so a `compatible` computed elsewhere in
+    the 5k-line file can never satisfy these assertions by accident."""
+    src = _app_js()
+    start = src.index("function renderCloset() {")
+    end = src.index("\nfunction ", start + 1)
+    return src[start:end]
 
 
 # ---------------------------------------------------------------------------
@@ -261,22 +276,35 @@ def test_net_changes_without_a_character_is_empty():
     assert run_js("M.netChanges(null, {Head: 'Tiara'})") == []
 
 
-# A SELECTED BLANK cannot reach the equip path at all (guards the P1 raised on
-# PR #409): a blank's index `body` is '', so every real Closet trait tile is
-# invisible — only its "None" tiles render, and staging "None" onto a slot that
-# already holds "None" nets to zero changes, so the Save bar stays hidden and no
-# /api/equip is ever submitted against a bodyless character. Dressing a blank
-# goes through Assemble, which picks a body first.
-def test_blank_character_cannot_stage_an_equip():
-    blank = (
-        "{nft_id: 'A', body: '', blank: true, attributes: "
-        "[{trait_type: 'Head', value: 'None'}, {trait_type: 'Eyes', value: 'None'}]}"
-    )
-    assert (
-        run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {blank})")["visible"]
-        is False
-    )
-    assert run_js(f"M.netChanges({blank}, {{Head: 'None'}})") == []
+# A SELECTED BLANK and the equip path (#523). PR #409 assumed this module
+# already stopped a blank from being dressed, on the premise that a blank has no
+# body. It does not, and that premise is false: a blank's metadata parses fine,
+# and swap_meta.detect_body() has no "no body" answer — Body="None" matches none
+# of its branches and falls through to "skeleton" — so `body` is a truthy body
+# CLASS, never ''. An empty `body` means UNREADABLE metadata, which is_blank
+# rejects outright. These two tests pin what follows from that, and it is why
+# the real guard has to sit at the staging gate in renderCloset() (asserted at
+# the bottom of this file): the tiles render, and a staged trait IS a change.
+BLANK = (
+    "{nft_id: 'A', body: 'skeleton', blank: true, attributes: "
+    "[{trait_type: 'Head', value: 'None'}, {trait_type: 'Eyes', value: 'None'}]}"
+)
+
+
+def test_blank_character_still_shows_real_closet_tiles():
+    # And it must: the tile is the host for Extract, and the trait strip's chip
+    # is the host for Deposit — hiding them would strand a blank-only owner with
+    # no way to move traits at all.
+    out = run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {BLANK})")
+    assert out == {"visible": True, "art": "layer", "label": ""}
+
+
+def test_blank_character_staged_trait_is_a_real_net_change():
+    # Every slot of a blank reads "None", so a staged trait always differs from
+    # what it wears: the Save bar would show and POST /api/equip would fire.
+    # Nothing downstream of staging stops this — only the renderCloset() gate.
+    out = run_js(f"M.netChanges({BLANK}, {{Head: 'Camp Hat'}})")
+    assert out == [{"slot": "Head", "value": "Camp Hat"}]
 
 
 # ---------------------------------------------------------------------------
@@ -434,3 +462,61 @@ def test_save_outcome_committed_on_resolution_committed():
 
 def test_save_outcome_missing_session_is_reverted():
     assert run_js("M.saveOutcome(null)") == "reverted"
+
+
+# ---------------------------------------------------------------------------
+# renderCloset() equip gating for a BLANK character (#523)
+# The Closet grid is the ONLY door to stagePendingEquip(), so its `compatible`
+# check is where a blank has to be stopped client-side. It must exclude blanks
+# explicitly: a blank is NOT distinguishable by `body` (see the blank-tile
+# tests above), so a slot-membership test alone lets a real trait be staged and
+# saved onto a blank — the interaction behind the 6 mainnet "phantom None set"
+# drift events of 2026-08-07..09-11.
+# ---------------------------------------------------------------------------
+
+
+def test_equip_compatible_allows_a_dressed_character_and_a_known_slot():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Head', value: 'Tiara'}}, ['Head', 'Eyes'])")
+
+
+def test_equip_compatible_refuses_a_blank_character():
+    # The whole point (#523). An INVERTED guard (`char.blank` instead of
+    # `!char.blank`) fails right here, which a source-text assertion could not
+    # catch — it would still "mention char.blank".
+    out = run_js(f"M.equipCompatible({BLANK}, {{slot: 'Head', value: 'Camp Hat'}}, ['Head'])")
+    assert out is False
+
+
+def test_equip_compatible_refuses_without_a_character():
+    assert run_js("M.equipCompatible(null, {slot: 'Head'}, ['Head'])") is False
+
+
+def test_equip_compatible_refuses_a_slot_the_character_has_no_room_for():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Wings'}}, ['Head', 'Eyes'])") is False
+
+
+def test_equip_compatible_refuses_a_missing_slot_list():
+    assert run_js(f"M.equipCompatible({CHAR}, {{slot: 'Head'}}, null)") is False
+
+
+def test_closet_tile_equip_delegates_to_equip_compatible():
+    # renderCloset() must not re-derive the predicate inline — the Node tests
+    # above are only worth something while the grid actually calls it.
+    body = _render_closet_src()
+    assert "buildPure.equipCompatible(char, asset, economyState.slots)" in body
+    assert "if (compatible) item.onclick = () => stagePendingEquip(" in body
+
+
+def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
+    """A module and its caller must move in lockstep, but browser caches evict
+    them independently. equipCompatible was ADDED at v30: a browser holding the
+    old build_pure.js?v=29 alongside a fresh app.js would get a module without
+    that export, and renderCloset()'s call would TypeError and leave the Closet
+    unrendered. A floor (not an equality) so later bumps don't fight this test.
+    """
+    m = re.search(r"build_pure\.js\?v=(\d+)", _app_js())
+    assert m, "app.js no longer imports build_pure.js with a cache key"
+    assert int(m.group(1)) >= 30, (
+        "build_pure.js?v= regressed below the version that first exported "
+        "equipCompatible — a cached older module breaks the Closet"
+    )
