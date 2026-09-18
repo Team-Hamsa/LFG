@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import os
+from collections.abc import Mapping
 from typing import Any
 
 # Sanity ceiling on an overlay-supplied rate: no marketplace takes a quarter
@@ -141,18 +142,29 @@ def _load() -> dict[str, BrokerEntry]:
     return merged
 
 
-def known_destinations() -> frozenset[str]:
+def snapshot() -> Mapping[str, BrokerEntry]:
+    """The effective allowlist as of now, to pass as `table` to the lookups
+    below when several of them must agree — e.g. one browse response's
+    filter, sort and serialization. An overlay edit replaces the cached
+    dict rather than mutating it, so a snapshot never changes underneath
+    its holder. Read-only."""
+    return _load()
+
+
+def known_destinations(table: Mapping[str, BrokerEntry] | None = None) -> frozenset[str]:
     """Every allowlisted broker account address."""
-    return frozenset(_load())
+    return frozenset(_load() if table is None else table)
 
 
-def resolve(destination: str | None, nft_id: str) -> BrokerEntry | None:
+def resolve(
+    destination: str | None, nft_id: str, table: Mapping[str, BrokerEntry] | None = None
+) -> BrokerEntry | None:
     """{"name", "url", "broker_rate"} for an allowlisted broker destination
     (url None when the broker has no known deep-link scheme; broker_rate None
     when unmeasured — #426), or None for an unknown/absent destination."""
     if not destination:
         return None
-    entry = _load().get(destination)
+    entry = (_load() if table is None else table).get(destination)
     if entry is None:
         return None
     template = entry.get("url_template")
@@ -203,3 +215,22 @@ def clearing_drops(ask_drops: int, broker_rate: float) -> int:
     while base > ask_drops and (base - 1) - math.ceil((base - 1) * broker_rate) >= ask_drops:
         base -= 1
     return base + _clearing_buffer_drops()
+
+
+def buy_now_clearing(
+    destination: str | None,
+    ask_drops: int | None,
+    table: Mapping[str, BrokerEntry] | None = None,
+) -> int | None:
+    """The Buy-now price (drops) of a listing destination-locked to
+    `destination` at `ask_drops`: its clearing_drops when the destination is
+    an allowlisted broker with a MEASURED fee rate (#426), else None (no or
+    unknown destination, an unmeasured broker, no XRP ask). One number for
+    the bid, the card price, and browse's price sort/filter."""
+    if not destination or ask_drops is None:
+        return None
+    entry = (_load() if table is None else table).get(destination)
+    rate = entry.get("broker_rate") if entry else None
+    if rate is None:
+        return None
+    return clearing_drops(int(ask_drops), rate)
