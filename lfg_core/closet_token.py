@@ -20,6 +20,8 @@ ACTIVE = "active"
 
 # ClosetError.code of the stale-mirror refusal (#522).
 CLOSET_MIRROR_BEHIND = "closet_mirror_behind"
+# ...and of the refusal while a committed modify awaits its mirror write (#184, #530).
+CLOSET_MIRROR_PENDING = "closet_mirror_pending"
 MIRROR_BEHIND_MESSAGE = (
     "Your Closet is still catching up with a recent change on the ledger. "
     "Nothing was changed — please try again shortly."

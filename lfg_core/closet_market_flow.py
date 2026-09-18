@@ -55,6 +55,16 @@ CANCEL_SLACK_SECONDS = (
 )
 MAX_STEPS = 8
 
+# The fill's `error` while a side's Closet update is refused because that
+# Closet's mirror may lack a committed version (#530) — a wait, not a failure.
+MIRROR_WAIT_ERROR = (
+    "Closet update is waiting for a Closet to catch up with the ledger; will retry automatically"
+)
+# The not-committed ClosetError codes of those refusals (see _mirror).
+_MIRROR_WAIT_CODES = frozenset(
+    {closet_token.CLOSET_MIRROR_BEHIND, closet_token.CLOSET_MIRROR_PENDING}
+)
+
 
 @dataclass
 class ClosetMarketDeps:
@@ -1068,8 +1078,16 @@ async def _pay(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarke
 async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
     """Re-sync each side's Closet token from the (authoritative) DB. A full
     overwrite from current DB state is idempotent, so every error — including
-    an indeterminate modify — is simply retried."""
-    changed = False
+    an indeterminate modify — is simply retried.
+
+    A refusal with a `_MIRROR_WAIT_CODES` code (#530) means that owner's mirror
+    may lack a version already on-chain, which the overwrite would erase. It is
+    a wait, not a failure: the side stays unmirrored for the sweep to retry, and
+    no attempt is counted (the audit reads attempts as a failing payout).
+    MIRROR_WAIT_ERROR is written once, so later retries leave `updated_ts`
+    alone and a fill that keeps waiting ages into the audit's stuck check. The
+    error is cleared once no side is waiting."""
+    changed = failed = waiting = False
     for side in ("seller", "buyer"):
         if fill[f"{side}_mirrored"]:
             continue
@@ -1079,7 +1097,15 @@ async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMa
                 await deps.mirror_fn(conn, owner)
         except closet_token.ClosetMirrorError:
             pass  # the modify committed; only the token-record mirror write failed
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, closet_token.ClosetError) and exc.code in _MIRROR_WAIT_CODES:
+                logging.warning(
+                    f"closet fill {fill['id']}: Closet update for {owner} ({side}) is waiting "
+                    f"({exc.code}): its mirror may lack a version already on-chain; the "
+                    "settlement sweep retries it, no attempt counted"
+                )
+                waiting = True
+                continue
             logging.warning(
                 f"closet fill {fill['id']}: mirror for {owner} failed: {traceback.format_exc()}"
             )
@@ -1089,9 +1115,15 @@ async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMa
                 attempts=int(fill["attempts"]) + 1,
                 error=f"Closet update for {owner} failed; will retry",
             )
+            failed = True
             continue
         cms.mark_side_mirrored(conn, fill["id"], side)
         changed = True
+    if not failed:  # a real failure's error (and attempt) was just recorded: keep it
+        if waiting and fill["error"] != MIRROR_WAIT_ERROR:
+            cms.update_fill(conn, fill["id"], error=MIRROR_WAIT_ERROR)
+        elif not waiting and fill["error"] == MIRROR_WAIT_ERROR:
+            cms.update_fill(conn, fill["id"], error=None)
     return changed
 
 

@@ -5825,8 +5825,30 @@ def _closet_keys(network: str) -> list[dict[str, Any]]:
 
 
 async def _closet_market_mirror(conn: sqlite3.Connection, owner: str) -> None:
-    """Re-sync one owner's Closet token from the DB (settlement step 4)."""
+    """Re-sync one owner's Closet token from the DB (settlement step 4).
+
+    `sync_closet` is a FULL overwrite: whatever `closet_assets` lacks is erased
+    on-chain (#522). So, like the economy flows, refuse before anything is
+    uploaded or submitted while this owner's mirror may lack a committed
+    version (#530). Both checks are needed:
+      * `mirror_pending` (#184): a flow's Closet modify committed but its
+        mirror write failed. While this owner has an unmirrored fill the
+        listener skips the contents rebuild (#443) yet still advances the
+        mirror's URI and ledger stamp, so the archive check below would read
+        those stale contents as current.
+      * `ensure_mirror_current`: the history archive holds a newer version of
+        this Closet than the mirror.
+    Each raises a plain (not committed) ClosetError — code
+    CLOSET_MIRROR_PENDING / CLOSET_MIRROR_BEHIND — which
+    `closet_market_flow._mirror` treats as a wait, not a failed attempt."""
     deps = economy_api.build_settlement_deps(conn)
+    if economy_store.get_mirror_pending(conn, owner):
+        raise closet_token.ClosetError(
+            f"the Closet mirror for {owner} is flagged mirror_pending (a committed Closet "
+            "modify's mirror write failed); refusing a full overwrite",
+            code=closet_token.CLOSET_MIRROR_PENDING,
+        )
+    closet_token.ensure_mirror_current(conn, owner, history_db_path=deps.history_db_path)
     assets = [
         (s, v, c) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
     ]
