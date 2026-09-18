@@ -2655,6 +2655,7 @@ def test_browse_reads_the_broker_allowlist_once_per_request(onchain_env, monkeyp
     assert [r["offer_index"] for r in rows] == ["E" * 64]
     assert rows[0]["broker_rate"] == 0.015890
     assert rows[0]["clearing_drops"] == 42_678_156
+    assert len(reads) == 1  # one snapshot served the whole request
 
 
 # ---------------------------------------------------------------------------

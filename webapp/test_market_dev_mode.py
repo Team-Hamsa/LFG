@@ -267,3 +267,4 @@ def test_listings_dev_mode_reads_the_broker_allowlist_once_per_request(monkeypat
     row = next(r for r in rows if r["offer_index"] == "MOCKOFFER-9003")
     assert row["broker_rate"] == 0.015890
     assert row["clearing_drops"] == 42_678_156
+    assert len(reads) == 1  # one snapshot served the whole request
