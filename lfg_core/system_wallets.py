@@ -33,8 +33,13 @@ HISTORICAL_DISTRIBUTORS = frozenset(
     }
 )
 
+# House wallets (#548): each holds the project's trait stock as Closet asks and
+# collects the sale proceeds. Same rule: add one the day it goes into service —
+# scripts/house_closet.py refuses to set up or migrate a house missing here.
+HISTORICAL_HOUSE_WALLETS: frozenset[str] = frozenset()
+
 # Every project wallet that must be excluded regardless of what config says.
-DURABLE_SYSTEM_ACCOUNTS = frozenset(HISTORICAL_DISTRIBUTORS)
+DURABLE_SYSTEM_ACCOUNTS = frozenset(HISTORICAL_DISTRIBUTORS | HISTORICAL_HOUSE_WALLETS)
 
 
 def with_durable(configured: frozenset[str]) -> frozenset[str]:

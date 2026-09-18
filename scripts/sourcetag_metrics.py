@@ -73,7 +73,12 @@ def excluded_wallets() -> list[str]:
     # has Account = the distributor and carries our SourceTag, so without this
     # each nightly payout run counts a project wallet as an external user
     # (#413). Retired distributors come from system_wallets, durably (#414).
-    configured = {config.SIGNING_ACCOUNT, config.BRIX_DISTRIBUTOR_ADDRESS}
+    # The house wallet (#548) signs its own setup (trust line + Closet accept).
+    configured = {
+        config.SIGNING_ACCOUNT,
+        config.BRIX_DISTRIBUTOR_ADDRESS,
+        config.CLOSET_HOUSE_WALLET,
+    }
     return sorted(
         OPERATOR_WALLETS
         | HISTORICAL_SIGNING_ADDRESSES

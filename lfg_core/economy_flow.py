@@ -178,7 +178,10 @@ def _serialize_by_owner(
 
     @functools.wraps(runner)
     async def wrapper(session: _S, deps: EconomyDeps) -> None:
-        async with owner_lock.owner_lock(session.owner):  # type: ignore[attr-defined]
+        # A Deposit can credit a Closet other than the token holder's (#548);
+        # the lock guards the Closet being rewritten.
+        owner = getattr(session, "closet_owner", None) or session.owner  # type: ignore[attr-defined]
+        async with owner_lock.owner_lock(owner):
             await runner(session, deps)
 
     return wrapper
@@ -1736,13 +1739,21 @@ class DepositSession:
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
     pending_tx_hash: str | None = None  # unknown-outcome tx on *_indeterminate (#493)
+    # Credit this wallet's Closet instead of the holder's (#548: the app wallet's
+    # stock moves into the house Closet). None = the holder's own Closet.
+    credit_to: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    @property
+    def closet_owner(self) -> str:
+        return self.credit_to or self.owner
 
     def _record(self, status: str) -> dict[str, Any]:
         return {
             "op": "deposit",
             "id": self.id,
             "owner": self.owner,
+            "credit_to": self.credit_to,
             "nft_id": self.nft_id,
             "slot": self.slot,
             "value": self.value,
@@ -1761,18 +1772,21 @@ class DepositSession:
 
 @_serialize_by_owner
 async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
-    """Deposit a standalone trait NFToken back into the owner's Closet. Order:
-    precheck (active Closet + token is ours + on-ledger owner == depositor) ->
-    issuer BURN (irreversible) -> credit Closet + delete trait_token row ->
-    journal on credit failure. Supply-neutral. Fail-closed on any ownership
-    uncertainty."""
+    """Deposit a standalone trait NFToken into a Closet: the owner's, or
+    `credit_to`'s (#548). Order: precheck (active Closet + token is ours +
+    on-ledger owner == depositor) -> issuer BURN (irreversible) -> credit Closet
+    + delete trait_token row -> journal on credit failure. Supply-neutral.
+    Fail-closed on any ownership uncertainty."""
     conn, owner, nft_id = deps.conn, session.owner, session.nft_id
+    closet_owner = session.closet_owner
     try:
-        err = await _require_active_closet(deps, owner)
+        err = await _require_active_closet(deps, closet_owner)
         if err:
             session.fail(err)
             return
-        stale = _mirror_pending_error(deps, owner) or _mirror_behind_error(deps, owner)
+        stale = _mirror_pending_error(deps, closet_owner) or _mirror_behind_error(
+            deps, closet_owner
+        )
         if stale:
             session.fail(stale)
             return
@@ -1820,17 +1834,17 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         es.delete_trait_token(conn, nft_id)
         _write_record(deps.records_dir, "deposit", session.id, session._record("burned"))
 
-        assets = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, closet_owner)
         assets[(session.slot, session.value)] = assets.get((session.slot, session.value), 0) + 1
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
+            session.sync_tx_hash = await _sync_then_persist(deps, closet_owner, assets)
         except bt.ClosetMirrorError as e:
             # The credit COMMITTED on-chain; only the DB mirror lags. The
             # operator must NOT re-credit (double-credit) — the listener
             # rebuilds the mirror from the Closet token.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
-            es.set_mirror_pending(conn, owner, True)
+            es.set_mirror_pending(conn, closet_owner, True)
             session.state = DONE
             _write_record(
                 deps.records_dir, "deposit", session.id, session._record("complete_pending_mirror")

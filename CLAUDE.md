@@ -95,6 +95,8 @@ CLOSET_MARKET_ENC_KEY=<fernet-key>                          # optional (#443); s
 CLOSET_MARKET_FEE_BPS=700                                   # optional (#443); market fee on fills, 0 <= bps < 10000
 CLOSET_BID_TTL_SECONDS=604800                               # optional (#443); bid escrow CancelAfter
 CLOSET_MARKET_LEDGER_MARGIN=40                              # optional (#443); LastLedgerSequence headroom on backend Closet Market txs
+CLOSET_HOUSE_WALLET=<xrpl-address>                          # optional (#548); house wallet: owns the project's trait stock as Closet asks — never the issuer/app wallet
+CLOSET_HOUSE_SEED=<seed>                                    # optional (#548); signs ONLY the house's one-time setup (BRIX trust line + Closet accept) in scripts/house_closet.py; must derive CLOSET_HOUSE_WALLET
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://www.letseffinggo.com   # use www — apex TLS is broken (Squarespace cert lacks apex SAN, verified 2026-07-10)
 RETRY_MAX_ATTEMPTS=5
@@ -1425,6 +1427,20 @@ Off-ledger trait order book for loose Closet assets. Design:
   (offer_index, or `closet:<id>`). The client's Buy sends them to `POST
   /api/closet/ask/{id}/buy`; the Wanted tab is bids only. Dev mock mode stays
   NFT-only. Moving the NFT trait listings themselves into the Closet market is #548.
+- **House wallet (#548).** The app wallet is the issuer and can't own a Closet
+  (#383), so its trait stock moves into a house wallet's Closet:
+  `scripts/house_closet.py --network <net>` (status) → `--apply-setup` (trust
+  line + Closet, signed with `CLOSET_HOUSE_SEED`) → `--migrate` (dry run) →
+  `--migrate --apply`. Deposit burns each listed token with
+  `DepositSession(credit_to=house)`, then asks are posted at the old prices (a
+  standing bid at or above one fills at the bid's price). Deposits refuse while
+  the house has a live order or fill; the plan file
+  `reports/house_migration_<net>.json` makes re-runs resume, and a post-burn
+  failure (`needs_attention`) is never retried automatically; each Deposit's
+  journal id is saved before its burn, so a run that died mid-item resumes from
+  that journal. The house wallet is excluded from leaderboards and SourceTag
+  metrics like the other project wallets, and setup/migrate refuse a house that
+  is not in `system_wallets.HISTORICAL_HOUSE_WALLETS` (append-only, #414).
 - **Bids** lock BRIX in an XRPL TokenEscrow to the app wallet with a
   PREIMAGE-SHA-256 condition (`lfg_core/crypto_condition.py`); the fulfillment
   is Fernet-sealed with `CLOSET_MARKET_ENC_KEY`. Bids open only after the
