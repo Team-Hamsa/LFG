@@ -854,24 +854,24 @@ def test_a_failure_before_the_burn_stops_and_is_retried(tmp_path):
     conn, f, deps, state = _migration(tmp_path)
     f.info_none = True  # the on-ledger lookup fails
     assert _run(hc.deposit_phase(state, deps)) is False
-    assert state["items"]["TB"]["status"] == hc.FAILED  # first in plan order
-    assert state["items"]["TA"]["status"] == hc.PLANNED  # the run stopped
+    assert state["items"]["TA"]["status"] == hc.FAILED  # deposits run in nft_id order
+    assert state["items"]["TB"]["status"] == hc.PLANNED  # the run stopped
     assert f.burns == []
     f.info_none = False
     assert _run(hc.deposit_phase(state, deps)) is True
-    assert state["items"]["TB"]["status"] == hc.HELD
+    assert state["items"]["TA"]["status"] == hc.DEPOSITED
 
 
 def test_a_failure_after_the_burn_needs_attention_and_is_never_retried(tmp_path):
     conn, f, deps, state = _migration(tmp_path, fail_sync=True)
     assert _run(hc.deposit_phase(state, deps)) is False
-    entry = state["items"]["TB"]
+    entry = state["items"]["TA"]
     assert entry["status"] == hc.NEEDS_ATTENTION and entry["journal_id"]
-    assert f.burns == [("TB", APP)]
+    assert f.burns == [("TA", APP)]
     f.fail_sync = False
-    assert _run(hc.deposit_phase(state, deps)) is True  # TA only
-    assert f.burns == [("TB", APP), ("TA", APP)]
-    assert state["items"]["TB"]["status"] == hc.NEEDS_ATTENTION
+    assert _run(hc.deposit_phase(state, deps)) is True  # TB only
+    assert f.burns == [("TA", APP), ("TB", APP)]
+    assert state["items"]["TA"]["status"] == hc.NEEDS_ATTENTION
 
 
 def test_deposit_phase_refuses_while_the_house_is_busy(tmp_path):
@@ -1192,6 +1192,15 @@ def test_a_failed_accept_clears_the_offer_for_the_next_run(tmp_path):
     with pytest.raises(hc.MigrationRefused, match="tecOBJECT_NOT_FOUND"):
         _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))
     assert es.get_closet_record(conn, HOUSE)[3] is None
+
+
+def test_setup_confirms_a_landed_accept_without_resubmitting(tmp_path):
+    chain = _Chain(line={"limit": "1000000000"})
+    chain.accepted = True  # a previous run's accept landed; the DB hasn't caught up
+    conn, deps = _setup_deps(tmp_path, chain)
+    es.set_closet_token(conn, HOUSE, "C-house", "AB", status=ct.PENDING_ACCEPT, offer_id="OLD")
+    assert _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))["closet"] == ct.ACTIVE
+    assert chain.submitted == []
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -1254,6 +1263,11 @@ async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[st
 
     econ, conn = deps.economy, deps.economy.conn
     rec = es.get_closet_record(conn, house)
+    if rec is not None and rec[2] != ct.ACTIVE:
+        # A previous run's accept may have landed before the listener caught
+        # up: confirm on-ledger before paying for a second accept.
+        if await ct.confirm_accept(conn, house, owner_fn=econ.closet_owner_fn) == ct.ACTIVE:  # type: ignore[arg-type]
+            rec = es.get_closet_record(conn, house)
     if rec is not None and rec[2] == ct.ACTIVE:
         steps["closet"] = ct.ACTIVE
         return steps
@@ -1290,7 +1304,7 @@ async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[st
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_house_closet_setup.py -q -p no:cacheprovider`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
