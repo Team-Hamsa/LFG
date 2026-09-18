@@ -33,7 +33,7 @@ import * as harvestPure from './harvest_pure.js?v=2';
 // Xaman sign-request delivery decisions (#142): mobile-primary deep link vs
 // desktop-primary QR is a pure truth table, Node-testable
 // (tests/test_signdelivery_pure_js.py); applySignDelivery() below is the glue.
-import * as signDeliveryPure from './signdelivery_pure.js?v=4';
+import * as signDeliveryPure from './signdelivery_pure.js?v=5';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
