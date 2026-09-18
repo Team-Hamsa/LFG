@@ -478,6 +478,7 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#520 — Trait market: one browse for Closet asks and token listings, plus a seller record for project inventory (follow-up to #470)](../../issues/520)
 - [ ] [#548 — Move legacy NFT trait listings into the Closet market](../../issues/548)
 - [ ] [#552 — feat: bounties for app activities (admin-controlled; BRIX/NFT/trait/XRP payouts)](../../issues/552)
+- [ ] [#553 — feat(market): XRP collection offers for characters (escrow-backed, like trait bids)](../../issues/553)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
