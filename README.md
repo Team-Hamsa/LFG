@@ -14,7 +14,7 @@
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/-web%20app%20%C2%B7%20live-D89030?style=flat-square&logoColor=white&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8%2BPGVsbGlwc2UgY3g9IjEyIiBjeT0iMTIiIHJ4PSI0IiByeT0iMTAiLz48cGF0aCBkPSJNMiAxMmgyME00IDdoMTZNNCAxN2gxNiIvPjwvZz48L3N2Zz4K" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-5%2C082-2ea043?style=flat-square" alt="5,082 tests">
+<img src="https://img.shields.io/badge/tests-5%2C089-2ea043?style=flat-square" alt="5,089 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
@@ -452,20 +452,45 @@ collection (not a general tool). Full rationale per row in
 
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
+- [ ] [#219 — feat: XLS-56 Batch: single-signature accept of multiple NFT offers](../../issues/219)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
+- [ ] [#405 — feat(brix): spend unclaimed daily-drip accruals as in-app platform credit](../../issues/405)
+- [ ] [#427 — Marketplace: surface incoming bids to the NFT owner (Xaman push + in-app)](../../issues/427)
+- [ ] [#428 — Marketplace: royalty-refund campaign for sales settled through LFG](../../issues/428)
+- [ ] [#444 — Epic: User Profiles — unified accounts across wallets, surfaces, and providers](../../issues/444)
+- [ ] [#454 — Wallet unlink: self-serve removal of a wallet_proof_links edge](../../issues/454)
+- [ ] [#455 — Xaman wallet-link arm: replace bare SignIn consent with a signed AccountSet proof](../../issues/455)
+- [ ] [#456 — WalletConnect signing on Telegram (and Discord Activity): identity-resolved session wallet + per-identity pairing](../../issues/456)
+- [ ] [#469 — Trait marketplace UX cleanup](../../issues/469)
+- [ ] [#473 — Joey browser extension arm: sign in + sign via injected provider (XLS-72d)](../../issues/473)
+- [ ] [#474 — feat: social sign-in (X, Discord, Google, Apple)](../../issues/474)
+- [ ] [#475 — feat: auto-post admin/campaign events to X with templated campaign image](../../issues/475)
+- [ ] [#483 — Trait marketplace: hide or restyle empty-slot (None) trait tokens](../../issues/483)
+- [ ] [#484 — Trait marketplace: richer browse filters (value search, body affinity, ownership, seller)](../../issues/484)
+- [ ] [#485 — Trait marketplace: price context on cards (shop anchor, last sold, floor)](../../issues/485)
+- [ ] [#486 — Trait marketplace: explain the two-signature XRP on-ramp in the buy flow](../../issues/486)
+- [ ] [#487 — Trait marketplace: try-on preview before buying](../../issues/487)
+- [ ] [#488 — Trait marketplace: post-buy 'settling into your Closet' state](../../issues/488)
+- [ ] [#489 — Trait marketplace: mobile layout — collapse filters behind a drawer](../../issues/489)
+- [ ] [#494 — feat: rarity transparency — show per-trait mint odds vs collection share, drift, and how the engine works](../../issues/494)
+- [ ] [#498 — Marketplace: batch cross-listing of external listings onto LFG (blocked on #219)](../../issues/498)
+- [ ] [#503 — Closet Market: resume in-flight bid/buy/fill screens after reload (#443 follow-up)](../../issues/503)
+- [ ] [#520 — Trait market: one browse for Closet asks and token listings, plus a seller record for project inventory (follow-up to #470)](../../issues/520)
+- [ ] [#548 — Move legacy NFT trait listings into the Closet market](../../issues/548)
+- [ ] [#552 — feat: bounties for app activities (admin-controlled; BRIX/NFT/trait/XRP payouts)](../../issues/552)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#470 — Closet-native trait listings: sell traits without minting a token first](../../issues/470) (closed 2026-09-17)
+- [x] [#463 — Joey browser-extension support via @joeywallet/wallet-sdk (XLS-72d injected provider)](../../issues/463) (closed 2026-09-17)
+- [x] [#399 — Sign in with Joey Wallet (WalletConnect)](../../issues/399) (closed 2026-09-17)
+- [x] [#443 — Closet Market: zero-signature trait asks + escrow-backed bids (replace Extract→List→Accept for Closet assets)](../../issues/443) (closed 2026-09-16)
 - [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
-- [x] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48) (closed 2026-08-24)
-- [x] [#354 — Skeleton body cannot wear the pirate outfit ("Swashbuckler") — missing skeleton art](../../issues/354) (closed 2026-08-24)
-- [x] [#332 — ops(sponsored-mint): execute the staging rehearsal before any production activation of the SourceTag free mint](../../issues/332) (closed 2026-08-23)
-- [x] [#252 — feat(x): per-user OAuth2 PKCE — share from my account (phase 3 of #41)](../../issues/252) (closed 2026-08-18)
-- [x] [#207 — feat: User profiles (first-class profile above per-platform identities)](../../issues/207) (closed 2026-08-18)
-- [x] [#273 — Share-link mint attribution: record stashed ref on mint, conversion metrics](../../issues/273) (closed 2026-08-18)
-- [x] [#334 — refactor(sponsored-mint): readiness audit hardcodes two operator wallet addresses as a pass requirement](../../issues/334) (closed 2026-08-16)
-- [x] [#336 — test(mint): the sponsored prepared-mint resume path has zero coverage — pin it, then consider extracting the duplicated post-mint tail](../../issues/336) (closed 2026-08-16)
-- [x] [#335 — refactor(sponsored-mint): remove unreachable helpers in sponsored_mint.py and fix the archive-scan canary test](../../issues/335) (closed 2026-08-16)
+- [x] [#496 — feat(marketplace): buy offers / bids on traits in the trait marketplace](../../issues/496) (closed 2026-09-14)
+- [x] [#490 — SourceTag badge: publish a funder-deduped unique_actors count](../../issues/490) (closed 2026-09-13)
+- [x] [#481 — Trait marketplace: collapse duplicate (slot, value) listings into one card](../../issues/481) (closed 2026-09-11)
+- [x] [#477 — feat(x): auto-poster attaches the branded share-card render instead of raw NFT art](../../issues/477) (closed 2026-09-10)
+- [x] [#447 — Multi-wallet-provider signin on the web surface via XRPL Commons xrpl-connect + explicit wallet linking](../../issues/447) (closed 2026-08-28)
 <!-- roadmap:end -->
 
 <details>
