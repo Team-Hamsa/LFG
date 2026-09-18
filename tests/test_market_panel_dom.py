@@ -217,6 +217,7 @@ function node() {
 function el(id) { return (nodes[id] ||= node()); }
 function setMedia(id) { return el(id); }
 function marketRowImgSrc() { return ''; }
+function decorateTraitArt(m) { return m; }
 const BLANK_IMG = '';
 globalThis.document = { activeElement: null, createElement: node };
 // A direct window.open bypasses the Discord SDK / Telegram openers.
