@@ -479,6 +479,8 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#548 — Move legacy NFT trait listings into the Closet market](../../issues/548)
 - [ ] [#552 — feat: bounties for app activities (admin-controlled; BRIX/NFT/trait/XRP payouts)](../../issues/552)
 - [ ] [#553 — feat(market): XRP collection offers for characters (escrow-backed, like trait bids)](../../issues/553)
+- [ ] [#554 — feat: time-bounded bounties (most shares / most BRIX paid out) — bounties phase 2](../../issues/554)
+- [ ] [#555 — feat: NFT & trait rewards for bounties — bounties phase 3](../../issues/555)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
