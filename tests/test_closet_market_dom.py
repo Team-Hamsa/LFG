@@ -316,3 +316,15 @@ def test_browse_buy_routes_a_closet_ask_to_the_closet_buy():
     assert seen["confirms"][0] == (
         "4 BRIX — it goes straight into your Closet. Not enough BRIX? You'll pay in XRP instead."
     )
+
+
+def test_listing_detail_offers_no_buy_on_your_own_listing():
+    """Greptile on #550: Browse now shows your own Closet asks, and the server
+    refuses a buy of your own listing, so the action must not offer Buy."""
+    js = _read("webapp/client/app.js")
+    detail = js[
+        js.index("async function openListingDetail(") : js.index("async function loadMarketBrowse(")
+    ]
+    own = detail.index("marketPure.isOwnListing(vm, me && me.wallet)")
+    assert "action.textContent = 'Your listing';" in detail[own:]
+    assert own < detail.index("action.textContent = `Buy — ${vm.priceLabel}`;")

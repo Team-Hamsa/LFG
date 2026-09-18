@@ -744,3 +744,13 @@ def test_map_listing_row_nft_listing_is_not_a_closet_ask():
     row = {"kind": "trait", "slot": "Hat", "value": "Cap", "amount_brix": "4", "offer_index": "AB"}
     vm = run_js(f"M.mapListingRow({json.dumps(row)})")
     assert vm["closet"] is False and vm["orderId"] is None and vm["key"] == "AB"
+
+
+def test_is_own_listing_needs_a_signed_in_wallet_that_matches_the_seller():
+    """The server refuses a buy of your own listing (NFT 400 / Closet
+    self_cross), so the detail view must not offer Buy on it."""
+    assert run_js("M.isOwnListing({seller: 'rA'}, 'rA')") is True
+    assert run_js("M.isOwnListing({seller: 'rA'}, 'rB')") is False
+    assert run_js("M.isOwnListing({seller: 'rA'}, null)") is False
+    assert run_js("M.isOwnListing({seller: null}, null)") is False
+    assert run_js("M.isOwnListing({seller: ''}, '')") is False

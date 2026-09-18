@@ -5280,6 +5280,12 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
     action.disabled = !vm.externalUrl;
     action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
+  } else if (marketPure.isOwnListing(vm, me && me.wallet)) {
+    // The server refuses to sell you your own listing; don't offer a Buy
+    // that can only fail. Unlisting lives under Mine.
+    action.textContent = 'Your listing';
+    action.disabled = true;
+    action.onclick = null;
   } else {
     action.textContent = `Buy — ${vm.priceLabel}`;
     action.disabled = false;

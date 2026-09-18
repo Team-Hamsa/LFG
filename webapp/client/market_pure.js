@@ -223,6 +223,14 @@ export function listingKey(row) {
 }
 
 /**
+ * Whether the signed-in wallet is this listing's seller. The server refuses
+ * to sell you your own listing, so the detail view offers no Buy on it.
+ */
+export function isOwnListing(vm, wallet) {
+  return Boolean(wallet) && vm.seller === wallet;
+}
+
+/**
  * Shape a raw /api/market/listings (or /mine) row into a view-model for the
  * sticker-card grid: a display title, the kind badge, and pass-through
  * fields the renderer needs. Pure — no DOM node is built here.
