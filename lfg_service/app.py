@@ -5824,6 +5824,20 @@ def _closet_keys(network: str) -> list[dict[str, Any]]:
     return [{"slot": s, "value": v, "image_url": _trait_image_url(cfg, s, v)} for s, v in rows]
 
 
+def _with_trait_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the disk-verified trait-art URL to Closet Market rows (slot,
+    value). Without it the client guesses the art under the active
+    character's body, which rarely holds it, and the Wanted / Closet
+    listings / Closet orders chips render blank. Sync (probes the layer
+    tree): call it on an executor thread, inside _closet_db."""
+    cfg = trait_config.get_config()
+    for row in rows:
+        value = row["value"]
+        # "None" is the absence of a trait, not a value with art.
+        row["image_url"] = _trait_image_url(cfg, row["slot"], value) if value != "None" else None
+    return rows
+
+
 async def _closet_market_mirror(conn: sqlite3.Connection, owner: str) -> None:
     """Re-sync one owner's Closet token from the DB (settlement step 4).
 
@@ -5963,7 +5977,11 @@ async def handle_closet_book(request):
         summary = await _closet_db(closet_market_store.book_summary, slot, value)
         body["summary"] = summary[0] if summary else None
     else:
-        body = {"rows": await _closet_db(closet_market_store.book_summary, slot, value)}
+
+        def rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return _with_trait_images(closet_market_store.book_summary(conn, slot, value))
+
+        body = {"rows": await _closet_db(rows)}
     _closet_book_cache_put(key, body, now_mono)
     return web.json_response(body)
 
@@ -5988,6 +6006,8 @@ async def handle_closet_orders_mine(request):
             if config.closet_market_enabled()
             else []
         )
+        for group in ("orders", "fills", "bids_on_my_traits"):
+            _with_trait_images(data[group])
         return data
 
     return web.json_response(await _closet_db(run))

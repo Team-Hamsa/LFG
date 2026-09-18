@@ -73,6 +73,16 @@ def test_book_row_and_badges():
     )
 
 
+def test_book_row_carries_the_server_image_url():
+    """The Wanted / Closet listings chips render from the VM, so the server's
+    disk-verified image_url must survive the mapping; an older server that
+    sends none maps to null (the client's body-pinned fallback)."""
+    row = {"slot": "Head", "value": "Crown", "best_ask_brix": None, "best_bid_brix": "9"}
+    url = "/api/layer?body=shared&trait=Head&value=Crown&thumb=1"
+    assert run_js(f"M.mapBookRow({json.dumps({**row, 'image_url': url})})")["imageUrl"] == url
+    assert run_js(f"M.mapBookRow({json.dumps(row)})")["imageUrl"] is None
+
+
 def test_best_ask_skips_own():
     levels = {
         "asks": [

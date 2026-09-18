@@ -11,7 +11,7 @@
 // — see webapp/client/market_pure.js's own header for the full rationale.
 import * as marketPure from './market_pure.js?v=29';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
-import * as closetPure from './closet_market_pure.js?v=1';
+import * as closetPure from './closet_market_pure.js?v=2';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=25';
@@ -5909,7 +5909,7 @@ function closetFillRender(s) {
 async function loadClosetBook() {
   const data = await api('/api/closet/book');
   const rows = data.rows.map(closetPure.mapBookRow);
-  const chip = (r, label) => ({ imgSrc: mineTraitImgSrc(r.slot, r.value, null), label: `${r.title} — ${label}`, payload: r });
+  const chip = (r, label) => ({ imgSrc: mineTraitImgSrc(r.slot, r.value, r.imageUrl), label: `${r.title} — ${label}`, payload: r });
   renderChipList(el('closet-book-asks'), el('closet-book-asks-empty'),
     rows.filter((r) => r.bestAsk != null).map((r) => chip(r, r.askLabel)), 'Buy', buyBestClosetAsk);
   renderChipList(el('closet-book-bids'), el('closet-book-bids-empty'),
@@ -5993,7 +5993,7 @@ async function postClosetAsk(item, price) {
 async function loadClosetMine() {
   if (!closetMarketEnabled) return;
   const data = await api('/api/closet/orders/mine');
-  const img = (x) => mineTraitImgSrc(x.slot, x.value, null);
+  const img = (x) => mineTraitImgSrc(x.slot, x.value, x.image_url);
   renderChipList(el('mine-closet-orders'), el('mine-closet-orders-empty'),
     data.orders.map((o) => ({ imgSrc: img(o), label: closetPure.orderChipLabel(o), payload: o })), 'Cancel', cancelClosetOrder);
   renderChipList(el('mine-closet-incoming'), el('mine-closet-incoming-empty'),
