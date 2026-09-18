@@ -252,6 +252,13 @@ def test_closet_modify_without_a_reported_ledger_still_returns_its_hash(monkeypa
         xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated(tx_hash="H2")
     )
 
+    # The ledger fallback (#522) would otherwise reach the configured RPC from
+    # this unit test; answer it the way a not-yet-known tx does.
+    async def not_found(tx_hash):
+        return {"error": "txnNotFound"}
+
+    monkeypatch.setattr(deps.xrpl_ops, "get_tx", not_found)
+
     result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
 
     assert result == closet_token.ModifyReceipt(tx_hash="H2", ledger_index=None)
