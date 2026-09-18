@@ -173,12 +173,13 @@ def test_apply_rewrites_ledger_and_mirrors(dbs, monkeypatch):
     assert nft_id == LIVE_ID and owner == OWNER
     assert uri.startswith("https://cdn.example/")
     with sqlite3.connect(index_db) as ic:
-        (attrs, uri_hex) = ic.execute(
-            "SELECT attributes_json, uri_hex FROM onchain_nfts WHERE nft_id=?",
+        (attrs, uri_hex, raw_blank) = ic.execute(
+            "SELECT attributes_json, uri_hex, raw_blank FROM onchain_nfts WHERE nft_id=?",
             (LIVE_ID,),
         ).fetchone()
     assert GOOD in attrs and BAD not in attrs.replace(GOOD, "")
     assert bytes.fromhex(uri_hex).decode() == uri
+    assert raw_blank == 0  # #534: the mirror records the new metadata's raw verdict
     with sqlite3.connect(app_db) as ac:
         (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
     assert body == GOOD

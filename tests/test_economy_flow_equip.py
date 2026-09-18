@@ -405,6 +405,7 @@ def test_equip_success_stamps_index_with_new_attributes(tmp_path):
     assert row["owner"] == "rUser"  # unchanged — an equip never moves ownership
     assert row["is_burned"] == 0
     assert row["uri_hex"] == b"https://cdn/new.json".hex()
+    assert row["raw_blank"] == 0  # #534: the stamp records the raw verdict
 
 
 def test_equip_reverted_path_does_not_stamp_index(tmp_path):

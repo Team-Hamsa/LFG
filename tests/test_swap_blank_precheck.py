@@ -142,7 +142,7 @@ def test_normalize_nft_blank_field_false_for_duplicate_trait_entries():
     naive last-write-wins dict build. trait_economy's own convention
     (swap_meta.get_attr, which attrs_are_blank calls per slot) takes the
     FIRST occurrence; a duplicate is itself a data anomaly either way, so
-    _raw_attrs_are_blank conservatively refuses to call it blank rather than
+    raw_attrs_are_blank conservatively refuses to call it blank rather than
     trust which of two conflicting entries is "right"."""
     attrs = [a for a in trait_economy.blank_attributes() if a["trait_type"] != "Head"]
     attrs.append({"trait_type": "Head", "value": "Crown"})  # real value, listed first

@@ -8548,7 +8548,15 @@ def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]
     backfill already parsed name→edition, attributes and image into it, and
     the collection name pattern is deterministic. Miss on an UNREADABLE row
     (no edition number — the multi-gateway backfill couldn't fetch it either)
-    → skip: normalize_nft would reject it regardless."""
+    → skip: normalize_nft would reject it regardless.
+
+    #534: a synthesized record's "blank" comes from the row's raw_blank flag
+    when the index knows it. The row's attributes are already PADDED
+    (normalize_attributes), so normalize_nft re-deriving blankness from them
+    would call a dressed token with missing/malformed metadata attributes a
+    blank and refuse its swap. A row indexed before the flag existed (NULL)
+    keeps the old derivation from the padded list, so a genuine blank still
+    reads as blank."""
     recs = nft_index.owner_live_nfts(conn, wallet)
     if not recs:
         return None
@@ -8556,6 +8564,7 @@ def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]
     nfts = []
     for rec in recs:
         meta = cached.get(rec.uri_hex)
+        synthesized = meta is None
         if meta is None:
             if rec.nft_number is None:
                 continue
@@ -8581,6 +8590,8 @@ def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]
             logging.warning(f"Skipping NFT {rec.nft_id}: bad metadata ({e})")
             continue
         if record:
+            if synthesized and rec.raw_blank is not None:
+                record["blank"] = rec.raw_blank
             nfts.append(record)
     nfts.sort(key=lambda n: n["number"])
     return nfts
@@ -8731,7 +8742,10 @@ async def handle_swap_start(request):
     # computed on the RAW pre-normalization attributes -- unlike
     # nft["attributes"] (always padded to all-"None" by normalize_attributes
     # for ANY missing/unreadable data), it can't mistake a dressed character
-    # with unreadable metadata for a genuine blank.
+    # with unreadable metadata for a genuine blank. On a metadata-cache miss
+    # the roster takes it from the index's raw_blank flag instead (#534, see
+    # _index_roster); only rows indexed before that flag existed still
+    # derive it from the padded list.
     if nft1.get("blank") or nft2.get("blank"):
         return web.json_response(
             {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"},

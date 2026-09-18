@@ -225,6 +225,7 @@ def test_assemble_success_stamps_index_with_new_art(tmp_path):
     assert row["owner"] == "rUser"  # an in-place modify never moves ownership
     assert row["is_burned"] == 0
     assert row["body"] == "male"
+    assert row["raw_blank"] == 0  # #534: dressed now, for the roster fallback too
 
 
 def test_assemble_mirror_failure_still_stamps_index_with_new_art(tmp_path):

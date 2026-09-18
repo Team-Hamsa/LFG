@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS onchain_nfts (
     image           TEXT,
     video           TEXT,
     ledger_index    INTEGER,
-    last_synced_at  TIMESTAMP
+    last_synced_at  TIMESTAMP,
+    raw_blank       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_onchain_number ON onchain_nfts(nft_number);
 CREATE INDEX IF NOT EXISTS idx_onchain_live   ON onchain_nfts(is_burned);
@@ -98,6 +99,16 @@ class OnchainNft:
     # swap outputs; "" for static NFTs). Defaulted so pre-#204 constructors
     # keep working — the roster's cache-miss synthesis reads it (#204).
     video: str = ""
+    # #534: whether the token's RAW metadata attributes are a genuine blank
+    # (swap_meta.raw_attrs_are_blank), or None when unknown. `attributes` is
+    # the PADDED list (normalize_attributes fills every missing slot with
+    # "None"), so a genuine blank and a dressed token whose metadata
+    # attributes are missing/malformed/partial look identical there; this
+    # flag is the only record of which one it was. None covers rows indexed
+    # before the flag existed, unreadable metadata, and writers that can't
+    # know — readers then fall back to deriving from `attributes`, exactly as
+    # before #534. Defaulted so existing constructors keep working.
+    raw_blank: bool | None = None
 
 
 def index_db_path(network: str) -> str:
@@ -120,12 +131,17 @@ def init_db(path: str, busy_timeout_ms: int | None = None) -> sqlite3.Connection
     if busy_timeout_ms is not None:
         conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.executescript(_SCHEMA)
-    # Self-migrate pre-#204 DBs (no `video` column). Same posture as the other
-    # per-network stores' self-migrating columns.
+    # Self-migrate older DBs: pre-#204 (no `video` column) and pre-#534 (no
+    # `raw_blank` column). Same posture as the other per-network stores'
+    # self-migrating columns. Existing rows get raw_blank NULL (unknown) — a
+    # migration can't recover a token's raw attributes, so they keep the
+    # pre-#534 derivation until a writer re-indexes them.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(onchain_nfts)")}
-    if "video" not in cols:
+    for column, decl in (("video", "TEXT"), ("raw_blank", "INTEGER")):
+        if column in cols:
+            continue
         try:
-            conn.execute("ALTER TABLE onchain_nfts ADD COLUMN video TEXT")
+            conn.execute(f"ALTER TABLE onchain_nfts ADD COLUMN {column} {decl}")
         except sqlite3.OperationalError as e:
             # Two processes (service + listener) can race the check-then-ALTER
             # on a legacy DB — the loser's ALTER is a harmless duplicate
@@ -231,10 +247,13 @@ def _nft_to_row(rec: OnchainNft) -> tuple[Any, ...]:
         rec.image,
         rec.video,
         rec.ledger_index,
+        None if rec.raw_blank is None else (1 if rec.raw_blank else 0),
     )
 
 
 def _row_to_nft(row: sqlite3.Row) -> OnchainNft:
+    # Tolerate rows from a pre-#534 schema, like `video` below.
+    raw_blank = row["raw_blank"] if "raw_blank" in row.keys() else None
     return OnchainNft(
         nft_id=row["nft_id"],
         nft_number=row["nft_number"],
@@ -249,6 +268,7 @@ def _row_to_nft(row: sqlite3.Row) -> OnchainNft:
         # Tolerate rows from a pre-#204 schema (init_db self-migrates, but a
         # reader can be handed a connection to a DB opened elsewhere).
         video=(row["video"] if "video" in row.keys() else "") or "",
+        raw_blank=None if raw_blank is None else bool(raw_blank),
     )
 
 
@@ -258,8 +278,8 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
         """
         INSERT INTO onchain_nfts
             (nft_id, nft_number, owner, is_burned, mutable, uri_hex, body,
-             attributes_json, image, video, ledger_index, last_synced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             attributes_json, image, video, ledger_index, raw_blank, last_synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(nft_id) DO UPDATE SET
             -- COALESCE: an nft_id's edition is fixed for life, but some tokens'
             -- on-chain metadata `name` carries no parseable number, so a re-scan
@@ -307,6 +327,14 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
             -- (e.g. a modify back to all-static art) legitimately clears it.
             video=CASE WHEN excluded.attributes_json='[]'
                  THEN video ELSE excluded.video END,
+            -- #534: raw_blank describes the attributes_json stored beside it,
+            -- so it rides the same failed-fetch guard: a [] write (flag NULL)
+            -- keeps the known flag, while any real write replaces it, NULL
+            -- included. A modify legitimately moves it both ways (harvest
+            -- 0 -> 1, assemble 1 -> 0), and a writer that can't know the raw
+            -- form must not leave the OLD attributes' flag describing new ones.
+            raw_blank=CASE WHEN excluded.attributes_json='[]'
+                 THEN raw_blank ELSE excluded.raw_blank END,
             -- COALESCE: a writer that doesn't know the ledger height (the
             -- swap flow's burn-point stamp passes None) must never erase one
             -- the listener already recorded — nft_by_number orders duplicate
@@ -558,17 +586,28 @@ async def enumerate_tokens(
 
 def token_record(token: dict[str, Any], metadata: dict[str, Any] | None) -> OnchainNft:
     """Build an OnchainNft from an enumerated token + its metadata (or None).
-    Normalizes attributes the same way the swap path does."""
+    Normalizes attributes the same way the swap path does.
+
+    raw_blank (#534) is judged on the RAW attributes, before padding, with the
+    predicate normalize_nft uses: metadata that parses but has attributes
+    missing, malformed, partial or value-less pads to the same all-"None" list
+    a genuine blank has, and is NOT a blank. No metadata at all leaves it None
+    (unknown), not False: nothing was read, so this must not claim that a
+    token which may be a genuine blank is dressed. (upsert's failed-fetch
+    guard keeps the stored flag for that write anyway.)"""
     flags = int(token.get("flags") or 0)
+    raw_blank: bool | None
     if isinstance(metadata, dict):
         raw = metadata.get("attributes")
         attributes = swap_meta.normalize_attributes(raw if isinstance(raw, list) else [])
+        raw_blank = swap_meta.raw_attrs_are_blank(raw)
         body = swap_meta.detect_body(attributes)
         number = swap_meta.extract_nft_number(str(metadata.get("name", "")))
         image = swap_meta.resolve_ipfs(str(metadata.get("image", "")))
         video = swap_meta.resolve_ipfs(str(metadata.get("video") or ""))
     else:
         attributes = []
+        raw_blank = None
         body = ""
         number = None
         image = ""
@@ -585,4 +624,5 @@ def token_record(token: dict[str, Any], metadata: dict[str, Any] | None) -> Onch
         image=image,
         ledger_index=token.get("ledger_index"),
         video=video,
+        raw_blank=raw_blank,
     )

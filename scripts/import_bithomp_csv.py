@@ -66,7 +66,10 @@ def csv_record(row: dict[str, str], force_burned: bool = False) -> nft_index.Onc
     from `Attribute <TraitType>` columns, normalized the same way the swap path
     does; `mutable` is unknown from a CSV (left None, filled later by the
     listener); `uri_hex` is the hex of the CSV's decoded URI. `force_burned`
-    marks every row burned (for a separate burned-only export with no flag col)."""
+    marks every row burned (for a separate burned-only export with no flag col).
+    `raw_blank` (#534) is judged on the columns BEFORE normalization pads the
+    missing slots: only a row whose every trait slot column reads "None" is a
+    blank."""
     raw_attrs = [
         {"trait_type": key[len(_ATTR_PREFIX) :], "value": (value or "").strip()}
         for key, value in row.items()
@@ -87,6 +90,7 @@ def csv_record(row: dict[str, str], force_burned: bool = False) -> nft_index.Onc
         attributes=attributes,
         image=(row.get("Image") or "").strip(),
         ledger_index=None,
+        raw_blank=swap_meta.raw_attrs_are_blank(raw_attrs),
     )
 
 

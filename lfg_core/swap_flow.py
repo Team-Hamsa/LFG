@@ -416,6 +416,10 @@ def _persist_remint_to_index(item: dict[str, Any]) -> None:
                     image=item["image_url"],
                     ledger_index=None,
                     video=item["video_url"] or "",
+                    # item["attrs"] is exactly the list written into the new
+                    # metadata (_swap_metadata), i.e. the token's RAW
+                    # attributes (#534).
+                    raw_blank=swap_meta.raw_attrs_are_blank(item["attrs"]),
                 ),
             )
         finally:

@@ -155,7 +155,7 @@ from typing import Any, TypeVar
 
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as bt
-from lfg_core import config, db_helpers, nft_index, owner_lock, xrpl_ops
+from lfg_core import config, db_helpers, nft_index, owner_lock, swap_meta, xrpl_ops
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
@@ -1190,6 +1190,10 @@ def _persist_char_modify_to_index(
                 # "" (not None) when the new art is static — an animated
                 # character modified to all-static must clear its stale MP4.
                 video=video_url or "",
+                # new_attrs is the list the modify wrote into the new metadata,
+                # so it IS the raw form (#534): a harvest's blank_attributes()
+                # sets the flag, an assemble's or equip's dressed list clears it.
+                raw_blank=swap_meta.raw_attrs_are_blank(new_attrs),
             ),
         )
     except Exception:
