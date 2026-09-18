@@ -1044,6 +1044,9 @@ def test_sweep_defers_while_the_buyers_closet_mirror_is_behind(onchain_env, monk
         raise AssertionError("settlement must not be attempted while the mirror is behind")
 
     monkeypatch.setattr(server, "_settle_trait_sale", boom)
+    # Point the journal dir at tmp_path like the give-up tests do, so the
+    # assertion below is about behavior and not about an unreachable path.
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
     _run(server.settle_pending_trait_sales())
 
     assert server._sweep_attempts.get("K" * 64, 0) == 0

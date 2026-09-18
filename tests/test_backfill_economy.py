@@ -392,3 +392,42 @@ def test_rebuild_from_the_newest_version_lets_flows_run_again(tmp_path):
     ct.ensure_mirror_current(conn, OWNER, history_db_path=archive)
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
     assert assets[("Body", "Ape Xray")] == 1
+
+
+def test_rebuild_stamps_a_closet_that_had_no_row_yet(tmp_path):
+    """The re-dating must survive a fresh or reset index. It used to run as an
+    UPDATE before `set_closet_token` inserted the row, so on a fresh index it
+    matched nothing and the row landed undated — exactly the case the recovery
+    story depends on."""
+    conn = _conn(tmp_path)
+    version_c = closet_uri("c")
+    archive = closet_archive(
+        tmp_path, "CLOSET1", [("modify", closet_uri("b"), 1000), ("modify", version_c, 1005)]
+    )
+
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta({version_c: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
+
+    assert es.get_closet_record(conn, OWNER) is not None
+    assert es.get_closet_applied_ledger(conn, OWNER) == 1005
+
+
+def test_archive_lookup_crash_skips_the_stamp_not_the_run(tmp_path, monkeypatch):
+    """Every other failure mode here skips one Closet; an unexpected error from
+    the archive lookup must not be the one that kills the whole reconcile."""
+    conn = _conn(tmp_path)
+    version_c = closet_uri("c")
+    archive = closet_archive(tmp_path, "CLOSET1", [("modify", version_c, 1005)])
+
+    def boom(*a, **k):
+        raise TypeError("malformed archive row")
+
+    monkeypatch.setattr(be.history_store, "uri_version_ledger", boom)
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta({version_c: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
+
+    stats = _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
+
+    assert stats["closets_applied"] == 1  # the run completed and rebuilt the Closet
+    assert es.get_closet_applied_ledger(conn, OWNER) is None  # just left undated

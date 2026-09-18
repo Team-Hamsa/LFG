@@ -92,7 +92,10 @@ def _archived_version_ledger(archive: Any, nft_id: str, uri_hex: str | None) -> 
         return None
     try:
         return history_store.uri_version_ledger(archive, nft_id, uri_hex)
-    except sqlite3.Error as e:
+    except Exception as e:
+        # Every other failure mode in this script skips one Closet; an archive
+        # read must not be the one that kills the whole reconcile. Undated is
+        # the honest, inert outcome.
         print(f"archive lookup failed for {nft_id}: {e}")
         return None
 
@@ -135,23 +138,14 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
+    rebuilt = False
     if closet_market_store.has_recent_fill(conn, owner):
         # #443: DB is ahead of the token until the fill's mirror lands — see nft_listener._apply_closet.
         print(f"skip contents for {owner}: recent Closet Market fill")
     else:
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
         economy_store.set_closet_contents(conn, owner, assets, bodies)
-        # #522: this snapshot comes from clio, the source that can still serve
-        # the PREVIOUS Closet URI right after a modify validates, so the stamp
-        # that described the mirror BEFORE this rewrite must not survive it —
-        # it would claim a version newer than the contents just written, and the
-        # flows' stale-mirror guard would read a behind mirror as current.
-        # Re-date it from the archive, which knows the ledger each URI was set
-        # in: that both keeps the guard honest and lets the listener refuse an
-        # OLDER modify that would otherwise undo this rebuild.
-        economy_store.set_closet_applied_ledger(
-            conn, owner, _archived_version_ledger(archive, token["nft_id"], token.get("uri_hex"))
-        )
+        rebuilt = True
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
@@ -163,6 +157,22 @@ def _reconcile_closet(
         status=status,
         offer_id=existing_offer_id,
     )
+    if rebuilt:
+        # #522: this snapshot comes from clio, the source that can still serve
+        # the PREVIOUS Closet URI right after a modify validates, so the stamp
+        # that described the mirror BEFORE this rewrite must not survive it —
+        # it would claim a version newer than the contents just written, and the
+        # flows' stale-mirror guard would read a behind mirror as current.
+        # Re-date it from the archive, which knows the ledger each URI was set
+        # in: that both keeps the guard honest and lets the listener refuse an
+        # OLDER modify that would otherwise undo this rebuild.
+        #
+        # AFTER the upsert above, for two reasons: this must be able to CLEAR
+        # the stamp (set_closet_token's COALESCE only ever keeps one), and on a
+        # fresh or reset index the row does not exist until that upsert runs.
+        economy_store.set_closet_applied_ledger(
+            conn, owner, _archived_version_ledger(archive, token["nft_id"], token.get("uri_hex"))
+        )
     return True
 
 
