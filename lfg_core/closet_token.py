@@ -20,6 +20,10 @@ ACTIVE = "active"
 
 # ClosetError.code of the stale-mirror refusal (#522).
 CLOSET_MIRROR_BEHIND = "closet_mirror_behind"
+# ...and of the refusal while a committed modify awaits its mirror write (#184, #530).
+CLOSET_MIRROR_PENDING = "closet_mirror_pending"
+# ...and of a required stale-mirror check the history archive can't answer (#530).
+CLOSET_MIRROR_UNVERIFIED = "closet_mirror_unverified"
 MIRROR_BEHIND_MESSAGE = (
     "Your Closet is still catching up with a recent change on the ledger. "
     "Nothing was changed — please try again shortly."
@@ -346,7 +350,9 @@ def _orders_for_meta(conn: Any, owner: str) -> list[dict[str, Any]] | None:
         return None
 
 
-def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None) -> None:
+def ensure_mirror_current(
+    conn: Any, owner: str, *, history_db_path: str | None, require_archive: bool = False
+) -> None:
     """Refuse a full Closet overwrite while the owner's mirror is behind the
     chain (#522).
 
@@ -364,8 +370,17 @@ def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None)
     Raises a plain, not-committed ClosetError with code CLOSET_MIRROR_BEHIND:
     call it before anything is submitted; the user retries once the listener
     catches up. An unavailable archive keeps today's behavior (no check) and
-    logs a WARNING; `history_db_path=None` means no archive is wired."""
+    logs a WARNING; `history_db_path=None` means no archive is wired. With
+    `require_archive` (the Closet Market settlement, #530), both raise a plain
+    ClosetError with code CLOSET_MIRROR_UNVERIFIED instead: a background retry
+    can wait for the archive, and an unchecked overwrite could erase a version."""
     if history_db_path is None:
+        if require_archive:
+            raise ClosetError(
+                f"no history archive is wired to check {owner}'s Closet mirror; "
+                f"refusing a full overwrite ({CLOSET_MIRROR_UNVERIFIED})",
+                code=CLOSET_MIRROR_UNVERIFIED,
+            )
         return
     record = economy_store.get_closet_record(conn, owner)
     if record is None:
@@ -376,6 +391,17 @@ def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None)
             newest = history_store.latest_uri_version(archive, nft_id)
             seen = history_store.uri_version_position(archive, nft_id, mirror_uri)
     except (OSError, sqlite3.Error) as e:
+        if require_archive:
+            logging.warning(
+                f"Closet stale-mirror check for {owner} cannot run: history archive "
+                f"{history_db_path} unavailable ({e}); refusing a full overwrite "
+                f"({CLOSET_MIRROR_UNVERIFIED})"
+            )
+            raise ClosetError(
+                f"history archive {history_db_path} unavailable; cannot check {owner}'s "
+                f"Closet mirror ({CLOSET_MIRROR_UNVERIFIED})",
+                code=CLOSET_MIRROR_UNVERIFIED,
+            ) from e
         logging.warning(
             f"Closet stale-mirror check skipped for {owner}: history archive "
             f"{history_db_path} unavailable ({e})"
