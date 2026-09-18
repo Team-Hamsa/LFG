@@ -402,13 +402,15 @@ function consumeRef() {
   try { localStorage.removeItem('lfg_ref'); } catch (_) { /* no storage */ }
 }
 
-function openExternal(url) {
+function openExternal(url, features) {
   // Returns the launch result so callers can detect a blocked window.open
   // (null). The Discord SDK opener's outcome is genuinely undetectable (it
   // returns a promise that resolves either way) — callers must treat only an
-  // explicit null as "blocked".
+  // explicit null as "blocked". `features` reaches only the plain-browser
+  // window.open; 'noopener' (for third-party pages) makes that return null
+  // even on success, so pass it only when ignoring the result.
   if (externalOpener) return externalOpener(url);
-  return window.open(url, '_blank');
+  return window.open(url, '_blank', features);
 }
 
 // --- Xaman sign-request delivery (#142) --------------------------------
@@ -5267,7 +5269,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     if (!vm.externalUrl) return;
     extLink.textContent = `View on ${vm.marketplace} ↗`;
     extLink.hidden = false;
-    extLink.onclick = () => window.open(vm.externalUrl, '_blank', 'noopener');
+    extLink.onclick = () => openExternal(vm.externalUrl, 'noopener');
   };
   const buyNow = marketPure.buyNowLabel(vm);
   if (marketPure.isOwnListing(vm, me && me.wallet)) {
@@ -5294,7 +5296,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   } else if (vm.external) {
     action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
     action.disabled = !vm.externalUrl;
-    action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
+    action.onclick = () => { if (vm.externalUrl) openExternal(vm.externalUrl, 'noopener'); };
   } else {
     action.textContent = `Buy — ${vm.priceLabel}`;
     action.disabled = false;
