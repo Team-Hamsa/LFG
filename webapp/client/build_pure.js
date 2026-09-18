@@ -156,16 +156,35 @@ export function isActivationKey(key) {
   return key === 'Enter' || key === ' ';
 }
 
-// Focus and announcement state for one Closet tile, given whether its asset
-// can be equipped on the selected GO. An incompatible tile wires no equip
-// handler, so it must not be a Tab stop that silently does nothing; it keeps
-// role="button" + aria-disabled so a screen reader still announces it as an
-// equip control that is currently unavailable, and the nested Extract button
-// — which works whatever the equip compatibility — stays focusable on its own.
+// Widget semantics for one Closet tile, given whether its asset can be
+// equipped on the selected GO. A tile is presented as a button only while it
+// IS one: the incompatible case wires no equip handler, so it claims no role
+// and takes no tab stop — a focus stop that does nothing while announcing
+// itself as a button is the bug being fixed, not the fix.
+//
+// It deliberately does not get aria-disabled instead. Per ARIA that state
+// extends to the focusable descendants of the element carrying it, and this
+// tile contains the Extract button, which stays usable whatever the equip
+// compatibility — announcing Extract as disabled would be a worse lie than
+// saying nothing about equip (PR #533 review). What is left is art, a count,
+// and a normally-announced Extract button; the dimmed .incompatible styling
+// carries the visual half.
 export function closetTileA11y(compatible) {
-  return compatible
-    ? { tabIndex: 0, ariaDisabled: false }
-    : { tabIndex: -1, ariaDisabled: true };
+  return compatible ? { role: 'button', tabIndex: 0 } : { role: null, tabIndex: null };
+}
+
+// Which tile takes focus once staging an equip has rebuilt the grid. `keys`
+// are the rebuilt focusable tiles' "<slot>:<value>" identities, `key` the
+// activated one, `previousIndex` the position it held. The same tile when it
+// survived (staging merely dropped its count), otherwise whatever slid into
+// its place — clamped to the end of a shrunken grid — and -1 when nothing is
+// left to focus.
+export function restoredTileIndex(keys, key, previousIndex) {
+  const list = keys || [];
+  if (!list.length) return -1;
+  const exact = list.indexOf(key);
+  if (exact !== -1) return exact;
+  return Math.min(Math.max(previousIndex, 0), list.length - 1);
 }
 
 // First legal value per slot from an options map — mirrors the server's old
