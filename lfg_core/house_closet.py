@@ -186,6 +186,7 @@ def merge_plan(state: dict[str, Any], items: list[PlanItem], house: str) -> int:
             "action": item.action,
             "status": PLANNED,
             "burn_hash": None,
+            "attempt": None,
             "journal_id": None,
             "order_id": None,
             "fill_id": None,
@@ -284,11 +285,10 @@ class MigrationDeps:
     plan_path: str
 
 
-def _prior_journal(deps: MigrationDeps, entry: dict[str, Any]) -> dict[str, Any] | None:
-    """The Deposit journal of this item's previous attempt, if it wrote one."""
-    if not entry.get("journal_id"):
-        return None
-    path = os.path.join(deps.economy.records_dir, f"deposit-{entry['journal_id']}.json")
+def _journal(deps: MigrationDeps, journal_id: str) -> dict[str, Any] | None:
+    """A Deposit journal record, or None if it was never written: journal writes
+    are best-effort, so a missing one proves nothing about the burn."""
+    path = os.path.join(deps.economy.records_dir, f"deposit-{journal_id}.json")
     try:
         with open(path) as fh:
             return dict(json.load(fh))
@@ -308,10 +308,12 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
     """Burn each planned token into the house Closet. True once nothing is left
     to deposit; False when it stopped on a failure (the item's error says why).
 
-    Each item's Deposit journal id is saved before its burn, so a run that died
-    mid-item is judged from that journal on the next run: a completed Deposit is
-    recorded, never burned again, and one that may have burned without crediting
-    the house is `needs_attention`, never retried."""
+    Before each Deposit the item records its `attempt` (the Deposit's journal
+    id), cleared once the Deposit returns with a known outcome. An attempt still
+    set on the next run means a run died mid-item, judged from that journal: a
+    completed Deposit is recorded, never burned again; anything that may have
+    burned without crediting the house (including a missing journal) is
+    `needs_attention`, never retried."""
     items = state["items"]
     todo = sorted(n for n, e in items.items() if e["status"] in _RETRYABLE)
     if not todo:
@@ -324,10 +326,12 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
         )
     for nft_id in todo:
         entry = items[nft_id]
-        prior = _prior_journal(deps, entry)
+        attempt = entry.get("attempt")
+        prior = _journal(deps, attempt) if attempt else None
         prior_status = prior["status"] if prior else None
         if prior_status in _JOURNAL_COMPLETE:
             _deposited(conn, entry)
+            entry["attempt"] = None
             save_state(deps.plan_path, state)
             continue
         info = await deps.economy.trait_info_fn(nft_id)  # type: ignore[misc]
@@ -336,23 +340,26 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
             save_state(deps.plan_path, state)
             return False
         held = not info.get("is_burned") and info.get("owner") == deps.app_wallet
-        if prior is not None and prior_status not in _JOURNAL_UNCHANGED:
-            # A previous attempt got past its checks. Retry only a plain failure
-            # that provably burned nothing and left the token where it was.
+        if attempt and prior_status not in _JOURNAL_UNCHANGED:
+            # A run died mid-attempt. Retry only a plain failure that provably
+            # burned nothing and left the token where it was.
             retry = (
-                prior_status == "failed"
+                prior is not None
+                and prior_status == "failed"
                 and held
                 and not prior.get("burn_hash")
                 and not prior.get("pending_tx_hash")
             )
             if not retry:
+                why = f"journal status {prior_status}" if prior else "its journal is missing"
                 entry.update(
                     status=NEEDS_ATTENTION,
                     error="a previous attempt may have burned this token without crediting "
-                    f"the house Closet (Deposit journal {entry['journal_id']}: {prior_status})",
+                    f"the house Closet (Deposit {attempt}: {why})",
                 )
                 save_state(deps.plan_path, state)
                 return False
+        entry["attempt"] = None
         if not held:
             entry.update(
                 status=SKIPPED,
@@ -364,10 +371,10 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
         session = economy_flow.DepositSession(
             owner=deps.app_wallet, nft_id=nft_id, credit_to=deps.house
         )
-        entry["journal_id"] = session.id
+        entry.update(attempt=session.id, journal_id=session.id)
         save_state(deps.plan_path, state)  # before the burn: see the docstring
         await economy_flow.run_deposit(session, deps.economy)
-        entry["burn_hash"] = session.burn_hash
+        entry.update(attempt=None, burn_hash=session.burn_hash)
         if session.state == economy_flow.DONE:
             _deposited(conn, entry)
             save_state(deps.plan_path, state)

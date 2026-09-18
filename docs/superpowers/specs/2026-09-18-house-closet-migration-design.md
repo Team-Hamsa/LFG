@@ -133,12 +133,15 @@ the same Closet token can lose an update. For each such item:
    `needs_attention` if the session recorded a burn hash or an unknown-outcome
    transaction, otherwise `failed`.
 
-The item's Deposit journal id is saved to the plan file before the burn. If a
-run dies mid-item, the next run reads that journal first: a completed Deposit
-(`complete` / `complete_pending_mirror`) is recorded without burning again; a
-journal that shows no burn (`failed_burn`) is retried normally; a plain
-`failed` journal with no burn or pending hash and the token still held is
-retried; anything else (the burn may have happened) is `needs_attention`.
+Before each Deposit the item records its `attempt` (the Deposit's journal id)
+in the plan file, and clears it once the Deposit returns with a known outcome.
+An `attempt` still set on the next run means a run died mid-item; that journal
+decides: a completed Deposit (`complete` / `complete_pending_mirror`) is
+recorded without burning again; a journal that shows no burn (`failed_burn`) is
+retried normally; a plain `failed` journal with no burn or pending hash and the
+token still held is retried; anything else, including a missing journal
+(journal writes are best-effort, so one can burn without leaving a record), is
+`needs_attention`.
 
 **Phase 2 — list.** Runs only when no item is `planned`, `failed` or
 `needs_attention`. For each
@@ -190,8 +193,8 @@ and setup and the migration refuse a house that isn't listed there.
 - Exclusions: the house wallet is in both lists; setup and the migration refuse
   a house missing from the durable roster.
 - Crash resume: a Deposit that completed before the plan save is recorded, not
-  burned again; one that died between the burn and the credit is
-  `needs_attention`.
+  burned again; one that died between the burn and the credit, or left no
+  journal, is `needs_attention`; a known pre-burn refusal is still retried.
 
 ## Out of scope
 

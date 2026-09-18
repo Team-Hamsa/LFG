@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
 from lfg_core import config, market_store, system_wallets
+from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 from lfg_core import house_closet as hc
 from lfg_core.market_store import MarketListing, upsert_listing
@@ -340,3 +341,37 @@ def test_a_crash_between_the_burn_and_the_credit_needs_attention(tmp_path):
     assert _run(hc.deposit_phase(saved, deps)) is False
     assert saved["items"]["TA"]["status"] == hc.NEEDS_ATTENTION
     assert f.burns.count(("TA", APP)) == 1
+
+
+def test_a_missing_journal_after_a_burn_needs_attention(tmp_path, monkeypatch):
+    """Journal writes are best-effort: an attempt can burn without leaving a
+    journal. Its recorded attempt with no journal is uncertain, not a skip."""
+    conn, f, deps, state = _migration(tmp_path)
+    monkeypatch.setattr(ef, "_write_record", lambda *args, **kwargs: None)
+
+    async def crash_modify(nft_id, owner, url):
+        raise _Crash()
+
+    deps.economy.closet_modify_fn = crash_modify
+    with pytest.raises(_Crash):
+        _run(hc.deposit_phase(state, deps))
+    saved = hc.load_state(deps.plan_path)
+    _burned_on_ledger(f, "TA")
+    deps.economy.closet_modify_fn = f.closet_modify
+
+    assert _run(hc.deposit_phase(saved, deps)) is False
+    assert saved["items"]["TA"]["status"] == hc.NEEDS_ATTENTION
+    assert "missing" in saved["items"]["TA"]["error"]
+
+
+def test_a_known_failure_before_the_burn_is_still_retried(tmp_path):
+    """Deposit's own pre-burn refusals write no journal; the attempt's outcome
+    is known when it returns, so the next run retries it normally."""
+    conn, f, deps, state = _migration(tmp_path)
+    good_meta = f.meta_for["TA"]
+    f.meta_for["TA"] = (None, None)  # unreadable metadata: refused before the burn
+    assert _run(hc.deposit_phase(state, deps)) is False
+    assert state["items"]["TA"]["status"] == hc.FAILED
+    f.meta_for["TA"] = good_meta
+    assert _run(hc.deposit_phase(state, deps)) is True
+    assert state["items"]["TA"]["status"] == hc.DEPOSITED
