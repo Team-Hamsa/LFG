@@ -514,6 +514,11 @@ CLOSET_BID_TTL_SECONDS = int(os.getenv("CLOSET_BID_TTL_SECONDS", "604800"))
 # Fernet key encrypting each bid's escrow fulfillment at rest. Without it the
 # backend could never finish (or refund) an escrow, so both gates require it.
 CLOSET_MARKET_ENC_KEY = os.getenv("CLOSET_MARKET_ENC_KEY", "")
+# House wallet (#548): the project wallet whose Closet holds the project's trait
+# stock as Closet asks (the issuer can't own a Closet, #383). Its seed signs only
+# the one-time setup (BRIX trust line + Closet accept) in scripts/house_closet.py.
+CLOSET_HOUSE_WALLET = os.getenv("CLOSET_HOUSE_WALLET", "").strip()
+CLOSET_HOUSE_SEED = os.getenv("CLOSET_HOUSE_SEED", "").strip()
 # LastLedgerSequence headroom on backend Closet Market txs — what makes an
 # unknown outcome decidable (same role as BRIX_CLAIM_LEDGER_MARGIN).
 CLOSET_MARKET_LEDGER_MARGIN = int(os.getenv("CLOSET_MARKET_LEDGER_MARGIN", "40"))
