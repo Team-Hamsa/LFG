@@ -17,7 +17,7 @@ import * as closetPure from './closet_market_pure.js?v=1';
 import * as mintPure from './mint_pure.js?v=25';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=30';
+import * as buildPure from './build_pure.js?v=31';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -3954,6 +3954,17 @@ function renderClosetFilter() {
   sel.onchange = () => { closetFilter = sel.value; renderCloset(); };
 }
 
+// The focusable Closet tiles in grid order, and a tile's identity across a
+// re-render. An incompatible tile carries no role, so it is not a focus
+// candidate and is deliberately not listed here.
+function closetTiles(grid) {
+  return Array.from(grid.querySelectorAll('.closet-item[role="button"]'));
+}
+
+function closetTileKey(tile) {
+  return `${tile.dataset.slot}:${tile.dataset.value}`;
+}
+
 function renderCloset() {
   renderClosetFilter();
   const grid = el('closet-grid');
@@ -3983,8 +3994,6 @@ function renderCloset() {
     // available — extraction does not depend on equip compatibility.
     const item = document.createElement('div');
     item.className = 'closet-item';
-    item.setAttribute('role', 'button');
-    item.tabIndex = 0;
     // Compatibility: only allow equip when this asset can go on the active
     // character. Client mirrors the server precheck (server re-verifies on
     // commit). Blanks are refused there (#523) — see equipCompatible's comment
@@ -3992,6 +4001,17 @@ function renderCloset() {
     // (dimmed, .incompatible) because Extract must keep working.
     const compatible = buildPure.equipCompatible(char, asset, economyState.slots);
     if (!compatible) item.classList.add('incompatible');
+    // The tile announces itself as a button only while it is one (see
+    // closetTileA11y): an incompatible tile wires no handler below, so it gets
+    // no role and no tab stop rather than a focus stop that does nothing. The
+    // slot/value pair is the tile's identity across a re-render — in data
+    // attributes, never a CSS selector, since trait values carry spaces and
+    // quotes.
+    const a11y = buildPure.closetTileA11y(compatible);
+    if (a11y.role) item.setAttribute('role', a11y.role);
+    if (a11y.tabIndex !== null) item.tabIndex = a11y.tabIndex;
+    item.dataset.slot = asset.slot;
+    item.dataset.value = asset.value;
     // With a GO selected, a trait that can't render on its body is hidden
     // entirely (it reappears on a GO whose body has the art). With no GO
     // selected — and for the always-visible "None" asset — keep a blank
@@ -4044,7 +4064,29 @@ function renderCloset() {
     // Equip is wired only when the asset is compatible with the active character;
     // the tile still renders (and Extract still works) when it isn't.
     // Staging only — nothing goes on-ledger until Save.
-    if (compatible) item.onclick = () => stagePendingEquip(asset.slot, asset.value);
+    if (compatible) {
+      item.onclick = () => stagePendingEquip(asset.slot, asset.value);
+      // A <div role="button"> synthesizes no click from Enter/Space, so without
+      // this the tile is announced as a button a keyboard or screen-reader user
+      // can focus but never activate — staging an equip is unreachable for them.
+      item.onkeydown = (e) => {
+        if (e.target !== item) return;   // the nested Extract button owns its own keys
+        if (!buildPure.isActivationKey(e.key)) return;
+        e.preventDefault();              // Space would otherwise scroll the panel
+        // stagePendingEquip rebuilds the grid, which detaches this tile and
+        // drops focus to <body> — a keyboard user would have to tab in from
+        // the top of the document to stage a second trait. Hand focus to the
+        // rebuilt tile (or to whatever took its place, when staging consumed
+        // the last unit of this trait).
+        const index = closetTiles(grid).indexOf(item);
+        stagePendingEquip(asset.slot, asset.value);
+        const tiles = closetTiles(grid);
+        const next = buildPure.restoredTileIndex(
+          tiles.map(closetTileKey), closetTileKey(item), index,
+        );
+        if (next !== -1) tiles[next].focus();
+      };
+    }
     grid.appendChild(item);
   }
   renderSaveBar();

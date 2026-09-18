@@ -147,6 +147,46 @@ export function closetTileState(asset, char) {
   return { visible: true, art: 'layer', label: '' };
 }
 
+// The keyboard equivalent of a click. A <div role="button"> — which is what a
+// Closet tile has to be, since it wraps the nested Extract <button> — gets
+// none of a native button's behavior for free: no Enter/Space activation, and
+// the client has no global key delegation (every keydown listener in app.js
+// closes an overlay on Escape). So the tile has to recognize these itself.
+export function isActivationKey(key) {
+  return key === 'Enter' || key === ' ';
+}
+
+// Widget semantics for one Closet tile, given whether its asset can be
+// equipped on the selected GO. A tile is presented as a button only while it
+// IS one: the incompatible case wires no equip handler, so it claims no role
+// and takes no tab stop — a focus stop that does nothing while announcing
+// itself as a button is the bug being fixed, not the fix.
+//
+// It deliberately does not get aria-disabled instead. Per ARIA that state
+// extends to the focusable descendants of the element carrying it, and this
+// tile contains the Extract button, which stays usable whatever the equip
+// compatibility — announcing Extract as disabled would be a worse lie than
+// saying nothing about equip (PR #533 review). What is left is art, a count,
+// and a normally-announced Extract button; the dimmed .incompatible styling
+// carries the visual half.
+export function closetTileA11y(compatible) {
+  return compatible ? { role: 'button', tabIndex: 0 } : { role: null, tabIndex: null };
+}
+
+// Which tile takes focus once staging an equip has rebuilt the grid. `keys`
+// are the rebuilt focusable tiles' "<slot>:<value>" identities, `key` the
+// activated one, `previousIndex` the position it held. The same tile when it
+// survived (staging merely dropped its count), otherwise whatever slid into
+// its place — clamped to the end of a shrunken grid — and -1 when nothing is
+// left to focus.
+export function restoredTileIndex(keys, key, previousIndex) {
+  const list = keys || [];
+  if (!list.length) return -1;
+  const exact = list.indexOf(key);
+  if (exact !== -1) return exact;
+  return Math.min(Math.max(previousIndex, 0), list.length - 1);
+}
+
 // First legal value per slot from an options map — mirrors the server's old
 // first-match prefill so one-tap assemble still works.
 export function defaultChosen(slots, slotOptions) {

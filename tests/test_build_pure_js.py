@@ -504,7 +504,10 @@ def test_closet_tile_equip_delegates_to_equip_compatible():
     # above are only worth something while the grid actually calls it.
     body = _render_closet_src()
     assert "buildPure.equipCompatible(char, asset, economyState.slots)" in body
-    assert "if (compatible) item.onclick = () => stagePendingEquip(" in body
+    # the compatible arm is a block since #533 (click and keyboard activation
+    # share it), so pin the wiring inside that branch rather than the one-liner
+    wiring = body[body.index("if (compatible)") :]
+    assert "item.onclick = () => stagePendingEquip(" in wiring
 
 
 def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
@@ -520,3 +523,158 @@ def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
         "build_pure.js?v= regressed below the version that first exported "
         "equipCompatible — a cached older module breaks the Closet"
     )
+
+
+# ---------------------------------------------------------------------------
+# Closet tile keyboard activation.
+#
+# The tile is a <div role="button" tabindex="0"> — it deliberately cannot be a
+# real <button> because it wraps the nested Extract <button>. A div with a
+# button role gets NO free Enter/Space activation (only native <button>/<a>
+# do), and app.js has no global Enter->click delegation: every keydown listener
+# in the client closes an overlay on Escape. So the tile announced itself as a
+# button that a keyboard or screen-reader user could focus but never activate.
+#
+# isActivationKey(key)          -> is this the keyboard equivalent of a click?
+# closetTileA11y(compatible)    -> {role, tabIndex} for the tile
+# restoredTileIndex(...)        -> which tile takes focus after the re-render
+# ---------------------------------------------------------------------------
+
+
+def test_activation_key_accepts_enter():
+    assert run_js("M.isActivationKey('Enter')") is True
+
+
+def test_activation_key_accepts_space():
+    assert run_js("M.isActivationKey(' ')") is True
+
+
+def test_activation_key_rejects_other_keys():
+    for key in ("Escape", "Tab", "ArrowRight", "a", "Shift"):
+        assert run_js(f"M.isActivationKey({json.dumps(key)})") is False, key
+
+
+def test_activation_key_rejects_missing_key():
+    assert run_js("M.isActivationKey(undefined)") is False
+
+
+# closetTileA11y: a tile is presented as a button only while it IS one.
+#
+# The first cut gave an incompatible tile role="button" + aria-disabled="true",
+# which Greptile flagged (PR #533): per ARIA the disabled state extends to the
+# focusable descendants of the element carrying it, and this tile's descendants
+# include the Extract button — which is deliberately usable whatever the equip
+# compatibility. Announcing Extract as disabled is worse than saying nothing
+# about equip, so an inert tile now carries no widget semantics at all: no
+# role, no tab stop, just art + count + a normally-announced Extract button.
+
+
+def test_closet_tile_a11y_compatible_tile_is_a_tabbable_button():
+    assert run_js("M.closetTileA11y(true)") == {"role": "button", "tabIndex": 0}
+
+
+def test_closet_tile_a11y_incompatible_tile_claims_nothing():
+    assert run_js("M.closetTileA11y(false)") == {"role": None, "tabIndex": None}
+
+
+def test_closet_tile_a11y_treats_a_missing_character_as_incompatible():
+    # `compatible` is `char && slots.includes(slot)` — a falsy char makes it
+    # null, not false. That is the live case: with no GO selected EVERY tile
+    # renders incompatible.
+    assert run_js("M.closetTileA11y(null)") == {"role": None, "tabIndex": None}
+
+
+# ---------------------------------------------------------------------------
+# restoredTileIndex(keys, key, previousIndex) -> index | -1
+#
+# Staging an equip re-renders the whole Closet (grid.replaceChildren()), which
+# detaches the focused tile and drops focus to <body> — so a keyboard user who
+# staged one trait had to Tab in from the top of the document to stage the
+# next one (Greptile P2, PR #533). Focus goes back to the same (slot, value)
+# tile when it survived, and to whatever took its place when staging consumed
+# the last unit of that trait.
+# ---------------------------------------------------------------------------
+
+
+def test_restored_index_prefers_the_same_tile():
+    assert run_js("M.restoredTileIndex(['Hat:A', 'Eyes:B', 'Back:C'], 'Eyes:B', 0)") == 1
+
+
+def test_restored_index_falls_back_to_the_tile_that_took_its_place():
+    # the staged trait's last unit was consumed, so its tile is gone
+    assert run_js("M.restoredTileIndex(['Hat:A', 'Back:C'], 'Eyes:B', 1)") == 1
+
+
+def test_restored_index_clamps_to_the_last_tile_when_the_grid_shrank():
+    assert run_js("M.restoredTileIndex(['Hat:A'], 'Eyes:B', 4)") == 0
+
+
+def test_restored_index_is_none_for_an_empty_grid():
+    assert run_js("M.restoredTileIndex([], 'Eyes:B', 0)") == -1
+
+
+def test_restored_index_survives_a_lost_previous_position():
+    # activation from a tile we could not locate (-1) still lands somewhere sane
+    assert run_js("M.restoredTileIndex(['Hat:A', 'Back:C'], 'Eyes:B', -1)") == 0
+
+
+# ---------------------------------------------------------------------------
+# renderCloset() wiring in app.js (source assertions — the DOM code itself is
+# not unit-testable here, so the decisions above are pure and this pins the
+# call sites that consume them).
+# ---------------------------------------------------------------------------
+
+
+def _closet_keydown_src():
+    """The tile's onkeydown handler, sliced to its closing brace."""
+    src = _render_closet_src()
+    start = src.index("item.onkeydown")
+    return src[start : src.index("\n      };", start)]
+
+
+def test_closet_tile_activates_on_enter_or_space():
+    handler = _closet_keydown_src()
+    assert "buildPure.isActivationKey(e.key)" in handler
+    assert "stagePendingEquip(asset.slot, asset.value)" in handler
+
+
+def test_closet_tile_space_does_not_scroll_the_panel():
+    # Space on a focused element scrolls by default; a real <button> suppresses
+    # it, a div must do so itself.
+    assert "e.preventDefault()" in _closet_keydown_src()
+
+
+def test_closet_tile_keydown_ignores_the_nested_extract_button():
+    # Enter on the focused Extract <button> fires its click AND bubbles a
+    # keydown to the tile. The click is stopped by extractBtn's
+    # stopPropagation, the keydown is not — without this guard one Enter would
+    # both extract the trait and stage an equip.
+    assert "e.target !== item" in _closet_keydown_src()
+
+
+def test_closet_tile_keyboard_activation_is_wired_only_when_compatible():
+    src = _render_closet_src()
+    wiring = src[src.index("if (compatible)") :][:1000]
+    assert "item.onclick" in wiring
+    assert "item.onkeydown" in wiring
+
+
+def test_incompatible_closet_tile_claims_no_widget_semantics():
+    src = _render_closet_src()
+    assert "buildPure.closetTileA11y(compatible)" in src
+    # role and tab stop are applied only when the pure decision supplies them
+    assert "if (a11y.role) item.setAttribute('role', a11y.role);" in src
+    assert "item.tabIndex = 0;" not in src  # the unconditional tab stop
+    # aria-disabled would have covered the still-usable Extract button
+    assert "aria-disabled" not in src
+
+
+def test_keyboard_activation_restores_focus_after_the_rerender():
+    handler = _closet_keydown_src()
+    assert "buildPure.restoredTileIndex(" in handler
+    assert ".focus()" in handler
+    # the tile identity travels in data-* attributes, never a CSS selector:
+    # trait values carry spaces and quotes
+    src = _render_closet_src()
+    assert "item.dataset.slot = asset.slot;" in src
+    assert "item.dataset.value = asset.value;" in src
