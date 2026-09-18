@@ -263,8 +263,9 @@ my account" (#252) is built but DARK in prod — `X_TOKEN_ENC_KEY` is not set,
 so `/api/config` reports `x_user_share:false`. The mainnet economy books were
 balanced on 2026-09-18 (#493: every lost Closet credit restored, wrong supply
 rows compensated), so the nightly audit reports clean; `ECONOMY_AUDIT_WEBHOOK_URL`
-is still unset in prod, so a future non-clean run shows only in the
-`lfg-economy-audit` pm2 log.
+is still unset in prod, so a future non-clean run posts no alert: it exits 1
+in the `lfg-economy-audit` pm2 log and writes its
+`reports/trait-economy-audit-mainnet-*.md` report as usual.
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
