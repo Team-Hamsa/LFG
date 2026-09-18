@@ -17,7 +17,7 @@ import * as closetPure from './closet_market_pure.js?v=1';
 import * as mintPure from './mint_pure.js?v=25';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=31';
+import * as buildPure from './build_pure.js?v=32';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.

@@ -935,6 +935,20 @@ def test_app_js_build_pure_import_is_bumped_past_the_equip_compatible_export():
     )
 
 
+def test_app_js_build_pure_import_is_bumped_past_the_z_order_stacker():
+    """orderedLayers took its zOrder argument at v32 — and v31 was served with
+    two different bodies (#533's, with no orderedLayers at all, then #532's
+    two-argument one: #532 merged without a bump). A browser holding either v31
+    beside a fresh app.js would throw in renderCanvas or silently drop the
+    z_overrides. A floor, like the one above."""
+    m = re.search(r"build_pure\.js\?v=(\d+)", _app_js())
+    assert m, "app.js no longer imports build_pure.js with a cache key"
+    assert int(m.group(1)) >= 32, (
+        "build_pure.js?v= regressed below the version whose orderedLayers "
+        "takes zOrder — a cached v31 mis-stacks or breaks the previews"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Closet tile keyboard activation.
 #
