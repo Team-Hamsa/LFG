@@ -1,5 +1,6 @@
 """scripts/house_closet.py: argument rules and a dry run that writes nothing."""
 
+import asyncio
 import importlib
 import json
 
@@ -8,6 +9,15 @@ import pytest
 from lfg_core import config
 
 script = importlib.import_module("scripts.house_closet")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_event_loop():
+    # main() uses asyncio.run(), which ends with set_event_loop(None) and would
+    # break the asyncio.get_event_loop() idiom in test files that sort after
+    # this one (test_market_api etc.). Same fix as test_archive_reverify.py.
+    yield
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def test_apply_needs_migrate():
