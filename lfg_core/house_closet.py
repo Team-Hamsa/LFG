@@ -13,15 +13,20 @@ import os
 import sqlite3
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from xrpl.core.addresscodec import is_valid_classic_address
+from xrpl.models.amounts import IssuedCurrencyAmount
+from xrpl.models.transactions import NFTokenAcceptOffer, Transaction, TrustSet, TrustSetFlag
 from xrpl.wallet import Wallet
 
 from lfg_core import closet_market_store as cms
-from lfg_core import config, economy_flow, market_ops, market_store
+from lfg_core import closet_token as ct
+from lfg_core import config, economy_flow, market_ops, market_store, memos
+from lfg_core import economy_store as es
 
 
 class HouseConfigError(RuntimeError):
@@ -370,3 +375,90 @@ def list_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
         )
         save_state(deps.plan_path, state)
     return True
+
+
+@dataclass
+class SetupDeps:
+    economy: economy_flow.EconomyDeps
+    # account_info's account_data, or None when the account doesn't exist
+    account_fn: Callable[[str], Awaitable[dict[str, Any] | None]]
+    # the account's BRIX trust line (an account_lines entry), or None
+    brix_line_fn: Callable[[str], Awaitable[dict[str, Any] | None]]
+    # sign with the wallet, submit, wait; returns the engine result
+    submit_fn: Callable[[Transaction, Wallet], Awaitable[str]]
+
+
+def _tag(action: str) -> dict[str, Any]:
+    return {
+        "source_tag": config.SOURCE_TAG,
+        "memos": memos.build_memo_models(memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, action),
+    }
+
+
+async def _no_payload(offer_id: str) -> None:
+    """Setup accepts the Closet offer with the house seed: no Xaman payload."""
+    return None
+
+
+async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[str, str]:
+    """One-time and idempotent: the BRIX trust line (sale proceeds arrive in
+    BRIX), then the house Closet, minted if needed and accepted with the house
+    seed. Returns what each step did."""
+    house = wallet.classic_address
+    if await deps.account_fn(house) is None:
+        raise MigrationRefused(
+            f"{house} is not funded on this network; send it the XRP reserve first"
+        )
+    steps: dict[str, str] = {}
+    line = await deps.brix_line_fn(house)
+    if line is None or Decimal(str(line.get("limit", "0"))) < Decimal(limit):
+        trust = TrustSet(
+            account=house,
+            flags=TrustSetFlag.TF_SET_NO_RIPPLE,
+            limit_amount=IssuedCurrencyAmount(
+                currency=config.BRIX_CURRENCY_HEX, issuer=config.BRIX_ISSUER, value=limit
+            ),
+            **_tag(memos.ACTION_TRUSTSET),
+        )
+        result = await deps.submit_fn(trust, wallet)
+        if result != "tesSUCCESS":
+            raise MigrationRefused(f"the BRIX TrustSet failed: {result}")
+        steps["trust_line"] = "set"
+    else:
+        steps["trust_line"] = "present"
+
+    econ, conn = deps.economy, deps.economy.conn
+    rec = es.get_closet_record(conn, house)
+    if rec is not None and rec[2] == ct.ACTIVE:
+        steps["closet"] = ct.ACTIVE
+        return steps
+    if rec is None or not rec[3]:
+        # No Closet yet (mint + offer), or a pending one whose offer id was lost
+        # (a fresh offer). With no payload fn, ensure_closet only records the offer.
+        await ct.ensure_closet(
+            conn,
+            house,
+            upload_fn=econ.closet_upload_fn,
+            mint_fn=econ.closet_mint_fn,
+            offer_fn=econ.closet_offer_fn,
+            accept_payload_fn=_no_payload,
+            exists_fn=econ.closet_exists_fn,
+        )
+        rec = es.get_closet_record(conn, house)
+    if rec is None or not rec[3]:
+        raise MigrationRefused("the house Closet was not offered; re-run --apply-setup")
+    nft_id, uri_hex, _status, offer_id = rec
+    accept = NFTokenAcceptOffer(
+        account=house, nftoken_sell_offer=offer_id, **_tag(memos.ACTION_ACCEPT_OFFER)
+    )
+    result = await deps.submit_fn(accept, wallet)
+    status = await ct.confirm_accept(conn, house, owner_fn=econ.closet_owner_fn)  # type: ignore[arg-type]
+    if status != ct.ACTIVE and result != "tesSUCCESS":
+        # The stored offer is gone or unusable: clear it so the next run makes
+        # a fresh one for the same token.
+        es.set_closet_token(conn, house, nft_id, uri_hex, status=status, offer_id=None)
+        raise MigrationRefused(
+            f"accepting the Closet offer failed: {result}; re-run --apply-setup"
+        )
+    steps["closet"] = status
+    return steps
