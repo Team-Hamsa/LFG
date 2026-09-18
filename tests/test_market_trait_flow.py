@@ -1014,3 +1014,55 @@ def test_sweep_marks_shop_settled_token_as_settled_without_burn(onchain_env, mon
     conn = _reopen(onchain_env)
     assert market_get_listing(conn, "M" * 64)["settled"] == 1
     assert unsettled_trait_sales(conn) == []
+
+
+def test_sweep_defers_while_the_buyers_closet_mirror_is_behind(onchain_env, monkeypatch, tmp_path):
+    """#522: `closet_mirror_behind` is a TEMPORARY refusal — the listener catches
+    up, or an operator rebuilds the mirror. Spending sweep attempts on it would
+    journal a give-up after ~10 minutes and abandon a paid trait for good, since
+    nothing re-arms the budget when the mirror is repaired. Defer instead, the
+    same way an unresolvable buyer is deferred."""
+    from tests.closet_archive_helpers import closet_archive, closet_uri
+
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "K" * 64)
+    es.set_closet_token(
+        conn, BUYER, "CLOSETK", version_b, status="active", applied_ledger_index=1000
+    )
+    es.set_closet_contents(conn, BUYER, [], [])
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv(
+        "HISTORY_DB_PATH",
+        closet_archive(
+            tmp_path, "CLOSETK", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+        ),
+    )
+
+    async def boom(*a, **k):
+        raise AssertionError("settlement must not be attempted while the mirror is behind")
+
+    monkeypatch.setattr(server, "_settle_trait_sale", boom)
+    # Point the journal dir at tmp_path like the give-up tests do, so the
+    # assertion below is about behavior and not about an unreachable path.
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+    _run(server.settle_pending_trait_sales())
+
+    assert server._sweep_attempts.get("K" * 64, 0) == 0
+    assert not (tmp_path / f"trait-settlement-giveup-{'K' * 64}.json").exists()
+
+
+def test_mirror_behind_check_failure_answers_false(onchain_env, monkeypatch):
+    """The sweeps' deferral check is a convenience, not a gate: if it fails
+    unexpectedly (locked DB, malformed archive) it must answer "not behind" so
+    the pass carries on for every remaining row, instead of raising out of the
+    sweep loop. The flow's own guard still refuses if the mirror really is
+    behind."""
+
+    def boom(*a, **k):
+        raise RuntimeError("history archive is a directory")
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    assert server._closet_mirror_behind("testnet", BUYER) is False

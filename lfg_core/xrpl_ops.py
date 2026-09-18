@@ -123,6 +123,15 @@ class MintNFTResult:
 
 
 @dataclass(frozen=True)
+class ModifyNFTResult:
+    """A validated NFTokenModify: its hash and the ledger it validated in (None
+    when the validated result did not report one)."""
+
+    tx_hash: str
+    ledger_index: int | None
+
+
+@dataclass(frozen=True)
 class MintPreparation:
     state: Literal["prepared", "failed"]
     tx_hash: str | None
@@ -2444,14 +2453,44 @@ async def burn_nft(
         return None
 
 
+@overload
 async def modify_nft(
-    nft_id: str, owner: str, uri: str, platform: str = memos.PLATFORM_BACKEND
-) -> str | None:
+    nft_id: str,
+    owner: str,
+    uri: str,
+    platform: str = memos.PLATFORM_BACKEND,
+    *,
+    return_details: Literal[False] = False,
+) -> str | None: ...
+
+
+@overload
+async def modify_nft(
+    nft_id: str,
+    owner: str,
+    uri: str,
+    platform: str = memos.PLATFORM_BACKEND,
+    *,
+    return_details: Literal[True],
+) -> ModifyNFTResult | None: ...
+
+
+async def modify_nft(
+    nft_id: str,
+    owner: str,
+    uri: str,
+    platform: str = memos.PLATFORM_BACKEND,
+    *,
+    return_details: bool = False,
+) -> str | ModifyNFTResult | None:
     """Update a mutable NFT's URI in place via NFTokenModify (Dynamic NFTs
     amendment). `owner` is the current holder (None/issuer-wallet = held by
     the issuer wallet itself); `uri` is the plain (non-hex) new metadata URL.
     Requires the NFT to have the mutable flag. Returns the transaction hash
-    or None. `platform` records the originating surface in the memo (#54)."""
+    or None. `platform` records the originating surface in the memo (#54).
+
+    `return_details=True` opts into a `ModifyNFTResult` that also carries the
+    ledger the modify validated in (the Closet mirror stamp, #522)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = rpc_client()
@@ -2473,6 +2512,11 @@ async def modify_nft(
             return None  # definitive, validated failure
         tx_hash: str = result["hash"]
         logging.info(f"NFT modified: {nft_id} ({tx_hash})")
+        if return_details:
+            ledger_index = result.get("ledger_index")
+            if isinstance(ledger_index, bool) or not isinstance(ledger_index, int):
+                ledger_index = None
+            return ModifyNFTResult(tx_hash=tx_hash, ledger_index=ledger_index)
         return tx_hash
 
     except IndeterminateResultError:

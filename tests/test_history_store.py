@@ -17,6 +17,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 
 from lfg_core import history_store
+from tests.closet_archive_helpers import archive_tx, closet_uri, closet_version_tx
 
 
 def _conn(tmp_path):
@@ -180,3 +181,53 @@ def test_insert_nft_event_persists_offer_columns(tmp_path):
     )
     row = conn.execute("SELECT offer_index, offer_flags FROM nft_events").fetchone()
     assert tuple(row) == ("OI", 1)
+
+
+# --- #522: the archive as the chain-side reference for Closet versions ---
+
+
+def _closet_history(tmp_path):
+
+    conn = _conn(tmp_path)
+    archive_tx(conn, closet_version_tx("mint", "CLOSET1", closet_uri("a"), 100))
+    archive_tx(conn, closet_version_tx("modify", "CLOSET1", closet_uri("c"), 105))
+    archive_tx(conn, closet_version_tx("modify", "CLOSET1", closet_uri("b"), 103))  # archived late
+    archive_tx(conn, closet_version_tx("modify", "CLOSET2", closet_uri("z"), 120))  # another token
+    return conn
+
+
+def test_latest_uri_version_is_the_newest_archived_mint_or_modify(tmp_path):
+
+    conn = _closet_history(tmp_path)
+
+    assert history_store.latest_uri_version(conn, "CLOSET1") == history_store.UriVersion(
+        ledger_index=105, uri_hex=closet_uri("c")
+    )
+    assert history_store.latest_uri_version(conn, "UNKNOWN") is None
+
+
+def test_uri_version_ledger_is_where_the_archive_saw_that_uri_set(tmp_path):
+
+    conn = _closet_history(tmp_path)
+
+    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("a")) == 100
+    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("b").lower()) == 103
+    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("z")) is None
+    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("never")) is None
+
+
+def test_connect_readonly_never_creates_an_archive(tmp_path):
+    import pytest
+
+    missing = tmp_path / "history_missing.db"
+    with pytest.raises((OSError, sqlite3.Error)):
+        history_store.connect_readonly(str(missing))
+    assert not missing.exists()
+
+    history_store.init_history_db(str(tmp_path / "h.db")).close()
+    conn = history_store.connect_readonly(str(tmp_path / "h.db"))
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("DELETE FROM nft_events")
+    finally:
+        conn.close()

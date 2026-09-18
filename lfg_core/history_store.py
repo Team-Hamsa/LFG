@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS xrpl_txs (
@@ -142,6 +143,58 @@ def history_db_path(network: str) -> str:
         return override
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(repo_root, f"history_{network}.db")
+
+
+def connect_readonly(path: str) -> sqlite3.Connection:
+    """Open an EXISTING archive read-only for a reader outside the listener.
+    Never creates the file: a missing archive raises FileNotFoundError, so a
+    caller can tell "no archive" from "the archive knows nothing"."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    return sqlite3.connect(f"file:{quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=5)
+
+
+@dataclass(frozen=True)
+class UriVersion:
+    """An archived URI-setting event (NFTokenMint or NFTokenModify) of one token:
+    the ledger it validated in and the URI it set (None when the tx set none)."""
+
+    ledger_index: int
+    uri_hex: str | None
+
+
+def latest_uri_version(conn: sqlite3.Connection, nft_id: str) -> UriVersion | None:
+    """The newest URI-setting event the archive holds for `nft_id`, or None.
+
+    The listener derives these rows from the tx stream itself, so they are the
+    chain-side reference for a Closet's newest version — unlike clio nft_info,
+    which can lag a validated modify (#522)."""
+    row = conn.execute(
+        "SELECT e.ledger_index, json_extract(t.raw_json, '$.URI')"
+        " FROM nft_events e JOIN xrpl_txs t ON t.tx_hash = e.tx_hash"
+        " WHERE e.nft_id = ? AND e.event IN ('mint', 'modify') AND e.ledger_index IS NOT NULL"
+        " ORDER BY e.ledger_index DESC LIMIT 1",
+        (nft_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    uri = row[1]
+    return UriVersion(
+        ledger_index=int(row[0]), uri_hex=uri if isinstance(uri, str) and uri else None
+    )
+
+
+def uri_version_ledger(conn: sqlite3.Connection, nft_id: str, uri_hex: str) -> int | None:
+    """The newest ledger at which the archive saw `nft_id` set to `uri_hex`
+    (hex compared case-insensitively), or None if it never saw that URI."""
+    row = conn.execute(
+        "SELECT MAX(e.ledger_index)"
+        " FROM nft_events e JOIN xrpl_txs t ON t.tx_hash = e.tx_hash"
+        " WHERE e.nft_id = ? AND e.event IN ('mint', 'modify')"
+        " AND upper(json_extract(t.raw_json, '$.URI')) = upper(?)",
+        (nft_id, uri_hex),
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
 
 
 def init_history_db(path: str) -> sqlite3.Connection:

@@ -3,6 +3,8 @@
 
 import sqlite3
 
+import pytest
+
 from lfg_core import economy_store as es
 
 
@@ -134,3 +136,85 @@ def test_trait_token_upsert_and_delete():
     assert ("NFT1", "rB", "Hat", "Cap") in rows and len(rows) == 1
     es.delete_trait_token(c, "NFT1")
     assert es.read_trait_tokens(c) == []
+
+
+def test_closet_tokens_applied_ledger_column_self_migrates():
+    """#522: an index DB whose closet_tokens predates the ledger stamp gains the
+    column on open; its existing rows read as an unknown (NULL) version ledger."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE closet_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            status TEXT DEFAULT 'pending_accept', offer_id TEXT,
+            mirror_pending INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status) VALUES ('rA', 'N1', 'AB', 'active');
+    """)
+    c.commit()
+
+    es.init_economy_schema(c)
+
+    assert es.get_closet_applied_ledger(c, "rA") is None
+    es.set_closet_token(c, "rA", "N1", "CD", status="active", applied_ledger_index=77)
+    assert es.get_closet_applied_ledger(c, "rA") == 77
+
+
+def _legacy_closet_tokens_conn() -> sqlite3.Connection:
+    """A pre-#522 index DB: closet_tokens without applied_ledger_index."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE closet_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            status TEXT DEFAULT 'pending_accept', offer_id TEXT,
+            mirror_pending INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    c.commit()
+    return c
+
+
+def test_closet_column_migration_tolerates_a_lost_race():
+    """The service, the listener and the crons all open the index and run this
+    migration; on the first open of a pre-#522 DB two of them can see the column
+    missing and both ALTER. The loser's "duplicate column name" is the outcome
+    we wanted, so it must not surface out of a handler or listener startup."""
+    real = _legacy_closet_tokens_conn()
+    raced = []
+
+    class _RacedConn:
+        def execute(self, sql, *args):
+            if "ADD COLUMN applied_ledger_index" in sql:
+                raced.append(sql)
+                # The other process won the race between the PRAGMA and here.
+                real.execute("ALTER TABLE closet_tokens ADD COLUMN applied_ledger_index INTEGER")
+                raise sqlite3.OperationalError("duplicate column name: applied_ledger_index")
+            return real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    es.init_economy_schema(_RacedConn())
+
+    assert raced  # the ALTER really was attempted
+    assert es.get_closet_applied_ledger(real, "rNobody") is None
+    cols = {r[1] for r in real.execute("PRAGMA table_info(closet_tokens)")}
+    assert "applied_ledger_index" in cols
+
+
+def test_closet_column_migration_still_raises_a_real_alter_failure():
+    """Only the duplicate-column race is tolerated; anything else must surface."""
+    real = _legacy_closet_tokens_conn()
+
+    class _BrokenConn:
+        def execute(self, sql, *args):
+            if "ADD COLUMN applied_ledger_index" in sql:
+                raise sqlite3.OperationalError("database or disk is full")
+            return real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    with pytest.raises(sqlite3.OperationalError, match="disk is full"):
+        es.init_economy_schema(_BrokenConn())

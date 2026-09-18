@@ -8,6 +8,7 @@ from lfg_core import closet_token as bt
 from lfg_core import config, nft_listener, trait_token
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
+from tests.closet_archive_helpers import closet_uri, closet_version_tx
 
 NON_BODY = te.NON_BODY_SLOTS
 
@@ -774,3 +775,202 @@ def test_trait_bid_accept_owner_is_bidder():
     tx = _accept_tx("TRAITD", account="rHolder", deleted=[_offer("TRAITD", "rBidder", sell=False)])
     _apply_accept(conn, tx, clio_owner="rHolder")
     assert es.read_trait_tokens(conn)[0][1] == "rBidder"
+
+
+# --- #522: the Closet mirror follows the URI each tx set, never a lagging nft_info ---
+#
+# A Closet's contents live in the JSON behind its token URI, and every version
+# gets its own URL, so a version is identified by its URI. On 2026-09-11 the
+# listener handled a deposit's Closet modify while clio nft_info still served
+# the previous URI, rebuilt the mirror one version back, and the owner's next
+# deposit full-overwrote the token from that mirror — erasing a credit on-chain
+# (10 such lost versions since 08-07, #522).
+
+CLOSET_ID = "00100000D1AE1BC312BEF9C68233FB0C8CF6A338F7C227BE3E5B27B704943DBA"
+
+
+VERSION_A = closet_uri("a")
+VERSION_B = closet_uri("b")
+VERSION_C = closet_uri("c")
+# What the CDN serves at each version's URL.
+_CLOSET_VERSIONS = {
+    VERSION_A: [("Body", "Ape Xray", 2)],
+    VERSION_B: [("Body", "Ape Xray", 3)],
+    VERSION_C: [("Body", "Ape Xray", 3), ("Head", "Pepe Hat", 1)],
+}
+
+
+def _closet_tx(kind: str, uri_hex: str, ledger_index: int) -> dict:
+    return closet_version_tx(kind, CLOSET_ID, uri_hex, ledger_index)
+
+
+def _apply_closet_tx(
+    conn, tx: dict, *, clio_uri: str, clio_owner: str = "rUser", unreadable: tuple = ()
+) -> None:
+    async def fetch_token(nft_id):  # clio nft_info: may still serve another version
+        return {
+            "nft_id": nft_id,
+            "owner": clio_owner,
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": clio_uri,
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
+
+    async def fetch_meta(uri_hex):
+        if uri_hex in unreadable:  # CDN/timeout failure: what _bounded returns
+            return None
+        return bt.build_closet_metadata("rUser", _CLOSET_VERSIONS[uri_hex], [])
+
+    _run(
+        nft_listener.apply_economy_tx(
+            conn, tx, fetch_token_fn=fetch_token, fetch_meta_fn=fetch_meta, genesis=None
+        )
+    )
+
+
+def _closet_contents(conn, owner: str = "rUser") -> dict:
+    return {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
+
+
+def test_closet_modify_rebuilds_from_tx_uri_not_lagging_nft_info():
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    es.set_closet_contents(conn, "rUser", _CLOSET_VERSIONS[VERSION_A], [])
+
+    # The modify at ledger 1000 set version B; clio still answers with A.
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1000), clio_uri=VERSION_A)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 1000
+
+
+def test_closet_mint_applies_first_version_from_tx_uri():
+    """The mint is a Closet's first version. Reached only after the owner
+    already holds the token (clio then serves a later URI), it still mirrors
+    the version it minted, stamped with its own ledger; the later modifies
+    advance the mirror from there."""
+    conn = _conn()
+    es.set_closet_token(
+        conn, "rUser", CLOSET_ID, VERSION_A, status=bt.PENDING_ACCEPT, offer_id="OF1"
+    )
+
+    _apply_closet_tx(conn, _closet_tx("mint", VERSION_A, 990), clio_uri=VERSION_C)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 2}
+    assert es.get_closet_record(conn, "rUser") == (CLOSET_ID, VERSION_A, bt.ACTIVE, "OF1")
+    assert es.get_closet_applied_ledger(conn, "rUser") == 990
+
+
+def test_older_closet_modify_never_regresses_mirror():
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    # The mirror already holds version C, set by the modify at ledger 1005.
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_C, 1005), clio_uri=VERSION_C)
+
+    # The OLDER modify (version B, ledger 1000) is handled afterwards, and the
+    # clio node answering still serves B.
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1000), clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 1005
+
+
+def test_unreadable_closet_version_is_not_claimed_by_the_mirror():
+    """Metadata for the new version cannot be fetched, so the contents stay at
+    the old version (fail closed). The URI and ledger stamp must stay with them:
+    recording the new version over old contents would make a mirror that is
+    behind the chain look current."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_A, 1000), clio_uri=VERSION_A)
+
+    _apply_closet_tx(
+        conn, _closet_tx("modify", VERSION_B, 1005), clio_uri=VERSION_B, unreadable=(VERSION_B,)
+    )
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 2}
+    assert es.get_closet_record(conn, "rUser") == (CLOSET_ID, VERSION_A, bt.ACTIVE, None)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 1000
+
+
+def test_listener_lag_never_regresses_a_flow_written_closet():
+    """Flows write the mirror themselves as soon as their Closet modify
+    validates. A lagging listener can still be working through an OLDER Closet
+    modify for the same owner, whose tx carries an older URI. The flow's write is
+    stamped with its own ledger, so that tx is skipped instead of rolling the
+    mirror back under the owner's next flow."""
+    from lfg_core import economy_flow as ef
+
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_A, 1980), clio_uri=VERSION_A)
+
+    def flow_deps(name: str, ledger_index: int) -> ef.EconomyDeps:
+        async def upload(meta):
+            return f"https://cdn/closets/{name}.json"
+
+        async def modify(nft_id, owner, url):
+            return bt.ModifyReceipt(tx_hash=f"FLOW{ledger_index}", ledger_index=ledger_index)
+
+        return ef.EconomyDeps(
+            conn=conn,
+            closet_upload_fn=upload,
+            closet_mint_fn=None,
+            closet_offer_fn=None,
+            closet_accept_fn=None,
+            closet_modify_fn=modify,
+            char_compose_fn=None,
+            char_mint_fn=None,
+            char_modify_fn=None,
+            char_burn_fn=None,
+            char_offer_fn=None,
+            char_accept_fn=None,
+        )
+
+    def contents(version: str) -> dict:
+        return {(s, v): n for s, v, n in _CLOSET_VERSIONS[version]}
+
+    # Two flows back to back: version B at ledger 1990, then C at ledger 2000.
+    _run(ef._sync_then_persist(flow_deps("b", 1990), "rUser", contents(VERSION_B)))
+    _run(ef._sync_then_persist(flow_deps("c", 2000), "rUser", contents(VERSION_C)))
+
+    # Only now does the listener reach the first flow's modify (version B).
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1990), clio_uri=VERSION_C)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 2000
+
+
+def test_undated_closet_event_never_overwrites_a_dated_mirror():
+    """A stream tx without a usable ledger_index cannot be ordered against the
+    version the mirror holds. Applying it anyway (it stamps nothing, so the
+    older stamp survives) is how a late or malformed event rolls the mirror
+    back — skip it and let a dated event carry the version instead."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_C, 1005), clio_uri=VERSION_C)
+
+    undated = _closet_tx("modify", VERSION_B, 1000)
+    del undated["ledger_index"]
+    _apply_closet_tx(conn, undated, clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 1005
+
+
+def test_undated_closet_event_still_applies_to_an_undated_mirror():
+    """Nothing to protect: the mirror carries no version ledger either (a
+    pre-#522 row, or a fresh index), so the event is applied as before."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+
+    undated = _closet_tx("modify", VERSION_B, 1000)
+    del undated["ledger_index"]
+    _apply_closet_tx(conn, undated, clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)

@@ -6,19 +6,38 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from lfg_core import config, economy_store, owner_lock
+from lfg_core import config, economy_store, history_store, owner_lock
 
 PENDING_ACCEPT = "pending_accept"
 ACTIVE = "active"
 
+# ClosetError.code of the stale-mirror refusal (#522).
+CLOSET_MIRROR_BEHIND = "closet_mirror_behind"
+MIRROR_BEHIND_MESSAGE = (
+    "Your Closet is still catching up with a recent change on the ledger. "
+    "Nothing was changed — please try again shortly."
+)
+
 # Asset triples are (slot, value, count); bodies are edition ints.
 Asset = tuple[str, str, int]
+
+
+@dataclass(frozen=True)
+class ModifyReceipt:
+    """A validated Closet NFTokenModify: its hash and the ledger it validated in
+    (None when the submit result did not say). The ledger stamps the mirrored
+    version so the listener applies Closet versions monotonically (#522)."""
+
+    tx_hash: str
+    ledger_index: int | None = None
+
 
 # Injected XRPL/CDN operations (real wrappers in EconomyDeps; fakes in tests):
 UploadFn = Callable[[dict[str, Any]], Awaitable[str]]  # metadata dict -> CDN url
@@ -26,6 +45,8 @@ MintFn = Callable[[str], Awaitable[str | None]]  # url -> nft_id
 OfferFn = Callable[[str, str], Awaitable[str | None]]  # (nft_id, owner) -> offer_id
 AcceptFn = Callable[[str], Awaitable[dict[str, Any] | None]]  # offer_id -> XUMM payload
 ModifyFn = Callable[[str, str, str], Awaitable[str | None]]  # (nft_id, owner, url) -> tx hash
+# The Closet modify may also report the ledger it validated in.
+ClosetModifyFn = Callable[[str, str, str], Awaitable[str | ModifyReceipt | None]]
 ExistsFn = Callable[[str], Awaitable[bool]]  # nft_id -> does it exist on-ledger?
 OwnerFn = Callable[[str], Awaitable[str | None]]  # nft_id -> current owner address or None
 
@@ -34,7 +55,12 @@ class ClosetError(RuntimeError):
     """A Closet NFToken lifecycle step (mint/offer/modify) failed.
 
     Raised plain (not a subclass below), it means the on-chain change was NOT
-    committed — compensating on-chain actions are safe."""
+    committed — compensating on-chain actions are safe. `code` names a failure
+    a caller may branch on (e.g. CLOSET_MIRROR_BEHIND); None otherwise."""
+
+    def __init__(self, *args: object, code: str | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 class ClosetMirrorError(ClosetError):
@@ -288,6 +314,57 @@ def _orders_for_meta(conn: Any, owner: str) -> list[dict[str, Any]] | None:
         return None
 
 
+def ensure_mirror_current(conn: Any, owner: str, *, history_db_path: str | None) -> None:
+    """Refuse a full Closet overwrite while the owner's mirror is behind the
+    chain (#522).
+
+    The economy flows rebuild the whole Closet token from the local mirror
+    (`closet_assets`); a mirror missing a version that is already on-chain makes
+    that overwrite erase it. The chain-side reference is the ledger history
+    archive: the listener derives it from the tx stream, so it cannot lag a
+    validated modify the way clio `nft_info` can. The mirror is behind when the
+    archive's newest version of the Closet is newer than the version the mirror
+    holds — dated by the mirror's ledger stamp or by the ledger at which the
+    archive saw the mirror's URI. A mirror that is the newest archived version,
+    or whose version nothing dates, is not refused.
+
+    Raises a plain, not-committed ClosetError with code CLOSET_MIRROR_BEHIND:
+    call it before anything is submitted; the user retries once the listener
+    catches up. An unavailable archive keeps today's behavior (no check) and
+    logs a WARNING; `history_db_path=None` means no archive is wired."""
+    if history_db_path is None:
+        return
+    record = economy_store.get_closet_record(conn, owner)
+    if record is None:
+        return
+    nft_id, mirror_uri, _status, _offer_id = record
+    try:
+        with contextlib.closing(history_store.connect_readonly(history_db_path)) as archive:
+            newest = history_store.latest_uri_version(archive, nft_id)
+            seen = history_store.uri_version_ledger(archive, nft_id, mirror_uri)
+    except (OSError, sqlite3.Error) as e:
+        logging.warning(
+            f"Closet stale-mirror check skipped for {owner}: history archive "
+            f"{history_db_path} unavailable ({e})"
+        )
+        return
+    if newest is None:
+        return
+    dated = [
+        ledger
+        for ledger in (economy_store.get_closet_applied_ledger(conn, owner), seen)
+        if ledger is not None
+    ]
+    if not dated or newest.ledger_index <= max(dated):
+        return
+    logging.warning(
+        f"Closet mirror for {owner} ({nft_id}) holds the ledger-{max(dated)} version but the "
+        f"archive has ledger {newest.ledger_index}; refusing a full overwrite "
+        f"({CLOSET_MIRROR_BEHIND})"
+    )
+    raise ClosetError(MIRROR_BEHIND_MESSAGE, code=CLOSET_MIRROR_BEHIND)
+
+
 async def sync_closet(
     conn: Any,
     owner: str,
@@ -295,11 +372,13 @@ async def sync_closet(
     bodies: list[int],
     *,
     upload_fn: UploadFn,
-    modify_fn: ModifyFn,
+    modify_fn: ClosetModifyFn,
 ) -> str:
     """Recompose the Closet NFToken's metadata from the given contents and
     NFTokenModify its URI in place (the token id is stable). Persists the new
-    URI and returns the modify tx hash.
+    URI and returns the modify tx hash. When `modify_fn` returns a
+    `ModifyReceipt`, the version's validated ledger is stamped with the URI
+    (#522), so a lagging listener cannot roll this write back.
 
     Phase-aware failure taxonomy (#107):
     - plain ClosetError — the modify definitively did NOT commit (no record,
@@ -318,16 +397,24 @@ async def sync_closet(
         build_closet_metadata(owner, assets, bodies, _orders_for_meta(conn, owner))
     )
     try:
-        tx_hash = await modify_fn(nft_id, owner, url)
+        result = await modify_fn(nft_id, owner, url)
     except Exception as e:
         raise ClosetIndeterminateError(
             f"Closet NFTokenModify outcome unknown (modify raised: {e})"
         ) from e
+    tx_hash: str | None = result.tx_hash if isinstance(result, ModifyReceipt) else result
+    ledger_index = result.ledger_index if isinstance(result, ModifyReceipt) else None
     if not tx_hash:
         raise ClosetError("failed to modify Closet NFToken URI")
     try:
         economy_store.set_closet_token(
-            conn, owner, nft_id, _hex(url), status=status, offer_id=offer_id
+            conn,
+            owner,
+            nft_id,
+            _hex(url),
+            status=status,
+            offer_id=offer_id,
+            applied_ledger_index=ledger_index,
         )
     except Exception as e:
         conn.rollback()
