@@ -241,3 +241,29 @@ def test_listings_dev_mode_supported_external_prices_all_in():
     assert "MOCKOFFER-9003" in _dev_listing_ids("include_external=supported")
     assert "MOCKOFFER-9003" not in _dev_listing_ids("include_external=1&max_xrp=42.5")
     assert _dev_listing_ids("include_external=1&min_xrp=42.5") == ["MOCKOFFER-9003"]
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_listings_dev_mode_reads_the_broker_allowlist_once_per_request(monkeypatch):
+    # Parity with the real path: an overlay edit landing after the request's
+    # first allowlist read can't admit the cafe row as Buy-now and then
+    # serialize it without the rate/clearing price it was admitted on.
+    from lfg_core import brokers
+
+    cafe = "rpx9JThQ2y37FaGeeJP7PXDUVEXY3PHZSC"
+    measured = brokers._load()
+    unmeasured = {**measured, cafe: {**measured[cafe], "broker_rate": None}}
+    reads = []
+
+    def overlay_edited_after_first_read():
+        reads.append(None)
+        return measured if len(reads) == 1 else unmeasured
+
+    monkeypatch.setattr(brokers, "_load", overlay_edited_after_first_read)
+    req = make_mocked_request(
+        "GET", "/api/market/listings?kind=character&include_external=supported"
+    )
+    rows = json.loads(_run(server.handle_market_listings(req)).body)["rows"]
+    row = next(r for r in rows if r["offer_index"] == "MOCKOFFER-9003")
+    assert row["broker_rate"] == 0.015890
+    assert row["clearing_drops"] == 42_678_156

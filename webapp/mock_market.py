@@ -17,6 +17,7 @@
 # specifically asks to exercise offline.
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -192,7 +193,11 @@ class MockMarket:
     def _find(self, offer_index: str) -> dict[str, Any] | None:
         return next((r for r in self._listings if r["offer_index"] == offer_index), None)
 
-    def _serialize(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _serialize(
+        self,
+        row: dict[str, Any],
+        broker_table: Mapping[str, brokers.BrokerEntry] | None = None,
+    ) -> dict[str, Any]:
         out = {
             "nft_id": row["nft_id"],
             "kind": row["kind"],
@@ -204,7 +209,10 @@ class MockMarket:
         # #131 external tagging, mirroring app._serialize_listing_row.
         destination = row.get("destination")
         if destination:
-            resolved = brokers.resolve(destination, row["nft_id"])
+            # One allowlist read per row (or the browse's per-request
+            # snapshot), mirroring app._serialize_listing_row.
+            table = broker_table if broker_table is not None else brokers.snapshot()
+            resolved = brokers.resolve(destination, row["nft_id"], table)
             out["buyable"] = False
             out["source"] = "external"
             out["destination"] = destination
@@ -212,7 +220,7 @@ class MockMarket:
             out["external_url"] = resolved["url"] if resolved else None
             # #426 clearing price, mirroring app._serialize_listing_row.
             out["broker_rate"] = resolved["broker_rate"] if resolved else None
-            clearing = brokers.buy_now_clearing(destination, row.get("amount_drops"))
+            clearing = brokers.buy_now_clearing(destination, row.get("amount_drops"), table)
             if clearing is not None:
                 out["clearing_drops"] = clearing
                 out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
@@ -246,10 +254,15 @@ class MockMarket:
         include_external: str | None = None,
     ) -> list[dict[str, Any]]:
         # Mirrors app.handle_market_listings: include_external is None (no
-        # external rows), "all", or "supported" (Buy-now rows only), and a
-        # Buy-now row sorts/filters on its all-in clearing price.
+        # external rows), "all", or "supported" (Buy-now rows only), a Buy-now
+        # row sorts/filters on its all-in clearing price, and one allowlist
+        # snapshot serves the whole request.
+        broker_table = brokers.snapshot()
+
         def all_in(r: dict[str, Any]) -> int | None:
-            return brokers.buy_now_clearing(r.get("destination"), r.get("amount_drops"))
+            return brokers.buy_now_clearing(
+                r.get("destination"), r.get("amount_drops"), broker_table
+            )
 
         def xrp_price(r: dict[str, Any]) -> int | None:
             clearing = all_in(r)
@@ -285,7 +298,7 @@ class MockMarket:
             rows = sorted(rows, key=lambda r: (-sort_price(r), r["offer_index"]))
         else:  # newest: the mock carries no created_ts, so this is stable input order
             rows = list(rows)
-        return [self._serialize(r) for r in rows]
+        return [self._serialize(r, broker_table) for r in rows]
 
     def mine(self, owner: str) -> dict[str, Any]:
         # is_live=True only (mirrors the real handler's "AND is_live = 1" —
