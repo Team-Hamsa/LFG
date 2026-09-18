@@ -2549,7 +2549,9 @@ def test_browse_include_external_revalidates_against_fresh_allowlist(onchain_env
     )
     assert len(_run(_read_json(resp))["rows"]) == 1  # cache now filled
 
-    monkeypatch.setattr(server.brokers, "known_destinations", lambda: frozenset())
+    # The effective allowlist no longer has the broker (built-ins can't be
+    # dropped by an overlay, so simulate it at the allowlist read itself).
+    monkeypatch.setattr(server.brokers, "_load", lambda: {})
     resp = _run(
         server.handle_market_listings(
             _mocked_request("GET", "/api/market/listings?include_external=1")
@@ -2623,6 +2625,36 @@ def test_browse_xrp_bounds_use_all_in_price_for_buy_now_rows(onchain_env):
     _seed_mixed_market(onchain_env)
     assert _browse_ids("include_external=1&max_xrp=42.6") == ["A" * 64, "B" * 64]
     assert _browse_ids("include_external=1&min_xrp=42.6") == ["E" * 64]
+
+
+def test_browse_reads_the_broker_allowlist_once_per_request(onchain_env, monkeypatch):
+    # An operator's overlay edit landing mid-request (cafe's rate pulled after
+    # the request's first allowlist read) must not split the response across
+    # two allowlist versions: a row admitted as Buy-now serializes as one, its
+    # broker_rate matching the rate its clearing price was computed at.
+    _seed_external_listing(onchain_env)
+    _browse_ids("include_external=supported")  # warm the cache (its fill reads the allowlist)
+    measured = brokers._load()
+    unmeasured = {
+        **measured,
+        XRPCAFE_BROKER: {**measured[XRPCAFE_BROKER], "broker_rate": None},
+    }
+    reads = []
+
+    def overlay_edited_after_first_read():
+        reads.append(None)
+        return measured if len(reads) == 1 else unmeasured
+
+    monkeypatch.setattr(brokers, "_load", overlay_edited_after_first_read)
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=supported")
+        )
+    )
+    rows = _run(_read_json(resp))["rows"]
+    assert [r["offer_index"] for r in rows] == ["E" * 64]
+    assert rows[0]["broker_rate"] == 0.015890
+    assert rows[0]["clearing_drops"] == 42_678_156
 
 
 # ---------------------------------------------------------------------------

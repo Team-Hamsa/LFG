@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 import uuid as uuid_lib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
@@ -2800,7 +2800,10 @@ def _closet_ask_listing(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _serialize_listing_row(
-    r: dict[str, Any], kind: str, cfg: trait_config.TraitConfig
+    r: dict[str, Any],
+    kind: str,
+    cfg: trait_config.TraitConfig,
+    broker_table: Mapping[str, brokers.BrokerEntry] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "nft_id": r["nft_id"],
@@ -2820,7 +2823,11 @@ def _serialize_listing_row(
         out["buyable"] = False
         out["source"] = "external"
         out["destination"] = destination
-        resolved = brokers.resolve(destination, r["nft_id"])
+        # One allowlist read for the whole row (the caller's, when browse
+        # passes its per-request snapshot) so broker_rate and clearing_drops
+        # can never come from two versions of an overlay edited mid-request.
+        table = broker_table if broker_table is not None else brokers.snapshot()
+        resolved = brokers.resolve(destination, r["nft_id"], table)
         out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
         out["external_url"] = resolved["url"] if resolved else None
         # #426: a broker with a MEASURED fee rate lets the client offer "Buy
@@ -2832,7 +2839,7 @@ def _serialize_listing_row(
         # guard is unchanged — the bot settles, we only place the offer.
         out["broker_rate"] = resolved["broker_rate"] if resolved else None
         # The same number browse sorts and XRP-filters these rows on.
-        clearing = brokers.buy_now_clearing(destination, r.get("amount_drops"))
+        clearing = brokers.buy_now_clearing(destination, r.get("amount_drops"), table)
         if clearing is not None:
             out["clearing_drops"] = clearing
             out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
@@ -3070,15 +3077,21 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     # price sort below, and is exactly what "supported" admits. Mapped per
     # request (the allowlist is live; the cached rows are shared, never
     # mutated).
+    # One allowlist snapshot serves the whole response — filter, sort and
+    # serialization — so an overlay edit landing mid-request can't admit a
+    # row as Buy-now and then serialize it without a clearing price.
+    broker_table = brokers.snapshot()
     listing_key = market_store.listing_key
     all_in: dict[str, int] = {}
     if include_external is not None:
         for r in rows:
-            clearing = brokers.buy_now_clearing(r.get("destination"), r.get("amount_drops"))
+            clearing = brokers.buy_now_clearing(
+                r.get("destination"), r.get("amount_drops"), broker_table
+            )
             if clearing is not None:
                 all_in[listing_key(r)] = clearing
     if include_external == "all":
-        allowed = brokers.known_destinations()
+        allowed = brokers.known_destinations(broker_table)
         filtered = [r for r in rows if not r.get("destination") or r["destination"] in allowed]
     elif include_external == "supported":
         filtered = [r for r in rows if not r.get("destination") or listing_key(r) in all_in]
@@ -3152,11 +3165,13 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     cfg = trait_config.get_config()
     rows_out = []
     for r in page:
-        out = _serialize_listing_row(r, kind, cfg)
+        out = _serialize_listing_row(r, kind, cfg, broker_table)
         if group:
             out["count"] = r["count"]
             out["floor_brix"] = r["floor_brix"]
-            out["offers"] = [_serialize_listing_row(o, kind, cfg) for o in r["offers"]]
+            out["offers"] = [
+                _serialize_listing_row(o, kind, cfg, broker_table) for o in r["offers"]
+            ]
         rows_out.append(out)
     if kind == "trait" and group and config.closet_market_enabled():
         summary = await _closet_db(closet_market_store.book_summary)

@@ -1210,10 +1210,13 @@ empty.
   external look. `include_external=supported` admits in-app rows plus Buy-now
   rows only — the client sends it when "Show external listings" is
   unchecked, so the toggle hides just the externals we can't buy. Price sort
-  and `min_xrp`/`max_xrp` run on that same all-in price
+  and `min_xrp`/`max_xrp` run on that same all-in price, exact to the drop
   (`brokers.buy_now_clearing`, one function for the filter, sort and
-  serialized row), so a card never shows a price outside the bounds it
-  passed.
+  serialized row; the card rounds it up for display like every price label,
+  so only a bound finer than 2dp — 4dp under 1 XRP — can show a card a
+  hair above it). Each browse request reads the allowlist once
+  (`brokers.snapshot()`, passed as `table`) so an overlay edit mid-request
+  can't split one response across two versions.
 - `GET /api/market/mine` — authed; four groups: the caller's own live
   `listings` (both kinds), `unlisted_characters`, `unlisted_trait_tokens`, and
   loose `closet_assets`.
