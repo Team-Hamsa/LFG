@@ -260,9 +260,12 @@ OAuth 1.0a creds + `SERVICE_TOKEN_X` in the prod `.env`, posting as
 @JoshuaHamsa for now, tweets are link-free text with the branded share-card
 render attached (`SHARE_CARD_RENDER_ENABLED=1`, #479). Per-user "Share from
 my account" (#252) is built but DARK in prod — `X_TOKEN_ENC_KEY` is not set,
-so `/api/config` reports `x_user_share:false`. Nightly economy audits have
-reported `Conservation: DRIFT` since the flip and `ECONOMY_AUDIT_WEBHOOK_URL`
-is unset in prod, so nothing alerts — tracked in #493.
+so `/api/config` reports `x_user_share:false`. The mainnet economy books were
+balanced on 2026-09-18 (#493: every lost Closet credit restored, wrong supply
+rows compensated), so the nightly audit reports clean; `ECONOMY_AUDIT_WEBHOOK_URL`
+is still unset in prod, so a future non-clean run posts no alert: it exits 1
+in the `lfg-economy-audit` pm2 log and writes its
+`reports/trait-economy-audit-mainnet-*.md` report as usual.
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
@@ -964,10 +967,17 @@ Model:
   `scripts/reconcile_supply_growth.py` + `scripts/reconcile_supply_shrinkage.py`
   (dry-run by default, `--apply` to write). Nightly pm2 cron entries
   (`lfg-economy-reconcile` 00:20 → `lfg-economy-audit` 00:25, staging `stg-*`
-  on testnet) run reconcile-then-audit; a non-clean audit posts to the
-  optional `ECONOMY_AUDIT_WEBHOOK_URL` Discord webhook, labelling
-  net-zero-per-slot drift as benign swap substitution vs real drift. Diagnose
-  drift with the sweeps + audit — never normalize it with a re-freeze.
+  on testnet) run reconcile-then-audit. Drift whose every slot nets to zero
+  is trait-swap substitution: the audit lists it but reports clean (exit 0, no
+  alert). Real drift, a completeness violation or a Closet ownership anomaly
+  fails the run (exit 1) and posts to the optional `ECONOMY_AUDIT_WEBHOOK_URL`
+  Discord webhook. Diagnose drift with the sweeps + audit — never normalize it
+  with a re-freeze. Correct a wrong supply row with an inverse `ops` row, never
+  a DELETE: the ledger is append-only, and `reconcile_supply_shrinkage` skips a
+  burned token only while a burn row stamped with its nft_id exists, so it
+  re-creates a deleted one the next night. (It cannot tell a pre-Phase-A
+  harvest burn, whose set moved into the Closet, from destruction — its five
+  such rows, 2884–2888, are compensated by 4366–4370.)
 - Core modules: `lfg_core/economy_flow.py` (flows + `EconomyDeps`),
   `lfg_core/closet_token.py` (Closet metadata + lifecycle — `ensure_closet`,
   `confirm_accept`, `sync_closet`, `ClosetRef`),
