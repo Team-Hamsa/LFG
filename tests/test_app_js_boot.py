@@ -155,3 +155,40 @@ def test_media_el_video_fallback_reads_current_element_state():
     # ...and the stale accessible label from the previous render likewise
     # (the fallback reads it as the replacement image's alt).
     assert "removeAttribute('aria-label')" in js
+
+
+def test_app_js_swap_blank_character_returns_to_picker():
+    """#523: the server refuses a trait swap with 409 {"code":
+    "blank_character", ...} when either side is blank. Retrying with
+    different TRAITS on the same pair can never succeed -- the fix is a
+    different GO, not a different trait -- so confirmSwap()'s catch must
+    recognize the code and send the user back to the NFT picker instead of
+    stranding them on the now-dead-end trait checklist. showError still
+    renders the server's exact message either way."""
+    src = _read("app.js")
+    pattern = r"async function confirmSwap\(\)\s*\{.*?\n\}\n"
+    m = re.search(pattern, src, re.S)
+    assert m, "confirmSwap() not found in app.js"
+    body = m.group(0)
+    assert "'blank_character'" in body
+    assert "showPanel('swap-panel')" in body
+    assert "showError(e.message)" in body
+
+
+def test_app_js_swap_blank_character_clears_the_rejected_pick():
+    """#523 review (Greptile P2): showPanel('swap-panel') alone leaves the
+    rejected pair's card styling (sel-1/sel-2) and the enabled "Pick traits"
+    button untouched, so one click lands right back on the same doomed
+    checklist. The blank_character branch must also reset swapPick and
+    re-render the picker so the user is actually free to choose different
+    GOs, not just looking at a picker screen that still thinks two are
+    chosen."""
+    src = _read("app.js")
+    pattern = r"async function confirmSwap\(\)\s*\{.*?\n\}\n"
+    m = re.search(pattern, src, re.S)
+    assert m, "confirmSwap() not found in app.js"
+    branch_pattern = r"if \(e\.body && e\.body\.code === 'blank_character'\) \{(.*?)\n {4}\}"
+    branch = re.search(branch_pattern, m.group(0), re.S)
+    assert branch, "blank_character branch not found inside confirmSwap()"
+    assert "swapPick = []" in branch.group(1)
+    assert "renderPicks()" in branch.group(1)

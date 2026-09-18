@@ -293,6 +293,26 @@ def test_start_equip_batch_rejects_a_bad_change(monkeypatch):
     asyncio.get_event_loop().run_until_complete(go())
 
 
+def test_start_equip_rejects_blank_character(monkeypatch):
+    """#523: equipping onto a blank is refused before any session is
+    scheduled -- Assemble is the only supported way to dress a blank. The
+    raised EconomyError carries the machine-readable code + verbatim message
+    _economy_post maps to 409 blank_character."""
+    conn = _seed_blank_conn()  # edition 3537 (nft_id "A"), owner rOwner, blank
+    economy_store.set_closet_contents(conn, "rOwner", [("Head", "Halo", 2)], [42])
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError) as exc_info:
+            await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
+        return exc_info.value
+
+    err = asyncio.get_event_loop().run_until_complete(go())
+    assert err.code == "blank_character"
+    assert str(err) == trait_economy.BLANK_CHARACTER_ERROR
+
+
 def test_start_equip_closes_conn_after_task(monkeypatch):
     """Regression: the sqlite conn opened for the scheduled flow must be closed
     after the background task completes (no file-descriptor leak)."""

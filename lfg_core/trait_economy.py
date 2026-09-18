@@ -360,6 +360,19 @@ def can_assemble(
     return _OK
 
 
+# #523: a harvested (blank) character counts as 0 assets in the census. Equip
+# (or a trait swap) landing a real value on ONE of a blank's slots turns it
+# into a partly-dressed character -- 9 assets (8 None + the item) with no
+# supply_changes row to cover the difference, a "phantom None set" in every
+# OTHER slot the conservation audit can never explain (6 such events landed
+# on mainnet between 2026-08-07 and 2026-09-11 before this guard). Assemble
+# is the only supported way to dress a blank -- it always fills every slot at
+# once from a real Closet debit. Verbatim client-facing text: lfg_service/
+# app.py's _economy_post and handle_swap_start both map this exact string to
+# 409 {"code": "blank_character"}.
+BLANK_CHARACTER_ERROR = "This character is blank — use Build this GO to dress it first."
+
+
 def can_equip(
     rec: OnchainNft,
     slot: str,
@@ -368,9 +381,12 @@ def can_equip(
     mutable: bool,
 ) -> Precheck:
     """A loose asset can be equipped onto a live, mutable character iff the slot
-    is a non-body slot and the owner's Closet holds the incoming asset."""
+    is a non-body slot and the owner's Closet holds the incoming asset. A BLANK
+    character is refused outright (#523) -- see BLANK_CHARACTER_ERROR above."""
     if rec.is_burned:
         return Precheck(False, "character is burned")
+    if is_blank(rec):
+        return Precheck(False, BLANK_CHARACTER_ERROR)
     if not mutable:
         return Precheck(False, "character is not mutable")
     if slot not in NON_BODY_SLOTS:

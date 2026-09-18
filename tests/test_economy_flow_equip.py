@@ -150,6 +150,25 @@ def test_equip_rejects_missing_asset(tmp_path):
     assert f.char_modifies == []  # never touched the character
 
 
+def test_equip_rejects_blank_character(tmp_path):
+    """#523: equipping onto a blank produces a partly-dressed character the
+    conservation audit can't account for (a "phantom None set" in the other
+    slots) -- Assemble is the only supported way to dress a blank. can_equip
+    refuses before any compose/upload/modify, so the character and the Closet
+    are both untouched."""
+    conn, f = _conn_with_bucket(), _Fakes()
+    rec = _char()
+    rec.attributes = te.blank_attributes()
+    s = ef.EquipSession(owner="rUser", character=rec, changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_modifies == []  # never touched the character -- no NFTokenModify
+    assert s.error is not None and te.BLANK_CHARACTER_ERROR in s.error
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 1}  # Closet untouched
+
+
 def test_equip_modify_then_bucket_fails_reverts(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
