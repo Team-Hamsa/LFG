@@ -942,3 +942,35 @@ def test_listener_lag_never_regresses_a_flow_written_closet():
     assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
     assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
     assert es.get_closet_applied_ledger(conn, "rUser") == 2000
+
+
+def test_undated_closet_event_never_overwrites_a_dated_mirror():
+    """A stream tx without a usable ledger_index cannot be ordered against the
+    version the mirror holds. Applying it anyway (it stamps nothing, so the
+    older stamp survives) is how a late or malformed event rolls the mirror
+    back — skip it and let a dated event carry the version instead."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_C, 1005), clio_uri=VERSION_C)
+
+    undated = _closet_tx("modify", VERSION_B, 1000)
+    del undated["ledger_index"]
+    _apply_closet_tx(conn, undated, clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
+    assert es.get_closet_applied_ledger(conn, "rUser") == 1005
+
+
+def test_undated_closet_event_still_applies_to_an_undated_mirror():
+    """Nothing to protect: the mirror carries no version ledger either (a
+    pre-#522 row, or a fresh index), so the event is applied as before."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+
+    undated = _closet_tx("modify", VERSION_B, 1000)
+    del undated["ledger_index"]
+    _apply_closet_tx(conn, undated, clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)

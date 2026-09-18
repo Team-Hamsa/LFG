@@ -216,7 +216,31 @@ async def _closet_modify(nft_id: str, owner: str, url: str) -> closet_token.Modi
         raise closet_token.ClosetIndeterminateError(str(e)) from e
     if result is None:
         return None
-    return closet_token.ModifyReceipt(tx_hash=result.tx_hash, ledger_index=result.ledger_index)
+    ledger_index = result.ledger_index
+    if ledger_index is None:
+        ledger_index = await _validated_ledger_of(result.tx_hash)
+    return closet_token.ModifyReceipt(tx_hash=result.tx_hash, ledger_index=ledger_index)
+
+
+async def _validated_ledger_of(tx_hash: str) -> int | None:
+    """The ledger a committed transaction validated in, looked up by hash (#522).
+
+    `modify_nft`'s own result normally reports it. When it does not, the Closet
+    mirror would name the NEW URI while still carrying the stamp of the previous
+    version, and a delayed listener event from a ledger in between would pass the
+    monotonic check and roll the mirror back. Best effort: the modify has already
+    committed, so a failed lookup just leaves that version undated."""
+    try:
+        result = await xrpl_ops.get_tx(tx_hash)
+    except Exception as e:
+        logging.warning(f"could not resolve the validated ledger of {tx_hash}: {e}")
+        return None
+    if not isinstance(result, dict) or not result.get("validated"):
+        return None
+    ledger_index = result.get("ledger_index")
+    if isinstance(ledger_index, bool) or not isinstance(ledger_index, int):
+        return None
+    return ledger_index
 
 
 async def _trait_info(nft_id: str) -> dict[str, Any] | None:

@@ -257,6 +257,54 @@ def test_closet_modify_without_a_reported_ledger_still_returns_its_hash(monkeypa
     assert result == closet_token.ModifyReceipt(tx_hash="H2", ledger_index=None)
 
 
+def test_closet_modify_resolves_a_missing_ledger_from_the_tx_lookup(monkeypatch):
+    """#522: the mirror's ledger stamp is what stops a lagging listener rolling a
+    flow's own write back, so a committed modify whose result omitted
+    `ledger_index` is looked up by hash instead of being left undated."""
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated(tx_hash="H3")
+    )
+    looked_up = []
+
+    async def fake_get_tx(tx_hash):
+        looked_up.append(tx_hash)
+        return {"validated": True, "ledger_index": 4242}
+
+    monkeypatch.setattr(deps.xrpl_ops, "get_tx", fake_get_tx)
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert looked_up == ["H3"]
+    assert result == closet_token.ModifyReceipt(tx_hash="H3", ledger_index=4242)
+
+
+def test_closet_modify_survives_a_failed_ledger_lookup(monkeypatch):
+    """The lookup is best effort: the modify already committed, so a failure
+    leaves the version undated rather than failing the Closet sync."""
+    import _economy_deps as deps
+
+    from lfg_core import closet_token
+
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _validated(tx_hash="H4")
+    )
+
+    async def boom(tx_hash):
+        raise ConnectionError("rippled unreachable")
+
+    monkeypatch.setattr(deps.xrpl_ops, "get_tx", boom)
+
+    result = _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json"))
+
+    assert result == closet_token.ModifyReceipt(tx_hash="H4", ledger_index=None)
+
+
 # --- committed mint whose meta lacks the convenience nftoken_id (#188) ---
 
 

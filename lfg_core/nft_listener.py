@@ -217,6 +217,17 @@ def _apply_closet(
         economy_store.delete_closet(conn, owner)
         return
     applied = economy_store.get_closet_applied_ledger(conn, owner)
+    if applied is not None and ledger_index is None:
+        # An event the stream could not date cannot be ordered against the
+        # version the mirror holds, and applying it would stamp nothing — the
+        # older stamp would survive to describe newer contents. Skip it; a dated
+        # event carries the version instead. (An undated mirror has nothing to
+        # protect, so it still applies.)
+        logging.warning(
+            f"_apply_closet: undated event for {token.get('nft_id')} cannot be ordered against "
+            f"the ledger-{applied} version mirrored for {owner}; keeping the mirror"
+        )
+        return
     if ledger_index is not None and applied is not None and ledger_index < applied:
         logging.info(
             f"_apply_closet: {token.get('nft_id')} version from ledger {ledger_index} is older "
