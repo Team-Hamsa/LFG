@@ -1777,6 +1777,8 @@ def _lb_system_accounts() -> frozenset[str]:
                 config.SWAP_OFFER_ISSUER,
                 config.BRIX_DISTRIBUTOR_ADDRESS,
                 config.BRIX_AMM_ACCOUNT,
+                # #548: sale proceeds pile up here; it is a project wallet.
+                config.CLOSET_HOUSE_WALLET,
             )
             if a
         )

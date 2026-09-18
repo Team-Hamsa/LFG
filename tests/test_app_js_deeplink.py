@@ -83,7 +83,7 @@ def test_qr_disclosure_expansion_survives_poll_rerenders():
 
 def test_cache_busters_bumped():
     html = _read("index.html")
-    assert "app.js?v=104" in html
+    assert "app.js?v=106" in html
 
 
 # ---------------------------------------------------------------------------

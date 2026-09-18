@@ -1,13 +1,20 @@
 # tests/test_market_panel_dom.py
 # Task 10 (#44): source-assertion guard for the marketplace panel's HTML/JS
-# wiring, mirroring test_app_js_boot.py / test_leaderboard_selector.py (the
-# webapp client has no JS execution harness for DOM code — only
-# market_pure.js's pure functions are executed, see test_market_pure_js.py).
+# wiring, mirroring test_app_js_boot.py / test_leaderboard_selector.py.
+# market_pure.js's pure functions are executed in test_market_pure_js.py;
+# the listing detail overlay (openListingDetail) also runs here under Node
+# against a stub DOM — see _run_open_listing_detail.
+import json
 import os
 import re
+import shutil
+import subprocess
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENT = os.path.join(ROOT, "webapp", "client")
+_NODE = shutil.which("node")
 
 
 def _read(name: str) -> str:
@@ -154,6 +161,210 @@ def test_external_buy_now_wiring():
     assert "marketPure.externalFillCopy(marketplace" in js
     assert "MARKET_STATUS_PATH.bid(sessionId)" in js
     assert "'/api/market/bid'" in js
+
+
+def test_own_external_listing_offers_no_buy_now():
+    # A seller opening their OWN xrp.cafe-listed NFT (e.g. via "My listings
+    # only") got an enabled Buy now: a bid on their own NFT, which the server
+    # refuses (400) only after the confirm dialog. The own-listing check must
+    # run before both external branches. The marketplace link stays so the
+    # seller can manage the listing there; the fee note goes (nothing to pay).
+    js = _read("app.js")
+    start = js.index("async function openListingDetail(")
+    body = js[start : js.index("\n}\n", start)]
+    own = body.index("marketPure.isOwnListing(vm, me && me.wallet)")
+    assert own < body.index("buyExternalNow(row, vm)"), "own check must precede Buy now"
+    assert own < body.index("`Buy on ${vm.marketplace} ↗`"), "own check must precede link-out"
+    own_branch = body[own : body.index("} else if", own)]
+    assert "action.textContent = 'Your listing';" in own_branch
+    assert "action.disabled = true;" in own_branch
+    assert "showMarketplaceLink();" in own_branch
+    assert "feeNote" not in own_branch
+    # The link is the gated "View on <marketplace> ↗" secondary, shared with
+    # the Buy-now branch.
+    link = body[body.index("const showMarketplaceLink = () => {") :]
+    link = link[: link.index("\n  };\n")]
+    assert "if (!vm.externalUrl) return;" in link
+    assert "extLink.textContent = `View on ${vm.marketplace} ↗`;" in link
+    assert "extLink.hidden = false;" in link
+
+
+def _run_open_listing_detail(cases: list) -> list:
+    """Execute app.js's real openListingDetail under Node against the real pure
+    modules and a stub DOM, once per [row, signed-in wallet] case. Returns what
+    the overlay shows, plus what pressing its primary action (when enabled) and
+    its marketplace link (when shown) called."""
+    if _NODE is None:
+        pytest.skip("node is not installed on this host")
+    js = _read("app.js")
+    start = js.index("async function openListingDetail(")
+    src = js[start : js.index("\n}\n", start) + 3]
+    script = (
+        "import * as marketPure from './webapp/client/market_pure.js';\n"
+        "import * as closetPure from './webapp/client/closet_market_pure.js';\n"
+        "import * as mediaPure from './webapp/client/media_pure.js';\n"
+        + src
+        + """
+const calls = [];
+let nodes = {};
+function node() {
+  return {
+    hidden: false, textContent: '', disabled: false, onclick: null, value: '', placeholder: '',
+    classList: { toggle() {} }, querySelector: node, replaceChildren() {}, appendChild() {},
+    focus() {},
+  };
+}
+function el(id) { return (nodes[id] ||= node()); }
+function setMedia(id) { return el(id); }
+function marketRowImgSrc() { return ''; }
+const BLANK_IMG = '';
+globalThis.document = { activeElement: null, createElement: node };
+// A direct window.open bypasses the Discord SDK / Telegram openers.
+globalThis.window = { open: (url, target, features) => calls.push(['window.open', url, features]) };
+function openExternal(url, features) { calls.push(['openExternal', url, features]); }
+async function buyExternalNow(row, vm) { calls.push(['buyExternalNow', vm.clearingXrp]); }
+async function openBuyFlow(row) { calls.push(['openBuyFlow', row.offer_index]); }
+function closeListingDetail() {}
+function renderListingOffers() {}
+function renderListingHistory() {}
+async function api() { return {}; }
+function showError(msg) { calls.push(['showError', msg]); }
+async function placeBid() {}
+async function placeClosetBid() {}
+let me = null;
+let closetMarketEnabled = false;
+let activeListingId = null;
+let lastListingTrigger = null;
+(async () => {
+  const out = [];
+  for (const [row, wallet] of CASES) {
+    nodes = {};
+    calls.length = 0;
+    me = wallet ? { wallet } : null;
+    await openListingDetail(row);
+    const action = el('listing-detail-action');
+    const link = el('listing-detail-external');
+    const fee = el('listing-detail-fee');
+    const seen = {
+      action: action.textContent,
+      disabled: action.disabled,
+      link: link.hidden ? null : link.textContent,
+      fee: !fee.hidden,
+      bid: !el('listing-detail-bid').hidden,
+    };
+    if (action.onclick && !action.disabled) action.onclick();
+    if (!link.hidden) link.onclick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    out.push({ ...seen, calls: [...calls] });
+  }
+  console.log(JSON.stringify(out));
+})();
+""".replace("CASES", json.dumps(cases))
+    )
+    proc = subprocess.run(
+        [_NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_CAFE_URL = "https://xrp.cafe/nft/00AA"
+# A Buy-now external row: xrp.cafe's fee rate is measured, so the server sent
+# the clearing price (#426).
+_CAFE_ROW = {
+    "kind": "character",
+    "nft_id": "00AA",
+    "nft_number": 42,
+    "seller": "rSeller",
+    "offer_index": "OFF1",
+    "amount_xrp": "4",
+    "amount_drops": "4000000",
+    "source": "external",
+    "buyable": False,
+    "marketplace": "xrp.cafe",
+    "external_url": _CAFE_URL,
+    "broker_rate": 0.01589,
+    "clearing_xrp": "4.064587",
+    "clearing_drops": "4064587",
+}
+# Same listing on a broker whose fee is unmeasured: no clearing price.
+_UNMEASURED_ROW = {
+    **_CAFE_ROW,
+    "broker_rate": None,
+    "clearing_xrp": None,
+    "clearing_drops": None,
+}
+_IN_APP_ROW = {
+    "kind": "character",
+    "nft_id": "00BB",
+    "nft_number": 7,
+    "seller": "rSeller",
+    "offer_index": "OFF2",
+    "amount_xrp": "10",
+    "amount_drops": "10000000",
+}
+
+
+def test_listing_detail_actions_for_own_and_external_rows():
+    # Executes the overlay: your own listing is never buyable (external or
+    # not), and every marketplace link opens through openExternal (Discord
+    # SDK / Telegram bridge; noopener in a plain browser), never window.open.
+    own_cafe, other_cafe, own_unmeasured, other_unmeasured, own_in_app = _run_open_listing_detail(
+        [
+            [_CAFE_ROW, "rSeller"],
+            [_CAFE_ROW, "rBuyer"],
+            [_UNMEASURED_ROW, "rSeller"],
+            [_UNMEASURED_ROW, "rBuyer"],
+            [_IN_APP_ROW, "rSeller"],
+        ]
+    )
+    cafe_link = ["openExternal", _CAFE_URL, "noopener"]
+    # The bug: this was an enabled "Buy now" whose bid the server refuses.
+    assert own_cafe == {
+        "action": "Your listing",
+        "disabled": True,
+        "link": "View on xrp.cafe ↗",
+        "fee": False,
+        "bid": False,
+        "calls": [cafe_link],
+    }
+    assert other_cafe == {
+        "action": "Buy now — 4.07 XRP via xrp.cafe",
+        "disabled": False,
+        "link": "View on xrp.cafe ↗",
+        "fee": True,
+        "bid": True,
+        "calls": [["buyExternalNow", "4.064587"], cafe_link],
+    }
+    assert own_unmeasured == {
+        "action": "Your listing",
+        "disabled": True,
+        "link": "View on xrp.cafe ↗",
+        "fee": False,
+        "bid": False,
+        "calls": [cafe_link],
+    }
+    assert other_unmeasured == {
+        "action": "Buy on xrp.cafe ↗",
+        "disabled": False,
+        "link": None,
+        "fee": False,
+        "bid": True,
+        "calls": [cafe_link],
+    }
+    assert own_in_app == {
+        "action": "Your listing",
+        "disabled": True,
+        "link": None,
+        "fee": False,
+        "bid": False,
+        "calls": [],
+    }
 
 
 def test_external_listing_wiring():
@@ -316,3 +527,49 @@ def test_trait_listing_detail_is_compact():
     for m in grids:
         preludes = _enclosing_preludes(css, m.end() - 1)
         assert any(p.startswith("@container listing-detail") for p in preludes), preludes
+
+
+def _direct_parent_ids(html: str) -> dict:
+    """Map each element id to the id of its direct parent element."""
+    from html.parser import HTMLParser
+
+    void = {"area", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
+
+    class Parents(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stack: list = []
+            self.parents: dict = {}
+
+        def handle_starttag(self, tag, attrs):
+            own = dict(attrs).get("id")
+            if own:
+                self.parents[own] = self.stack[-1][1] if self.stack else None
+            if tag not in void:
+                self.stack.append((tag, own))
+
+        def handle_endtag(self, tag):
+            while self.stack:
+                if self.stack.pop()[0] == tag:
+                    break
+
+    p = Parents()
+    p.feed(html)
+    return p.parents
+
+
+def test_standalone_card_inputs_are_capped_not_full_bleed():
+    """Discord desktop 2026-09-18: at >=760px the app widens to 880px, and the
+    global `input[type="text"] { width: 100% }` stretched the lone price box on
+    Place a bid and List for sale to ~790px. A text input sitting directly in a
+    card is capped instead."""
+    rule = re.search(r'\.card > input\[type="text"\]\s*\{([^}]*)\}', _stylesheet())
+    assert rule, 'no `.card > input[type="text"]` rule'
+    cap = re.search(r"max-width:\s*(\d+)px", rule.group(1))
+    assert cap and int(cap.group(1)) <= 320
+    # The amount reads centered, like the rest of the card.
+    assert re.search(r"text-align:\s*center", rule.group(1))
+    # The cap only reaches inputs that are direct children of their card.
+    parents = _direct_parent_ids(_read("index.html"))
+    assert parents["closet-bid-price"] == "closet-bid-form-panel"
+    assert parents["market-list-price"] == "market-list-form-panel"
