@@ -77,6 +77,18 @@ def test_badge_is_styled():
     assert ".market-card-bid" in _stylesheet()
 
 
+def test_bid_form_selects_hug_their_text_and_center():
+    # The Slot/Trait dropdowns size to their choice and sit centered under
+    # their labels — not full-bleed like the price input below them.
+    css = re.sub(r"/\*.*?\*/", "", _stylesheet(), flags=re.S)
+    rule = re.search(r"#closet-bid-form-panel select\s*\{([^}]*)\}", css)
+    assert rule, "no #closet-bid-form-panel select rule"
+    body = rule.group(1)
+    assert "100%" not in body
+    assert re.search(r"width:\s*fit-content", body)
+    assert re.search(r"margin:\s*\S+\s+auto\b", body)
+
+
 def test_bid_render_only_celebrates_a_filled_bid():
     """(#443 final review I1) `matched` renders as pending now; the done branch
     distinguishes a live (open) bid from a filled one."""
