@@ -17,6 +17,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio
 import json
 import sqlite3
+import threading
 from decimal import Decimal
 
 import pytest
@@ -417,8 +418,19 @@ def test_run_archive_reverify_cancellation_sets_terminal_state_and_reraises(
     must catch CancelledError explicitly, record a terminal 'failed: cancelled'
     state + audit row, and re-raise so the cancellation still propagates."""
 
+    # The job runs as asyncio.to_thread(asyncio.run, ...): cancelling the outer
+    # task cannot stop that worker thread, and a worker still waiting when the
+    # interpreter exits hangs the whole pytest process (#545). So the fake
+    # "hangs" only until the test releases it at teardown.
+    entered = threading.Event()
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+
     async def hanging_reverify(conn, request_fn, *, network, now=None):
-        await asyncio.Event().wait()
+        workers.append(threading.current_thread())
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
 
     audits: list[str] = []
     monkeypatch.setattr(server.archive_reverify, "reverify_archive", hanging_reverify)
@@ -431,22 +443,27 @@ def test_run_archive_reverify_cancellation_sets_terminal_state_and_reraises(
 
     async def scenario():
         task = asyncio.create_task(server.run_archive_reverify("testnet", "admin:42"))
-        # Let the job start and reach the hang point before cancelling.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # Cancel only once the job is inside the sweep, in its worker thread.
+        assert await asyncio.to_thread(entered.wait, 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert task.cancelled()
 
-    _run(scenario())
-    assert server._reverify_state["testnet"] == {
-        "state": "failed",
-        "error": "cancelled",
-        "finished_at": server._reverify_state["testnet"]["finished_at"],
-    }
-    assert server._reverify_state["testnet"]["finished_at"] is not None
-    assert audits == ["failed: cancelled"]
+    try:
+        _run(scenario())
+        assert server._reverify_state["testnet"] == {
+            "state": "failed",
+            "error": "cancelled",
+            "finished_at": server._reverify_state["testnet"]["finished_at"],
+        }
+        assert server._reverify_state["testnet"]["finished_at"] is not None
+        assert audits == ["failed: cancelled"]
+    finally:
+        release.set()
+    for worker in workers:
+        worker.join(5)
+        assert not worker.is_alive(), "the reverify worker thread outlived the test"
 
 
 def _fake_ws_client_factory():
