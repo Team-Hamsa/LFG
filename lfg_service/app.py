@@ -5829,12 +5829,16 @@ def _with_trait_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     value). Without it the client guesses the art under the active
     character's body, which rarely holds it, and the Wanted / Closet
     listings / Closet orders chips render blank. Sync (probes the layer
-    tree): call it on an executor thread, inside _closet_db."""
+    tree): call it on an executor thread, inside _closet_db. Each distinct
+    (slot, value) is probed once per call — many bids can share a key."""
     cfg = trait_config.get_config()
+    urls: dict[tuple[str, str], str | None] = {}
     for row in rows:
-        value = row["value"]
-        # "None" is the absence of a trait, not a value with art.
-        row["image_url"] = _trait_image_url(cfg, row["slot"], value) if value != "None" else None
+        key = (row["slot"], row["value"])
+        if key not in urls:
+            # "None" is the absence of a trait, not a value with art.
+            urls[key] = _trait_image_url(cfg, *key) if key[1] != "None" else None
+        row["image_url"] = urls[key]
     return rows
 
 
@@ -6006,8 +6010,8 @@ async def handle_closet_orders_mine(request):
             if config.closet_market_enabled()
             else []
         )
-        for group in ("orders", "fills", "bids_on_my_traits"):
-            _with_trait_images(data[group])
+        # One pass over all three groups, so a key in several shares a probe.
+        _with_trait_images([*data["orders"], *data["fills"], *data["bids_on_my_traits"]])
         return data
 
     return web.json_response(await _closet_db(run))

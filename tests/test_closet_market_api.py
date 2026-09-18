@@ -198,11 +198,14 @@ def test_orders_mine_lists_bids_on_my_traits(closet_env):
 
 
 def _stub_trait_art(monkeypatch):
-    monkeypatch.setattr(
-        server,
-        "_trait_image_url",
-        lambda cfg, slot, value: f"/api/layer?trait={slot}&value={value}",
-    )
+    calls = []
+
+    def resolve(cfg, slot, value):
+        calls.append((slot, value))
+        return f"/api/layer?trait={slot}&value={value}"
+
+    monkeypatch.setattr(server, "_trait_image_url", resolve)
+    return calls
 
 
 def test_closet_book_rows_carry_trait_image_url(closet_env, monkeypatch):
@@ -222,7 +225,7 @@ def test_closet_book_rows_carry_trait_image_url(closet_env, monkeypatch):
 def test_closet_orders_mine_rows_carry_trait_image_url(closet_env, monkeypatch):
     """Same blank-tile bug on Mine: my orders, bids on my traits and recent
     fills are all trait chips, so every row needs the server's image_url."""
-    _stub_trait_art(monkeypatch)
+    calls = _stub_trait_art(monkeypatch)
     bidder2 = "rBidder2"
     c = _db(closet_env)
     es.set_closet_token(c, bidder2, f"C-{bidder2}", "00", status=ct.ACTIVE)
@@ -241,12 +244,17 @@ def test_closet_orders_mine_rows_carry_trait_image_url(closet_env, monkeypatch):
         )
     )
     assert ask.status == 200
+    calls.clear()
     body = _json(_run(server.handle_closet_orders_mine(_req("GET", "/api/closet/orders/mine"))))
     for group in ("orders", "fills", "bids_on_my_traits"):
         assert body[group], group
         for row in body[group]:
             want = f"/api/layer?trait={row['slot']}&value={row['value']}"
             assert row["image_url"] == want, group
+    # PR #549 review: the resolver probes the layer tree, and bids_on_my_traits
+    # is unbounded — Head: Crown is both a fill and an open bid here, so each
+    # distinct (slot, value) must be resolved once per request, not per row.
+    assert sorted(calls) == [("Eyes", "Laser"), ("Head", "Crown")]
 
 
 def test_fill_bid_and_status_are_party_only(closet_env, monkeypatch):
