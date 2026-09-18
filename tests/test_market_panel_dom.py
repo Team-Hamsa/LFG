@@ -262,3 +262,45 @@ def test_grouped_trait_count_badge_survives_card_rebuild():
     rebuild = body.index("card.replaceChildren(img, name)")
     badge = body.index("cnt.className = 'market-card-count'")
     assert badge > rebuild, "count badge must be appended after replaceChildren"
+
+
+def _enclosing_preludes(css: str, idx: int) -> list[str]:
+    """Preludes of every block enclosing css[idx], innermost first — e.g.
+    [".listing-detail-body", "@container listing-detail (min-width: 600px)"].
+    Expects comments already stripped."""
+    out, depth = [], 0
+    for i in range(idx - 1, -1, -1):
+        if css[i] == "}":
+            depth += 1
+        elif css[i] == "{":
+            if depth:
+                depth -= 1
+            else:
+                start = max(css.rfind(ch, 0, i) for ch in ";{}") + 1
+                out.append(" ".join(css[start:i].split()))
+    return out
+
+
+def test_trait_listing_detail_is_compact():
+    # A trait listing is three short lines and one Buy button; the 760px
+    # side-by-side dialog is sized for a character's ~9 attribute chips and
+    # three-button footer, so a trait opened into a mostly empty box.
+    js = _read("app.js")
+    start = js.index("async function openListingDetail(")
+    body = js[start : js.index("\n}\n", start)]
+    assert "classList.toggle('listing-detail-compact', vm.kind === 'trait')" in body
+    css = re.sub(r"/\*.*?\*/", "", _stylesheet(), flags=re.S)
+    full = re.search(r"\.listing-detail\s*\{[^}]*?width:\s*min\((\d+)px", css)
+    compact = re.search(r"\.listing-detail-compact\s*\{[^}]*?width:\s*min\((\d+)px", css)
+    assert full and compact and int(compact.group(1)) < int(full.group(1))
+    # Art-beside-details keys off the dialog's own width, not the viewport:
+    # a viewport query would split the narrow trait card into two cramped
+    # columns on every wide screen.
+    assert re.search(
+        r"\.listing-detail\s*\{[^}]*container:\s*listing-detail\s*/\s*inline-size", css
+    )
+    grids = list(re.finditer(r"\.listing-detail-body\s*\{[^}]*display:\s*grid", css))
+    assert grids
+    for m in grids:
+        preludes = _enclosing_preludes(css, m.end() - 1)
+        assert any(p.startswith("@container listing-detail") for p in preludes), preludes

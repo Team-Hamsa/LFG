@@ -961,8 +961,10 @@ button.back:hover { color: var(--text); border: none; }
 /* The detail overlay outgrew the 380px confirm box: it is its own modal —
    a scrolling body between a pinned corner close and a pinned action footer,
    so the buttons are always reachable and only the body ever scrolls.
-   Stacked on phones, art beside details once there is room. */
+   Stacked when narrow, art beside details once the modal itself has room —
+   a container query, so the compact trait card stays stacked on any screen. */
 .listing-detail {
+  container: listing-detail / inline-size;
   position: relative;
   width: min(760px, 100%);
   max-height: calc(100vh - 32px);
@@ -971,6 +973,9 @@ button.back:hover { color: var(--text); border: none; }
   margin: 0; padding: 0; overflow: hidden;
   text-align: center;
 }
+/* A trait is three short lines and a Buy button; 760px is sized for a
+   character's attribute chips and three-button footer. */
+.listing-detail.listing-detail-compact { width: min(420px, 100%); }
 .listing-detail-body {
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
@@ -987,9 +992,11 @@ button.back:hover { color: var(--text); border: none; }
   font-size: 1.4rem; line-height: 1;
   background: rgba(0, 0, 0, .6); border-color: var(--line);
 }
+/* The tile matches the browse card: trait art is a transparent full-body
+   canvas, and without it the piece floats (a garment sits at the bottom). */
 .listing-detail-img {
   display: block; width: min(220px, 60vw); aspect-ratio: 1; object-fit: cover;
-  border-radius: 12px; margin: 0 auto 8px;
+  border-radius: 12px; margin: 0 auto 8px; background: var(--surface-2);
 }
 .listing-detail-info { min-width: 0; overflow-wrap: anywhere; }
 .listing-detail-info h3 { margin: 8px 0 2px; }
@@ -1009,7 +1016,8 @@ button.back:hover { color: var(--text); border: none; }
 .listing-detail-actions .primary {
   flex-basis: 100%; order: -1; white-space: normal; line-height: 1.25;
 }
-@media (min-width: 640px) {
+/* 600px of modal ≈ the old 640px viewport breakpoint (16px overlay gutters). */
+@container listing-detail (min-width: 600px) {
   .listing-detail-body {
     display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
     gap: 26px; align-items: start; text-align: left;

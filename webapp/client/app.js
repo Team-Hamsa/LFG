@@ -5211,6 +5211,10 @@ function renderListingOffers(offers, activeOfferIndex, groupOffers, total) {
 
 async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   const vm = marketPure.mapListingRow(row);
+  // A trait gets the narrow stacked card; the side-by-side dialog is sized
+  // for a character's attribute chips.
+  el('listing-overlay').querySelector('.listing-detail')
+    .classList.toggle('listing-detail-compact', vm.kind === 'trait');
   // #481: a grouped row carries its own offers (server-capped; vm.count is
   // the true total); an offer picked from that list carries the group's
   // offers + total back in via `groupOffers`/`groupTotal`.
