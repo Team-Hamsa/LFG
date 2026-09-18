@@ -237,6 +237,9 @@ def test_harvest_mutable_success_stamps_index_as_blank(tmp_path):
     assert row["owner"] == "rUser"
     assert row["is_burned"] == 0
     assert row["body"] == ""
+    # #534: the stamp carries the raw-blank flag, so the roster's cache-miss
+    # fallback refuses swaps on this blank right away.
+    assert row["raw_blank"] == 1
 
 
 def test_harvest_mutable_closet_fail_reverts_character(tmp_path):

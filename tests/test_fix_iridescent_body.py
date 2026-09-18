@@ -173,15 +173,76 @@ def test_apply_rewrites_ledger_and_mirrors(dbs, monkeypatch):
     assert nft_id == LIVE_ID and owner == OWNER
     assert uri.startswith("https://cdn.example/")
     with sqlite3.connect(index_db) as ic:
-        (attrs, uri_hex) = ic.execute(
-            "SELECT attributes_json, uri_hex FROM onchain_nfts WHERE nft_id=?",
+        (attrs, uri_hex, raw_blank) = ic.execute(
+            "SELECT attributes_json, uri_hex, raw_blank FROM onchain_nfts WHERE nft_id=?",
             (LIVE_ID,),
         ).fetchone()
     assert GOOD in attrs and BAD not in attrs.replace(GOOD, "")
     assert bytes.fromhex(uri_hex).decode() == uri
+    assert raw_blank == 0  # #534: the mirror records the new metadata's raw verdict
     with sqlite3.connect(app_db) as ac:
         (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
     assert body == GOOD
+
+
+def _seed_pre_534_index(path):
+    """An index file from before #534: same rows as _seed_index, but the table
+    has no raw_blank column (nft_index.init_db has never opened it)."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE onchain_nfts ("
+        " nft_id TEXT PRIMARY KEY, nft_number INTEGER, owner TEXT,"
+        " is_burned INTEGER DEFAULT 0, mutable INTEGER, uri_hex TEXT,"
+        " body TEXT, attributes_json TEXT, image TEXT, video TEXT,"
+        " ledger_index INTEGER, last_synced_at TIMESTAMP)"
+    )
+    conn.execute(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, mutable,"
+        " uri_hex, body, attributes_json, image, ledger_index)"
+        " VALUES (?, 64, ?, 0, 1, ?, 'skeleton', ?, 'https://cdn/x.png', 1)",
+        (LIVE_ID, OWNER, URI_HEX, json.dumps(_attrs(BAD))),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_apply_migrates_a_pre_534_index_before_writing(tmp_path, monkeypatch):
+    """PR #541 review: nft_index.upsert now writes raw_blank, so the script
+    must open the index through nft_index.init_db (which adds the column)
+    rather than a bare sqlite3.connect, or the mirror write fails with
+    'no column named raw_blank' after the ledger modify already landed."""
+    index_db = str(tmp_path / "onchain_pre534.db")
+    app_db = str(tmp_path / "app.db")
+    _seed_pre_534_index(index_db)
+    _seed_app(app_db)
+    calls = _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=True)
+    assert [r.status for r in results] == ["corrected"]
+    assert len(calls["modify"]) == 1
+    with sqlite3.connect(index_db) as ic:
+        (attrs, raw_blank) = ic.execute(
+            "SELECT attributes_json, raw_blank FROM onchain_nfts WHERE nft_id=?", (LIVE_ID,)
+        ).fetchone()
+    assert GOOD in attrs and BAD not in attrs.replace(GOOD, "")
+    assert raw_blank == 0
+
+
+def test_missing_index_fails_loudly_and_leaves_app_db_alone(tmp_path, monkeypatch):
+    """init_db would CREATE an empty index at a missing path, and an empty
+    index reads as "no live token carries the typo" -- the app-DB-only branch
+    would then rewrite LFG.Body while the ledger may still carry it. A
+    missing index must stop the run before anything is written."""
+    index_db = str(tmp_path / "missing_onchain.db")
+    app_db = str(tmp_path / "app.db")
+    _seed_app(app_db)
+    calls = _stub_ledger(monkeypatch)
+    with pytest.raises(FileNotFoundError):
+        _run(index_db, app_db, apply=True)
+    assert calls["modify"] == [] and calls["upload"] == []
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == BAD
+    assert not os.path.exists(index_db)
 
 
 def test_non_mutable_is_skipped(dbs, monkeypatch):

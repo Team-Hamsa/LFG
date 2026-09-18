@@ -85,7 +85,7 @@ def normalize_attributes(attributes: list[Any]) -> list[dict[str, str]]:
     return attrs
 
 
-def _raw_attrs_are_blank(raw_attrs: Any) -> bool:
+def raw_attrs_are_blank(raw_attrs: Any) -> bool:
     """#523 review: is this RAW (pre-normalize_attributes) attribute list a
     genuine harvested blank -- every TRAIT_ORDER slot (Body included)
     explicitly present with value "None"? Checked on the raw list because
@@ -98,6 +98,12 @@ def _raw_attrs_are_blank(raw_attrs: Any) -> bool:
     (can't import trait_economy here -- it imports this module, so that
     would be circular); keep the two in sync by hand if TRAIT_ORDER's
     membership in "blank" ever changes.
+
+    Public because it is THE raw-blank predicate (#534): normalize_nft uses
+    it for a record's "blank" field, and every on-chain index writer uses it
+    for the onchain_nfts.raw_blank flag -- the index stores only the PADDED
+    list, so the roster's metadata-cache-miss fallback can't re-derive this
+    from what it reads back. One predicate, so the two can never disagree.
 
     A duplicate canonical trait entry refuses outright (returns False)
     rather than picking one of the two conflicting values (#523 review):
@@ -252,7 +258,7 @@ def normalize_nft(
     # pads every missing slot to "None" and erases the distinction a caller
     # needs to refuse a swap/equip on a genuine blank without misfiring on
     # unreadable metadata.
-    blank = _raw_attrs_are_blank(raw_attrs)
+    blank = raw_attrs_are_blank(raw_attrs)
     attributes = normalize_attributes(raw_attrs if isinstance(raw_attrs, list) else [])
     try:
         burn_count = int(metadata.get("burnCount") or 0)

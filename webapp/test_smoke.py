@@ -1243,6 +1243,10 @@ def test_swap_session_offer_failure_still_persists_index(monkeypatch, tmp_path):
         # though the first offer failed and the second was never attempted.
         assert nft_index.nft_by_number(conn, 10).nft_id == "NEW1"
         assert nft_index.nft_by_number(conn, 20).nft_id == "NEW2"
+        # #534: the replacement rows carry the raw-blank verdict of the
+        # attributes written into their new metadata (dressed).
+        assert nft_index.nft_by_number(conn, 10).raw_blank is False
+        assert nft_index.nft_by_number(conn, 20).raw_blank is False
         burned = {
             row[0] for row in conn.execute("SELECT nft_id FROM onchain_nfts WHERE is_burned=1")
         }
