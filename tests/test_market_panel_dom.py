@@ -156,6 +156,32 @@ def test_external_buy_now_wiring():
     assert "'/api/market/bid'" in js
 
 
+def test_own_external_listing_offers_no_buy_now():
+    # A seller opening their OWN xrp.cafe-listed NFT (e.g. via "My listings
+    # only") got an enabled Buy now: a bid on their own NFT, which the server
+    # refuses (400) only after the confirm dialog. The own-listing check must
+    # run before both external branches. The marketplace link stays so the
+    # seller can manage the listing there; the fee note goes (nothing to pay).
+    js = _read("app.js")
+    start = js.index("async function openListingDetail(")
+    body = js[start : js.index("\n}\n", start)]
+    own = body.index("marketPure.isOwnListing(vm, me && me.wallet)")
+    assert own < body.index("buyExternalNow(row, vm)"), "own check must precede Buy now"
+    assert own < body.index("`Buy on ${vm.marketplace} ↗`"), "own check must precede link-out"
+    own_branch = body[own : body.index("} else if", own)]
+    assert "action.textContent = 'Your listing';" in own_branch
+    assert "action.disabled = true;" in own_branch
+    assert "showMarketplaceLink();" in own_branch
+    assert "feeNote" not in own_branch
+    # The link is the gated "View on <marketplace> ↗" secondary, shared with
+    # the Buy-now branch.
+    link = body[body.index("const showMarketplaceLink = () => {") :]
+    link = link[: link.index("\n  };\n")]
+    assert "if (!vm.externalUrl) return;" in link
+    assert "extLink.textContent = `View on ${vm.marketplace} ↗`;" in link
+    assert "extLink.hidden = false;" in link
+
+
 def test_external_listing_wiring():
     # #131: external (brokered) listings — toggle in the filter bar, distinct
     # disabled card treatment, no in-app buy path for external rows.

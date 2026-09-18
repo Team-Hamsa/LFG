@@ -5260,8 +5260,27 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   const feeNote = el('listing-detail-fee');
   extLink.hidden = true;
   feeNote.hidden = true;
+  // #426: the marketplace deep link as a secondary action, beside a primary
+  // that isn't it (Buy now, or your own listing). Only external rows carry
+  // an externalUrl.
+  const showMarketplaceLink = () => {
+    if (!vm.externalUrl) return;
+    extLink.textContent = `View on ${vm.marketplace} ↗`;
+    extLink.hidden = false;
+    extLink.onclick = () => window.open(vm.externalUrl, '_blank', 'noopener');
+  };
   const buyNow = marketPure.buyNowLabel(vm);
-  if (vm.external && buyNow) {
+  if (marketPure.isOwnListing(vm, me && me.wallet)) {
+    // The server refuses to sell you your own listing, and Buy now on your
+    // own external listing is a bid on your own NFT, which it refuses too;
+    // don't offer an action that can only fail. Unlisting lives under Mine,
+    // and an external listing keeps its marketplace link so you can manage
+    // it there.
+    action.textContent = 'Your listing';
+    action.disabled = true;
+    action.onclick = null;
+    showMarketplaceLink();
+  } else if (vm.external && buyNow) {
     // #426: the broker's fee rate is measured, so the server computed the
     // minimum bid its bot will settle. Primary = Buy now (a plain native
     // bid at the clearing price; the broker's bot brokers the accept),
@@ -5271,21 +5290,11 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     action.onclick = () => { buyExternalNow(row, vm).catch((e) => showError(e.message)); };
     feeNote.textContent = marketPure.feeCoverNote(vm) || marketPure.externalFeeNote(vm);
     feeNote.hidden = false;
-    if (vm.externalUrl) {
-      extLink.textContent = `View on ${vm.marketplace} ↗`;
-      extLink.hidden = false;
-      extLink.onclick = () => window.open(vm.externalUrl, '_blank', 'noopener');
-    }
+    showMarketplaceLink();
   } else if (vm.external) {
     action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
     action.disabled = !vm.externalUrl;
     action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
-  } else if (marketPure.isOwnListing(vm, me && me.wallet)) {
-    // The server refuses to sell you your own listing; don't offer a Buy
-    // that can only fail. Unlisting lives under Mine.
-    action.textContent = 'Your listing';
-    action.disabled = true;
-    action.onclick = null;
   } else {
     action.textContent = `Buy — ${vm.priceLabel}`;
     action.disabled = false;
