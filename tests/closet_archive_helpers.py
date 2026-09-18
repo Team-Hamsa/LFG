@@ -16,16 +16,26 @@ def closet_uri(name: str) -> str:
 
 
 def closet_version_tx(
-    kind: str, nft_id: str, uri_hex: str, ledger_index: int, *, owner: str = "rUser"
+    kind: str,
+    nft_id: str,
+    uri_hex: str,
+    ledger_index: int,
+    *,
+    owner: str = "rUser",
+    tx_index: int | None = None,
 ) -> dict:
-    """A validated Closet NFTokenMint/NFTokenModify as the stream normalizes it."""
+    """A validated Closet NFTokenMint/NFTokenModify as the stream normalizes it.
+    `tx_index` is its meta.TransactionIndex (#537); None leaves it out."""
+    position = f"{ledger_index}" if tx_index is None else f"{ledger_index}X{tx_index}"
     tx: dict = {
         "Account": "rIssuer",
         "URI": uri_hex,
-        "hash": f"{kind}{ledger_index}{nft_id}".upper()[:64].ljust(64, "0"),
+        "hash": f"{kind}{position}{nft_id}".upper()[:64].ljust(64, "0"),
         "ledger_index": ledger_index,
         "meta": {"TransactionResult": "tesSUCCESS"},
     }
+    if tx_index is not None:
+        tx["meta"]["TransactionIndex"] = tx_index
     if kind == "mint":
         tx["TransactionType"] = "NFTokenMint"
         tx["meta"]["nftoken_id"] = nft_id
@@ -52,14 +62,17 @@ def archive_tx(hconn, tx: dict) -> None:
     hconn.commit()
 
 
-def closet_archive(tmp_path, nft_id: str, versions: list[tuple[str, str, int]]) -> str:
-    """Create a history archive holding `versions` ((kind, uri_hex, ledger)) of
-    `nft_id`; returns its path."""
+def closet_archive(tmp_path, nft_id: str, versions: list[tuple]) -> str:
+    """Create a history archive holding `versions` ((kind, uri_hex, ledger), or
+    (kind, uri_hex, ledger, tx_index) for #537) of `nft_id`; returns its path."""
     path = os.path.join(str(tmp_path), "history_archive.db")
     hconn = history_store.init_history_db(path)
     try:
-        for kind, uri_hex, ledger_index in versions:
-            archive_tx(hconn, closet_version_tx(kind, nft_id, uri_hex, ledger_index))
+        for kind, uri_hex, ledger_index, *rest in versions:
+            tx_index = rest[0] if rest else None
+            archive_tx(
+                hconn, closet_version_tx(kind, nft_id, uri_hex, ledger_index, tx_index=tx_index)
+            )
     finally:
         hconn.close()
     return path

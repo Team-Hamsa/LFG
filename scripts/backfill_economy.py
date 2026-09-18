@@ -32,8 +32,9 @@ Closet URI for a while after a modify validates, so a run started too soon after
 economy traffic rebuilds a Closet one version back. Every Closet this run
 rebuilds is therefore RE-DATED, never left carrying the stamp that described the
 mirror before the rewrite: the ledger history archive (read-only) is asked which
-ledger set the URI just written, and the mirror is stamped with that — or with
-nothing, when the archive cannot date it.
+ledger (and TransactionIndex, #537) set the URI just written, and the mirror is
+stamped with that — or with nothing, when the archive cannot date it. The
+rebuilt contents and the new stamp commit in one transaction (#535).
 
 So a rebuild one version back cannot pretend to be current: as long as the
 archive is readable, the flows' guard refuses (`closet_mirror_behind`) and the
@@ -85,13 +86,16 @@ EnumerateFn = Callable[[int], Awaitable[list[dict[str, Any]]]]
 FetchMetaFn = Callable[[str], Awaitable[dict[str, Any] | None]]
 
 
-def _archived_version_ledger(archive: Any, nft_id: str, uri_hex: str | None) -> int | None:
-    """The ledger the history archive saw `nft_id` set to `uri_hex` in, or None
-    when there is no archive, no URI, or the archive never saw that version."""
+def _archived_version_position(
+    archive: Any, nft_id: str, uri_hex: str | None
+) -> tuple[int, int | None] | None:
+    """The (ledger, tx index) at which the history archive saw `nft_id` set to
+    `uri_hex` (#522/#537), or None when there is no archive, no URI, or the
+    archive never saw that version."""
     if archive is None or not uri_hex:
         return None
     try:
-        return history_store.uri_version_ledger(archive, nft_id, uri_hex)
+        return history_store.uri_version_position(archive, nft_id, uri_hex)
     except Exception as e:
         # Every other failure mode in this script skips one Closet; an archive
         # read must not be the one that kills the whole reconcile. Undated is
@@ -138,41 +142,63 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
-    rebuilt = False
-    if closet_market_store.has_recent_fill(conn, owner):
-        # #443: DB is ahead of the token until the fill's mirror lands — see nft_listener._apply_closet.
-        print(f"skip contents for {owner}: recent Closet Market fill")
-    else:
+    # Whether the record may name the snapshot's version: the mirror's contents
+    # are that version's (rebuilt from it here, or already exactly it).
+    names_version = True
+    # Contents, record and re-dated stamp describe one version: one
+    # transaction, so a failure part-way leaves the old mirror whole (#535).
+    with economy_store.closet_mirror_write(conn):
+        existing = economy_store.get_closet_record(conn, owner)
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
-        economy_store.set_closet_contents(conn, owner, assets, bodies)
-        rebuilt = True
-    status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
-    existing = economy_store.get_closet_record(conn, owner)
-    existing_offer_id = existing[3] if existing is not None else None
-    economy_store.set_closet_token(
-        conn,
-        owner,
-        token["nft_id"],
-        token.get("uri_hex") or "",
-        status=status,
-        offer_id=existing_offer_id,
-    )
-    if rebuilt:
-        # #522: this snapshot comes from clio, the source that can still serve
-        # the PREVIOUS Closet URI right after a modify validates, so the stamp
-        # that described the mirror BEFORE this rewrite must not survive it —
-        # it would claim a version newer than the contents just written, and the
-        # flows' stale-mirror guard would read a behind mirror as current.
-        # Re-date it from the archive, which knows the ledger each URI was set
-        # in: that both keeps the guard honest and lets the listener refuse an
-        # OLDER modify that would otherwise undo this rebuild.
-        #
-        # AFTER the upsert above, for two reasons: this must be able to CLEAR
-        # the stamp (set_closet_token's COALESCE only ever keeps one), and on a
-        # fresh or reset index the row does not exist until that upsert runs.
-        economy_store.set_closet_applied_ledger(
-            conn, owner, _archived_version_ledger(archive, token["nft_id"], token.get("uri_hex"))
+        if closet_market_store.has_recent_fill(conn, owner):
+            # #443: DB is ahead of the token until the fill's mirror lands — see
+            # nft_listener._apply_closet. The record names the snapshot's
+            # version only when the kept contents ARE it (#535): naming a
+            # version they lack would let the stale-mirror guard pass the next
+            # full overwrite, which would erase that version's change on-chain.
+            # (With no record yet there is nothing to keep, so its URI is
+            # written — but left undated unless the contents are that version.)
+            names_version = economy_store.closet_holds_contents(conn, owner, assets, bodies)
+            print(
+                f"skip contents for {owner}: recent Closet Market fill"
+                + ("" if names_version else "; keeping the version they hold")
+            )
+        else:
+            economy_store.set_closet_contents(conn, owner, assets, bodies, commit=False)
+        status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
+        existing_offer_id = existing[3] if existing is not None else None
+        economy_store.set_closet_token(
+            conn,
+            owner,
+            token["nft_id"],
+            (token.get("uri_hex") or "") if names_version or existing is None else existing[1],
+            status=status,
+            offer_id=existing_offer_id,
+            commit=False,
         )
+        if names_version:
+            # #522: this snapshot comes from clio, the source that can still
+            # serve the PREVIOUS Closet URI right after a modify validates, so
+            # the stamp that described the mirror BEFORE this rewrite must not
+            # survive it — it would claim a version newer than the contents just
+            # written, and the flows' stale-mirror guard would read a behind
+            # mirror as current. Re-date it from the archive, which knows the
+            # (ledger, tx index) each URI was set at: that both keeps the guard
+            # honest and lets the listener refuse an OLDER modify that would
+            # otherwise undo this rebuild.
+            #
+            # AFTER the upsert above, for two reasons: this must be able to CLEAR
+            # the stamp (set_closet_token's COALESCE only ever keeps one), and on
+            # a fresh or reset index the row does not exist until that upsert
+            # runs.
+            position = _archived_version_position(archive, token["nft_id"], token.get("uri_hex"))
+            economy_store.set_closet_applied_ledger(
+                conn,
+                owner,
+                None if position is None else position[0],
+                None if position is None else position[1],
+                commit=False,
+            )
     return True
 
 

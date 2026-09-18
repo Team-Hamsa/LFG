@@ -800,8 +800,8 @@ _CLOSET_VERSIONS = {
 }
 
 
-def _closet_tx(kind: str, uri_hex: str, ledger_index: int) -> dict:
-    return closet_version_tx(kind, CLOSET_ID, uri_hex, ledger_index)
+def _closet_tx(kind: str, uri_hex: str, ledger_index: int, tx_index: int | None = None) -> dict:
+    return closet_version_tx(kind, CLOSET_ID, uri_hex, ledger_index, tx_index=tx_index)
 
 
 def _apply_closet_tx(
@@ -974,3 +974,144 @@ def test_undated_closet_event_still_applies_to_an_undated_mirror():
 
     assert _closet_contents(conn) == {("Body", "Ape Xray"): 3}
     assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)
+
+
+# --- #537: two Closet modifies in ONE ledger order by their TransactionIndex ---
+
+
+def test_closet_modify_stamps_the_tx_index_it_validated_at():
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1000, tx_index=3), clio_uri=VERSION_A)
+
+    assert es.get_closet_applied_position(conn, "rUser") == (1000, 3)
+
+
+def test_same_ledger_older_closet_modify_never_regresses_mirror():
+    """Versions B (tx 4) and C (tx 9) validated in ledger 1005; the listener
+    handles C first. By ledger alone B looks no older than C and would roll the
+    mirror back."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_C, 1005, tx_index=9), clio_uri=VERSION_C)
+
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1005, tx_index=4), clio_uri=VERSION_B)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_C)
+    assert es.get_closet_applied_position(conn, "rUser") == (1005, 9)
+
+
+def test_same_ledger_newer_closet_modify_advances_mirror():
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1005, tx_index=4), clio_uri=VERSION_B)
+
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_C, 1005, tx_index=9), clio_uri=VERSION_C)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3, ("Head", "Pepe Hat"): 1}
+    assert es.get_closet_applied_position(conn, "rUser") == (1005, 9)
+
+
+def test_same_ledger_event_applies_over_a_ledger_only_stamp():
+    """A #522 stamp has no tx index, so a same-ledger event cannot be ordered
+    against it; it applies, as every same-ledger event did before #537."""
+    conn = _conn()
+    es.set_closet_token(
+        conn, "rUser", CLOSET_ID, VERSION_C, status=bt.ACTIVE, applied_ledger_index=1005
+    )
+    es.set_closet_contents(conn, "rUser", _CLOSET_VERSIONS[VERSION_C], [])
+
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1005, tx_index=4), clio_uri=VERSION_B)
+
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)
+    assert es.get_closet_applied_position(conn, "rUser") == (1005, 4)
+
+
+# --- #535: a mirror's contents and the version it claims commit together ---
+
+
+def _crash(*_a, **_k):
+    raise sqlite3.OperationalError("disk I/O error")
+
+
+def test_listener_rebuild_and_its_stamp_commit_together(monkeypatch):
+    """The contents rebuilt from version B and the record naming B (URI + stamp)
+    describe one version. A failure between the two writes must leave neither,
+    never B's contents under version A's record."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_A, 1000, tx_index=1), clio_uri=VERSION_A)
+
+    monkeypatch.setattr(es, "set_closet_token", _crash)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1005, tx_index=3), clio_uri=VERSION_B)
+    monkeypatch.undo()
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 2}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_A)
+    assert es.get_closet_applied_position(conn, "rUser") == (1000, 1)
+
+
+def test_flow_closet_write_and_its_stamp_commit_together(monkeypatch):
+    """A flow's own Closet modify committed on-chain; its mirror write of that
+    version (contents + URI + stamp) is one transaction. If the contents write
+    fails, the record must not name the new version over the old contents — the
+    guard would read that mirror as current and the next flow would erase the
+    new version on-chain."""
+    from lfg_core import economy_flow as ef
+
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_A, 1000, tx_index=1), clio_uri=VERSION_A)
+
+    async def upload(meta):
+        return "https://cdn/closets/b.json"
+
+    async def modify(nft_id, owner, url):
+        return bt.ModifyReceipt(tx_hash="FLOWB", ledger_index=1005, transaction_index=3)
+
+    deps = ef.EconomyDeps(
+        conn=conn,
+        closet_upload_fn=upload,
+        closet_mint_fn=None,
+        closet_offer_fn=None,
+        closet_accept_fn=None,
+        closet_modify_fn=modify,
+        char_compose_fn=None,
+        char_mint_fn=None,
+        char_modify_fn=None,
+        char_burn_fn=None,
+        char_offer_fn=None,
+        char_accept_fn=None,
+    )
+    monkeypatch.setattr(es, "set_closet_contents", _crash)
+    try:
+        _run(ef._sync_then_persist(deps, "rUser", {("Body", "Ape Xray"): 3}))
+    except bt.ClosetMirrorError as e:
+        assert e.tx_hash == "FLOWB"  # committed on-chain; only the mirror write failed
+    else:
+        raise AssertionError("expected ClosetMirrorError")
+    monkeypatch.undo()
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 2}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_A)
+    assert es.get_closet_applied_position(conn, "rUser") == (1000, 1)
+
+
+def test_listener_dates_a_flow_version_left_undated_and_clears_pending():
+    """#536, second half: a flow whose own Closet modify could not be dated left
+    the mirror at the previous version and flagged it pending (flows refuse to
+    overwrite a pending mirror). The listener then reaches that modify's tx,
+    which carries both the URI and the position, and brings the mirror current."""
+    conn = _conn()
+    es.set_closet_token(conn, "rUser", CLOSET_ID, VERSION_A, status=bt.ACTIVE)
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_A, 1000, tx_index=1), clio_uri=VERSION_A)
+    es.set_mirror_pending(conn, "rUser", True)
+
+    _apply_closet_tx(conn, _closet_tx("modify", VERSION_B, 1005, tx_index=3), clio_uri=VERSION_A)
+
+    assert _closet_contents(conn) == {("Body", "Ape Xray"): 3}
+    assert es.get_closet_token(conn, "rUser") == (CLOSET_ID, VERSION_B)
+    assert es.get_closet_applied_position(conn, "rUser") == (1005, 3)
+    assert not es.get_mirror_pending(conn, "rUser")

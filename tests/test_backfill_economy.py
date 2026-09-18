@@ -423,7 +423,7 @@ def test_archive_lookup_crash_skips_the_stamp_not_the_run(tmp_path, monkeypatch)
     def boom(*a, **k):
         raise TypeError("malformed archive row")
 
-    monkeypatch.setattr(be.history_store, "uri_version_ledger", boom)
+    monkeypatch.setattr(be.history_store, "uri_version_position", boom)
     enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
     fetch = _meta({version_c: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
 
@@ -431,3 +431,51 @@ def test_archive_lookup_crash_skips_the_stamp_not_the_run(tmp_path, monkeypatch)
 
     assert stats["closets_applied"] == 1  # the run completed and rebuilt the Closet
     assert es.get_closet_applied_ledger(conn, OWNER) is None  # just left undated
+
+
+def test_rebuild_dates_the_version_it_wrote_with_its_archived_tx_index(tmp_path):
+    """#537: the re-dating carries the archived version's TransactionIndex, so a
+    same-ledger older modify the listener reaches later is still refused."""
+    conn = _conn(tmp_path)
+    version_c = closet_uri("c")
+    archive = closet_archive(
+        tmp_path,
+        "CLOSET1",
+        [("modify", closet_uri("b"), 1005, 2), ("modify", version_c, 1005, 7)],
+    )
+
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta({version_c: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
+
+    assert es.get_closet_applied_position(conn, OWNER) == (1005, 7)
+
+
+def test_rebuild_and_its_redating_commit_together(tmp_path, monkeypatch):
+    """#535: the rebuilt contents, the token record and the re-dated stamp are
+    one version's mirror, so a failure part-way leaves the old mirror whole."""
+    conn = _conn(tmp_path)
+    version_b, version_c = closet_uri("b"), closet_uri("c")
+    es.set_closet_token(
+        conn, OWNER, "CLOSET1", version_b, status=ct.ACTIVE, applied_ledger_index=1000
+    )
+    es.set_closet_contents(conn, OWNER, [("Hat", "Old", 1)], [])
+    archive = closet_archive(
+        tmp_path, "CLOSET1", [("modify", version_b, 1000), ("modify", version_c, 1005)]
+    )
+
+    def crash(*_a, **_k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(be.economy_store, "set_closet_applied_ledger", crash)
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, version_c)]})
+    fetch = _meta({version_c: ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])})
+    with pytest.raises(sqlite3.OperationalError):
+        _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER, history_db_path=archive))
+    monkeypatch.undo()
+
+    assert {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER} == {
+        ("Hat", "Old"): 1
+    }
+    assert es.get_closet_token(conn, OWNER) == ("CLOSET1", version_b)
+    assert es.get_closet_applied_position(conn, OWNER) == (1000, None)

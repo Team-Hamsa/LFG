@@ -157,10 +157,22 @@ def connect_readonly(path: str) -> sqlite3.Connection:
 @dataclass(frozen=True)
 class UriVersion:
     """An archived URI-setting event (NFTokenMint or NFTokenModify) of one token:
-    the ledger it validated in and the URI it set (None when the tx set none)."""
+    the ledger it validated in, the URI it set (None when the tx set none), and
+    its TransactionIndex in that ledger (#537; None when the archived tx carries
+    no usable one)."""
 
     ledger_index: int
     uri_hex: str | None
+    transaction_index: int | None = None
+
+
+# The archived tx's TransactionIndex (#537), NULL unless a non-negative integer:
+# a text or fractional value must never order against a real index.
+_TX_INDEX_SQL = (
+    "CASE WHEN json_type(t.raw_json, '$.meta.TransactionIndex') = 'integer'"
+    " AND json_extract(t.raw_json, '$.meta.TransactionIndex') >= 0"
+    " THEN json_extract(t.raw_json, '$.meta.TransactionIndex') END"
+)
 
 
 def latest_uri_version(conn: sqlite3.Connection, nft_id: str) -> UriVersion | None:
@@ -168,33 +180,42 @@ def latest_uri_version(conn: sqlite3.Connection, nft_id: str) -> UriVersion | No
 
     The listener derives these rows from the tx stream itself, so they are the
     chain-side reference for a Closet's newest version — unlike clio nft_info,
-    which can lag a validated modify (#522)."""
+    which can lag a validated modify (#522). Versions validated in one ledger
+    order by their TransactionIndex (#537)."""
     row = conn.execute(
-        "SELECT e.ledger_index, json_extract(t.raw_json, '$.URI')"
+        f"SELECT e.ledger_index, json_extract(t.raw_json, '$.URI'), {_TX_INDEX_SQL}"
         " FROM nft_events e JOIN xrpl_txs t ON t.tx_hash = e.tx_hash"
         " WHERE e.nft_id = ? AND e.event IN ('mint', 'modify') AND e.ledger_index IS NOT NULL"
-        " ORDER BY e.ledger_index DESC LIMIT 1",
+        " ORDER BY e.ledger_index DESC, 3 DESC LIMIT 1",
         (nft_id,),
     ).fetchone()
     if row is None:
         return None
     uri = row[1]
     return UriVersion(
-        ledger_index=int(row[0]), uri_hex=uri if isinstance(uri, str) and uri else None
+        ledger_index=int(row[0]),
+        uri_hex=uri if isinstance(uri, str) and uri else None,
+        transaction_index=None if row[2] is None else int(row[2]),
     )
 
 
-def uri_version_ledger(conn: sqlite3.Connection, nft_id: str, uri_hex: str) -> int | None:
-    """The newest ledger at which the archive saw `nft_id` set to `uri_hex`
-    (hex compared case-insensitively), or None if it never saw that URI."""
+def uri_version_position(
+    conn: sqlite3.Connection, nft_id: str, uri_hex: str
+) -> tuple[int, int | None] | None:
+    """The newest (ledger, tx index) at which the archive saw `nft_id` set to
+    `uri_hex` (hex compared case-insensitively; the tx index is None when the
+    archived tx carries none, #537), or None if it never saw that URI."""
     row = conn.execute(
-        "SELECT MAX(e.ledger_index)"
+        f"SELECT e.ledger_index, {_TX_INDEX_SQL}"
         " FROM nft_events e JOIN xrpl_txs t ON t.tx_hash = e.tx_hash"
-        " WHERE e.nft_id = ? AND e.event IN ('mint', 'modify')"
-        " AND upper(json_extract(t.raw_json, '$.URI')) = upper(?)",
+        " WHERE e.nft_id = ? AND e.event IN ('mint', 'modify') AND e.ledger_index IS NOT NULL"
+        " AND upper(json_extract(t.raw_json, '$.URI')) = upper(?)"
+        " ORDER BY e.ledger_index DESC, 2 DESC LIMIT 1",
         (nft_id, uri_hex),
     ).fetchone()
-    return None if row is None or row[0] is None else int(row[0])
+    if row is None:
+        return None
+    return int(row[0]), None if row[1] is None else int(row[1])
 
 
 def init_history_db(path: str) -> sqlite3.Connection:

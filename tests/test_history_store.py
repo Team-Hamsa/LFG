@@ -206,14 +206,44 @@ def test_latest_uri_version_is_the_newest_archived_mint_or_modify(tmp_path):
     assert history_store.latest_uri_version(conn, "UNKNOWN") is None
 
 
-def test_uri_version_ledger_is_where_the_archive_saw_that_uri_set(tmp_path):
+def test_uri_version_position_is_where_the_archive_saw_that_uri_set(tmp_path):
 
     conn = _closet_history(tmp_path)
 
-    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("a")) == 100
-    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("b").lower()) == 103
-    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("z")) is None
-    assert history_store.uri_version_ledger(conn, "CLOSET1", closet_uri("never")) is None
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("a")) == (100, None)
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("b").lower()) == (
+        103,
+        None,
+    )
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("z")) is None
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("never")) is None
+
+
+def _same_ledger_closet_history(tmp_path):
+    """#537: two Closet modifies validated in ONE ledger (105), archived in the
+    reverse of their TransactionIndex order."""
+    conn = _conn(tmp_path)
+    archive_tx(conn, closet_version_tx("mint", "CLOSET1", closet_uri("a"), 100, tx_index=2))
+    archive_tx(conn, closet_version_tx("modify", "CLOSET1", closet_uri("d"), 105, tx_index=9))
+    archive_tx(conn, closet_version_tx("modify", "CLOSET1", closet_uri("c"), 105, tx_index=4))
+    return conn
+
+
+def test_latest_uri_version_orders_one_ledgers_versions_by_tx_index(tmp_path):
+
+    conn = _same_ledger_closet_history(tmp_path)
+
+    assert history_store.latest_uri_version(conn, "CLOSET1") == history_store.UriVersion(
+        ledger_index=105, uri_hex=closet_uri("d"), transaction_index=9
+    )
+
+
+def test_uri_version_position_carries_the_tx_index(tmp_path):
+
+    conn = _same_ledger_closet_history(tmp_path)
+
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("c")) == (105, 4)
+    assert history_store.uri_version_position(conn, "CLOSET1", closet_uri("d")) == (105, 9)
 
 
 def test_connect_readonly_never_creates_an_archive(tmp_path):

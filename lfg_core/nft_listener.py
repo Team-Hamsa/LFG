@@ -158,6 +158,16 @@ def _tx_ledger_index(tx: dict[str, Any]) -> int | None:
     return None
 
 
+def _tx_index(tx: dict[str, Any]) -> int | None:
+    """The TransactionIndex a normalized stream tx validated at within its ledger
+    (#537), or None when its meta carries no usable one."""
+    meta = tx.get("meta")
+    index = meta.get("TransactionIndex") if isinstance(meta, dict) else None
+    if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+        return index
+    return None
+
+
 def _with_tx_uri(tx: dict[str, Any], kind: str, token: dict[str, Any]) -> dict[str, Any]:
     """`token` with `uri_hex` replaced by the URI this NFTokenMint/NFTokenModify
     set (#522).
@@ -183,6 +193,7 @@ def _apply_closet(
     genesis: trait_economy.Genesis | None = None,
     *,
     ledger_index: int | None = None,
+    tx_index: int | None = None,
 ) -> None:
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
     NFToken's metadata and mark it active — the token is held by its real owner,
@@ -206,17 +217,19 @@ def _apply_closet(
     frozen) leaves that conversion off and behavior unchanged.
 
     `ledger_index` is the validated ledger of the version `token` describes
-    (#522). Versions apply monotonically: one older than the version the mirror
-    already holds is skipped outright, so a late or out-of-order tx can never
-    roll the mirror back. The mirror's own stamp comes from this listener and
-    from the flows' own Closet modifies (`closet_token.sync_closet`)."""
+    (#522) and `tx_index` its TransactionIndex there (#537; None = unknown).
+    Versions apply monotonically by that position: one older than the version
+    the mirror already holds — including an earlier modify from the SAME ledger
+    — is skipped outright, so a late or out-of-order tx can never roll the
+    mirror back. The mirror's own stamp comes from this listener and from the
+    flows' own Closet modifies (`closet_token.sync_closet`)."""
     owner = token.get("owner")
     if not owner:
         return
     if owner in economy_store.project_accounts():
         economy_store.delete_closet(conn, owner)
         return
-    applied = economy_store.get_closet_applied_ledger(conn, owner)
+    applied = economy_store.get_closet_applied_position(conn, owner)
     if applied is not None and ledger_index is None:
         # An event the stream could not date cannot be ordered against the
         # version the mirror holds, and applying it would stamp nothing — the
@@ -225,59 +238,81 @@ def _apply_closet(
         # protect, so it still applies.)
         logging.warning(
             f"_apply_closet: undated event for {token.get('nft_id')} cannot be ordered against "
-            f"the ledger-{applied} version mirrored for {owner}; keeping the mirror"
+            f"the ledger-{applied[0]} version mirrored for {owner}; keeping the mirror"
         )
         return
-    if ledger_index is not None and applied is not None and ledger_index < applied:
+    if (
+        ledger_index is not None
+        and applied is not None
+        and closet_token.version_is_newer(applied, (ledger_index, tx_index))
+    ):
         logging.info(
-            f"_apply_closet: {token.get('nft_id')} version from ledger {ledger_index} is older "
-            f"than the ledger-{applied} version mirrored for {owner}; keeping the mirror"
+            f"_apply_closet: {token.get('nft_id')} version from ledger {ledger_index} "
+            f"(tx {tx_index}) is older than the version mirrored for {owner} (ledger "
+            f"{applied[0]}, tx {applied[1]}); keeping the mirror"
         )
         return
     resolved = isinstance(metadata, dict)
-    if resolved:
-        if closet_market_store.has_recent_fill(conn, owner):
-            # #443: a Closet Market fill moved a unit in the DB first; this
-            # owner's token metadata is behind until the fill's mirror modify
-            # lands (and clio may lag a few minutes past that). Rebuilding
-            # now would resurrect the moved unit.
-            logging.info(
-                f"_apply_closet: {owner} has a recent Closet Market fill; keeping DB contents"
-            )
-        else:
+    # Whether the record (URI + stamp) may name this version: only when the
+    # mirror's contents ARE this version's (#522/#535).
+    names_version = resolved
+    # The contents and the record naming their version commit together (#535).
+    with economy_store.closet_mirror_write(conn):
+        if isinstance(metadata, dict):
             assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
-            economy_store.set_closet_contents(conn, owner, assets, bodies)
-    else:
-        # Fail closed on UNRESOLVED metadata (fetch returned None — RPC/IPFS
-        # failure or a #345 side-call timeout): rebuilding from {} would wipe
-        # the owner's persisted closet rows. A real Closet token always carries
-        # a metadata dict (an empty closet is an empty lfg_closet block, not a
-        # missing one), so None can only mean "couldn't read" — keep the
-        # persisted contents and let a later modify/sync refine them. The
-        # token record below still updates: the owner resolved, and a
-        # user-held Closet is an accepted one regardless of what its
-        # metadata says.
-        logging.warning(
-            f"_apply_closet: unresolved metadata for {token.get('nft_id')}; "
-            "keeping persisted closet contents (fail closed)"
+            if closet_market_store.has_recent_fill(conn, owner):
+                # #443: a Closet Market fill moved a unit in the DB first; this
+                # owner's token metadata is behind until the fill's mirror modify
+                # lands (and clio may lag a few minutes past that). Rebuilding
+                # now would resurrect the moved unit. The kept contents may still
+                # BE this version (the settlement wrote it from them, and only its
+                # record write failed) — then the record names it. Otherwise it
+                # must not: this version holds a change the kept contents lack
+                # (a flow modify that came back indeterminate but landed), and a
+                # record claiming it would let the next full overwrite erase that
+                # change on-chain. Unnamed, the stale-mirror guard sees the mirror
+                # as behind and every overwrite waits.
+                names_version = economy_store.closet_holds_contents(conn, owner, assets, bodies)
+                logging.info(
+                    f"_apply_closet: {owner} has a recent Closet Market fill; keeping DB contents"
+                    + ("" if names_version else " and the version they hold")
+                )
+            else:
+                economy_store.set_closet_contents(conn, owner, assets, bodies, commit=False)
+        else:
+            # Fail closed on UNRESOLVED metadata (fetch returned None — RPC/IPFS
+            # failure or a #345 side-call timeout): rebuilding from {} would wipe
+            # the owner's persisted closet rows. A real Closet token always carries
+            # a metadata dict (an empty closet is an empty lfg_closet block, not a
+            # missing one), so None can only mean "couldn't read" — keep the
+            # persisted contents and let a later modify/sync refine them. The
+            # token record below still updates: the owner resolved, and a
+            # user-held Closet is an accepted one regardless of what its
+            # metadata says.
+            logging.warning(
+                f"_apply_closet: unresolved metadata for {token.get('nft_id')}; "
+                "keeping persisted closet contents (fail closed)"
+            )
+        existing = economy_store.get_closet_record(conn, owner)
+        existing_offer_id = existing[3] if existing is not None else None
+        uri_hex = token.get("uri_hex") or ""
+        if not names_version and existing is not None:
+            # The contents stayed at the version already mirrored, so its URI
+            # stays too (#522): naming the unread (or unheld) version over them
+            # would make a mirror that is behind the chain look current to the
+            # flows' stale-mirror guard.
+            uri_hex = existing[1]
+        economy_store.set_closet_token(
+            conn,
+            owner,
+            token["nft_id"],
+            uri_hex,
+            status=closet_token.ACTIVE,
+            offer_id=existing_offer_id,
+            applied_ledger_index=ledger_index if names_version else None,
+            applied_tx_index=tx_index if names_version else None,
+            commit=False,
         )
-    existing = economy_store.get_closet_record(conn, owner)
-    existing_offer_id = existing[3] if existing is not None else None
-    uri_hex = token.get("uri_hex") or ""
-    if not resolved and existing is not None:
-        # The contents stayed at the version already mirrored, so its URI stays
-        # too (#522): naming the unread version over them would make a mirror
-        # that is behind the chain look current to the flows' stale-mirror guard.
-        uri_hex = existing[1]
-    economy_store.set_closet_token(
-        conn,
-        owner,
-        token["nft_id"],
-        uri_hex,
-        status=closet_token.ACTIVE,
-        offer_id=existing_offer_id,
-        applied_ledger_index=ledger_index if resolved else None,
-    )
 
 
 def _apply_trait_token(
@@ -482,7 +517,14 @@ async def apply_economy_tx(
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
             if is_closet:
-                _apply_closet(conn, token, metadata, genesis, ledger_index=_tx_ledger_index(tx))
+                _apply_closet(
+                    conn,
+                    token,
+                    metadata,
+                    genesis,
+                    ledger_index=_tx_ledger_index(tx),
+                    tx_index=_tx_index(tx),
+                )
             elif taxon == config.TRAIT_TAXON:
                 if kind == "accept":
                     token = _with_accept_tx_owner(tx, nft_id, token)
