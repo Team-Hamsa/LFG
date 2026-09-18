@@ -955,6 +955,36 @@ def test_late_recheck_gives_up_at_its_cap(monkeypatch, tmp_path):
     assert _late_records(tmp_path, row["id"], HASH) == []
 
 
+def test_one_wallet_cannot_fill_every_recheck_slot(monkeypatch):
+    """The global ceiling alone would let one caller with a resolved row of
+    their own hold every slot for minutes, so another wallet's genuine late
+    payment would never be re-checked. Each wallet gets its own share."""
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_PER_WALLET", 1)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_INFLIGHT", 32)
+    monkeypatch.setattr(app, "_LATE_RECHECK_MAX_SECONDS", 30)
+    _fake_tx(monkeypatch, result=_not_validated())
+    hog = {"id": "wc-hog", "wallet": DEV_OWNER, "state": "cancelled", "txjson": _mint_payment()}
+    other = {"id": "wc-other", "wallet": OTHER, "state": "cancelled", "txjson": _mint_payment()}
+
+    async def go():
+        for tx_hash in ("B" * 64, "C" * 64):
+            app._spawn_late_signature_recheck(hog, tx_hash, None)
+        held_by_one_wallet = len(app._late_signature_rechecks)
+        app._spawn_late_signature_recheck(other, "D" * 64, None)
+        after_other = len(app._late_signature_rechecks)
+        rechecks = list(app._late_signature_rechecks.values())
+        for recheck in rechecks:
+            recheck.cancel()
+        for recheck in rechecks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await recheck
+        return held_by_one_wallet, after_other
+
+    held_by_one_wallet, after_other = _run(go())
+    assert held_by_one_wallet == 1  # the second hash from that wallet got no slot
+    assert after_other == 2  # and another wallet still gets one
+
+
 def test_late_rechecks_are_capped(monkeypatch, tmp_path, caplog):
     """POST /api/sign/{id}/result is unmetered per-request work, and each
     re-check polls the ledger for minutes. One caller posting distinct hashes

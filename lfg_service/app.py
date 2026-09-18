@@ -9722,7 +9722,11 @@ _LATE_RECHECK_MAX_SECONDS = 180.0
 # N pollers running for minutes, each spending ledger lookups. Past the
 # ceiling a late hash is still logged and answered; it just is not re-checked.
 _LATE_RECHECK_MAX_INFLIGHT = 32
-_late_signature_rechecks: dict[tuple[str, str], asyncio.Task[None]] = {}
+# …and a per-wallet share of that ceiling, so filling it is not a way to stop
+# everyone else's late payments from being re-checked. Keyed by wallet so one
+# caller's several resolved rows count together.
+_LATE_RECHECK_MAX_PER_WALLET = 4
+_late_signature_rechecks: dict[tuple[str, str, str], asyncio.Task[None]] = {}
 
 
 def _save_late_signature_record(
@@ -9830,8 +9834,16 @@ def _spawn_late_signature_recheck(
     """Start the bounded background re-check for a late hash that had not
     validated when it was posted. One per (request, hash): reposts share it.
     Tracked so it is never GC'd mid-poll and on_cleanup can cancel it."""
-    key = (row["id"], tx_hash)
+    wallet = row["wallet"]
+    key = (wallet, row["id"], tx_hash)
     if key in _late_signature_rechecks:
+        return
+    mine = sum(1 for held, _request, _hash in _late_signature_rechecks if held == wallet)
+    if mine >= _LATE_RECHECK_MAX_PER_WALLET:
+        logging.warning(
+            f"late signature re-check for {tx_hash} not scheduled: "
+            f"{wallet} already has {mine} in flight"
+        )
         return
     if len(_late_signature_rechecks) >= _LATE_RECHECK_MAX_INFLIGHT:
         logging.warning(
