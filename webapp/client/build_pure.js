@@ -203,6 +203,70 @@ export function missingSlots(slots, slotOptions) {
   return slots.filter((s) => !(slotOptions[s] || []).length);
 }
 
+// --- Layered preview (T31 defect 1) -------------------------------------
+// The single stacking order every layered preview (Dressing Room canvas,
+// Assemble builder) must use. `order` is economyState.trait_order (mirrors
+// swap_meta.TRAIT_ORDER server-side — Body sits between Back and Clothing,
+// NOT painted first); `valuesBySlot` is a {slot: value} map that must
+// include "Body" alongside the trait slots. Returns the [{slot, value}, ...]
+// pairs to actually draw, bottom layer first, dropping any slot that is
+// unset or explicitly "None". A caller that force-prepends Body (or
+// otherwise re-derives its own order) is a second, divergent stacker.
+export function orderedLayers(order, valuesBySlot) {
+  const values = valuesBySlot || {};
+  return (order || [])
+    .map((slot) => ({ slot, value: values[slot] }))
+    .filter(({ value }) => Boolean(value) && value !== 'None');
+}
+
+// --- Body switch keeps valid traits (T31 defect 2) -----------------------
+// `slotOptions` is opts.options[newBody] from /api/assemble/options — the
+// server's own body-affinity-filtered legal-value list per slot (the SAME
+// swap_compose.resolve_layer cross-body matrix check the equip/swap paths
+// enforce, see economy_api._require_body_affinity). A previously staged
+// value that still appears there survives untouched; one that does not is
+// reported in `dropped` and replaced by that slot's default (the same
+// first-legal-value rule defaultChosen applies to a fresh pick), so `chosen`
+// stays a complete map matching what every <select> visibly shows. A slot
+// that was never chosen is never reported as dropped.
+export function carryOverChosen(slots, slotOptions, previousChosen) {
+  const prev = previousChosen || {};
+  const fallback = defaultChosen(slots, slotOptions);
+  const chosen = {};
+  const dropped = [];
+  for (const slot of slots) {
+    const legal = slotOptions[slot] || [];
+    const prevVal = prev[slot];
+    if (prevVal != null && legal.includes(prevVal)) {
+      chosen[slot] = prevVal;
+      continue;
+    }
+    if (prevVal != null) dropped.push(slot);
+    if (fallback[slot] != null) chosen[slot] = fallback[slot];
+  }
+  return { chosen, dropped };
+}
+
+// User-facing summary for carryOverChosen's `dropped` list; null when
+// nothing was dropped (no notice to show).
+export function dropNoticeText(dropped) {
+  const n = (dropped || []).length;
+  if (!n) return null;
+  const noun = n === 1 ? 'trait' : 'traits';
+  const verb = n === 1 ? "doesn't" : "don't";
+  const was = n === 1 ? 'was' : 'were';
+  return `${n} ${noun} ${verb} fit this body and ${was} cleared.`;
+}
+
+// --- Pickers collapse after a choice (T31 defect 3) -----------------------
+// Disclosure state for a Builder step (pick a blank / pick a body): expanded
+// while nothing is picked yet (there is nothing to collapse to), or when the
+// user explicitly forced it back open to change their pick; collapsed to a
+// one-line summary once a pick exists and nobody forced it open.
+export function stepExpanded(picked, forcedOpen) {
+  return Boolean(forcedOpen) || !picked;
+}
+
 // #316: classify a terminal equip session for the Build save UX.
 // "committed"  — new traits are on-ledger; apply the save locally.
 // "uncertain"  — outcome unknown (equip_sync_indeterminate / failed_revert);

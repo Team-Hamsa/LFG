@@ -3662,8 +3662,9 @@ function renderCanvas(char) {
   // Draw staged (unsaved) changes, not just what is on-ledger.
   const shown = buildPure.applyPending(char.attributes, pending());
   const byType = Object.fromEntries(shown.map((a) => [a.trait_type, a.value]));
-  for (const slot of order) {
-    const value = byType[slot];
+  // Same shared stacker the Assemble builder's preview uses (#T31 defect 1)
+  // — one z-order implementation, not two.
+  for (const { slot, value } of buildPure.orderedLayers(order, byType)) {
     if (!layerComplete(char.body, value)) continue;
     canvas.appendChild(layerMediaEl(layerSrc(char.body, slot, value), ''));
   }
@@ -4658,6 +4659,12 @@ function openBuilder(opts, preselectNftId) {
     blank: buildPure.pickBuilderBlank(opts.blanks, preselectNftId),
     body: null,
     chosen: {},
+    dropNotice: null,
+    // #T31: each step starts collapsible-but-not-forced-open — it stays
+    // (or starts) expanded regardless while nothing is picked yet; see
+    // buildPure.stepExpanded.
+    blankForceOpen: false,
+    bodyForceOpen: false,
   };
   overlay.hidden = false;
   const onKey = (e) => { if (e.key === 'Escape') closeBuilder(); };
@@ -4686,58 +4693,139 @@ function builderStepTitle(text) {
   return h;
 }
 
+// #T31 defect 3: once a step has something picked, its heading becomes a
+// disclosure button — a one-line summary that reopens the step on click,
+// with native Enter/Space (it's a real <button>) and aria-expanded/
+// aria-controls tracking the grid it toggles. Steps with nothing picked yet
+// keep the plain (non-interactive) builderStepTitle — there is nothing to
+// collapse to.
+function builderStepHeader(text, expanded, controlsId, headerId, onToggle) {
+  const h = document.createElement('h3');
+  h.className = 'builder-step-title';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = headerId;
+  btn.className = 'builder-step-toggle';
+  btn.setAttribute('aria-expanded', String(expanded));
+  btn.setAttribute('aria-controls', controlsId);
+  btn.textContent = text;
+  btn.onclick = onToggle;
+  h.appendChild(btn);
+  return h;
+}
+
+// Greptile finding on #532: renderBuilder() rebuilds the whole builder
+// subtree, so any element that held keyboard focus (the toggle just
+// pressed, or the tile just picked) is destroyed and focus silently reverts
+// to <body>. Every handler that calls renderBuilder() from inside a step
+// re-focuses that step's own toggle button (a stable id, present whenever
+// something is picked) right after — the same target whether the step just
+// collapsed (a tile was picked) or is now shown expanded again.
+function focusBuilderStepToggle(headerId) {
+  el(headerId)?.focus();
+}
+
 function builderBlankStep() {
-  const { opts, blank } = builderState;
+  const { opts, blank, blankForceOpen } = builderState;
+  const expanded = buildPure.stepExpanded(blank, blankForceOpen);
   const wrap = document.createElement('div');
   wrap.className = 'builder-step';
-  wrap.appendChild(builderStepTitle('1 · Pick a blank'));
+  wrap.appendChild(blank
+    ? builderStepHeader(
+        expanded ? '1 · Pick a blank' : `1 · Blank: #${blank.edition} (change)`,
+        expanded, 'builder-blank-grid', 'builder-blank-toggle',
+        () => {
+          builderState.blankForceOpen = !expanded;
+          renderBuilder();
+          focusBuilderStepToggle('builder-blank-toggle');
+        },
+      )
+    : builderStepTitle('1 · Pick a blank'));
   const grid = document.createElement('div');
+  grid.id = 'builder-blank-grid';
   grid.className = 'go-picker-grid';
-  for (const b of opts.blanks) {
-    const tile = document.createElement('button');
-    tile.className = 'go-tile' + (blank && blank.nft_id === b.nft_id ? ' active' : '');
-    const img = document.createElement('img');
-    img.src = blankImgSrc(b.nft_id);
-    img.alt = `#${b.edition}`;
-    img.loading = 'lazy';
-    const cap = document.createElement('span');
-    cap.className = 'go-tile-label';
-    cap.textContent = `#${b.edition}`;
-    tile.replaceChildren(img, cap);
-    tile.onclick = () => { builderState.blank = b; renderBuilder(); };
-    grid.appendChild(tile);
+  grid.hidden = !expanded;
+  if (expanded) {
+    for (const b of opts.blanks) {
+      const tile = document.createElement('button');
+      tile.className = 'go-tile' + (blank && blank.nft_id === b.nft_id ? ' active' : '');
+      const img = document.createElement('img');
+      img.src = blankImgSrc(b.nft_id);
+      img.alt = `#${b.edition}`;
+      img.loading = 'lazy';
+      const cap = document.createElement('span');
+      cap.className = 'go-tile-label';
+      cap.textContent = `#${b.edition}`;
+      tile.replaceChildren(img, cap);
+      tile.onclick = () => {
+        builderState.blank = b;
+        builderState.blankForceOpen = false; // collapse: a choice was made
+        renderBuilder();
+        focusBuilderStepToggle('builder-blank-toggle');
+      };
+      grid.appendChild(tile);
+    }
   }
   wrap.appendChild(grid);
   return wrap;
 }
 
 function builderBodyStep() {
-  const { opts, body } = builderState;
+  const { opts, body, bodyForceOpen } = builderState;
+  const expanded = buildPure.stepExpanded(body, bodyForceOpen);
   const wrap = document.createElement('div');
   wrap.className = 'builder-step';
-  wrap.appendChild(builderStepTitle('2 · Pick a body'));
+  wrap.appendChild(body
+    ? builderStepHeader(
+        expanded ? '2 · Pick a body' : `2 · Body: ${body} (change)`,
+        expanded, 'builder-body-grid', 'builder-body-toggle',
+        () => {
+          builderState.bodyForceOpen = !expanded;
+          renderBuilder();
+          focusBuilderStepToggle('builder-body-toggle');
+        },
+      )
+    : builderStepTitle('2 · Pick a body'));
   const grid = document.createElement('div');
+  grid.id = 'builder-body-grid';
   grid.className = 'go-picker-grid';
-  for (const b of opts.bodies) {
-    const cls = opts.body_class[b];
-    const tile = document.createElement('button');
-    tile.className = 'go-tile' + (body === b ? ' active' : '');
-    const media = layerMediaEl(layerSrc(cls, 'Body', b), b);
-    media.loading = 'lazy';
-    const cap = document.createElement('span');
-    cap.className = 'go-tile-label';
-    cap.textContent = b;
-    tile.replaceChildren(media, cap);
-    tile.onclick = () => {
-      builderState.body = b;
-      // Switching body re-defaults the chosen set to that body's first legal
-      // value per slot (a previous body's picks may not be legal here).
-      builderState.chosen = buildPure.defaultChosen(opts.slots, opts.options[b] || {});
-      renderBuilder();
-    };
-    grid.appendChild(tile);
+  grid.hidden = !expanded;
+  if (expanded) {
+    for (const b of opts.bodies) {
+      const cls = opts.body_class[b];
+      const tile = document.createElement('button');
+      tile.className = 'go-tile' + (body === b ? ' active' : '');
+      const media = layerMediaEl(layerSrc(cls, 'Body', b), b);
+      media.loading = 'lazy';
+      const cap = document.createElement('span');
+      cap.className = 'go-tile-label';
+      cap.textContent = b;
+      tile.replaceChildren(media, cap);
+      tile.onclick = () => {
+        // #T31 defect 2: keep every staged trait that is still legal for the
+        // new body (opts.options[b] is the server's own body-affinity-
+        // filtered list — the same cross-body matrix swap/equip enforce);
+        // only the ones that no longer fit are reset, and reported.
+        const slotOptions = opts.options[b] || {};
+        const { chosen, dropped } =
+          buildPure.carryOverChosen(opts.slots, slotOptions, builderState.chosen);
+        builderState.body = b;
+        builderState.chosen = chosen;
+        builderState.dropNotice = buildPure.dropNoticeText(dropped);
+        builderState.bodyForceOpen = false; // collapse: a choice was made
+        renderBuilder();
+        focusBuilderStepToggle('builder-body-toggle');
+      };
+      grid.appendChild(tile);
+    }
   }
   wrap.appendChild(grid);
+  if (builderState.dropNotice) {
+    const notice = document.createElement('p');
+    notice.className = 'builder-drop-notice';
+    notice.textContent = builderState.dropNotice;
+    wrap.appendChild(notice);
+  }
   return wrap;
 }
 
@@ -4820,12 +4908,19 @@ function refreshBuilderPreview() {
   if (!preview) return;
   const { opts, body, chosen } = builderState;
   const cls = opts.body_class[body];
-  const stack = [layerMediaEl(layerSrc(cls, 'Body', body), body)];
-  for (const slot of opts.slots) {
-    const v = chosen[slot];
-    if (v && v !== 'None') stack.push(layerMediaEl(layerSrc(cls, slot, v), `${slot}: ${v}`));
-  }
-  preview.replaceChildren(...stack);
+  // #T31 defect 1: the SAME shared stacker + z-order renderCanvas uses for
+  // the Dressing Room canvas — Body takes its own economyState.trait_order
+  // position (between Back and Clothing) instead of being forced first,
+  // which used to paint e.g. a Background layer over the body. Read
+  // unguarded, same as renderCanvas: every path into the builder already
+  // awaits /api/economy first, so a defensive fallback here would just be
+  // dead code that could silently reintroduce the Body-forced-first bug if
+  // it were ever (wrongly) exercised.
+  const order = economyState.trait_order;
+  const layers = buildPure.orderedLayers(order, { ...chosen, Body: body });
+  preview.replaceChildren(
+    ...layers.map(({ slot, value }) => layerMediaEl(layerSrc(cls, slot, value), `${slot}: ${value}`)),
+  );
 
   const missing = buildPure.missingSlots(opts.slots, opts.options[body] || {});
   const warn = el('builder-warn');

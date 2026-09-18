@@ -465,6 +465,164 @@ def test_save_outcome_missing_session_is_reverted():
 
 
 # ---------------------------------------------------------------------------
+# orderedLayers(order, valuesBySlot) -> [{slot, value}, ...]  (T31 defect 1)
+# The single stacking helper every layered preview (Dressing Room canvas,
+# Assemble builder) must use: walks `order` (economyState.trait_order, i.e.
+# swap_meta.TRAIT_ORDER) and keeps each slot's value in ITS OWN position —
+# Body is never forced to the front, so a Background/Back layer still paints
+# behind it as the canonical z-order requires.
+# ---------------------------------------------------------------------------
+
+
+def test_ordered_layers_follows_order_body_included_in_place():
+    order = "['Background', 'Back', 'Body', 'Clothing']"
+    values = "{'Background': 'Sunset', 'Body': 'male', 'Clothing': 'Jacket'}"
+    result = run_js(f"M.orderedLayers({order}, {values})")
+    assert result == [
+        {"slot": "Background", "value": "Sunset"},
+        {"slot": "Body", "value": "male"},
+        {"slot": "Clothing", "value": "Jacket"},
+    ]
+
+
+def test_ordered_layers_drops_none_and_missing_values():
+    order = "['Background', 'Back', 'Body']"
+    values = "{'Background': 'None', 'Body': 'male'}"
+    result = run_js(f"M.orderedLayers({order}, {values})")
+    assert result == [{"slot": "Body", "value": "male"}]
+
+
+def test_ordered_layers_body_can_sort_behind_a_later_slot():
+    # Regression for the actual bug: Body must NOT always be first — here it
+    # is deliberately last in `order` and must render last (on top).
+    order = "['Clothing', 'Body']"
+    values = "{'Clothing': 'Jacket', 'Body': 'male'}"
+    result = run_js(f"M.orderedLayers({order}, {values})")
+    assert result == [
+        {"slot": "Clothing", "value": "Jacket"},
+        {"slot": "Body", "value": "male"},
+    ]
+
+
+def test_ordered_layers_empty_order_is_empty():
+    assert run_js("M.orderedLayers([], {'Body': 'male'})") == []
+
+
+def test_ordered_layers_null_values_map_is_empty():
+    assert run_js("M.orderedLayers(['Background', 'Body'], null)") == []
+
+
+def test_ordered_layers_falsy_string_value_is_dropped():
+    order = "['Background', 'Body']"
+    values = "{'Background': '', 'Body': 'male'}"
+    result = run_js(f"M.orderedLayers({order}, {values})")
+    assert result == [{"slot": "Body", "value": "male"}]
+
+
+# ---------------------------------------------------------------------------
+# carryOverChosen(slots, slotOptions, previousChosen) -> {chosen, dropped}
+# (T31 defect 2) Body switch: keep every staged selection still legal for the
+# new body (per slotOptions — the server's own body-affinity-filtered list,
+# same as defaultChosen consumes); a selection that no longer fits falls back
+# to that slot's default the same way a fresh pick would, and is reported in
+# `dropped` so the caller can tell the user what changed.
+# ---------------------------------------------------------------------------
+
+
+def test_carry_over_keeps_every_still_legal_selection():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': ['Wizard Hat', 'Cap'], 'Eyes': ['Blue', 'Green']}"
+    previous = "{'Hat': 'Cap', 'Eyes': 'Blue'}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, {previous})")
+    assert result == {"chosen": {"Hat": "Cap", "Eyes": "Blue"}, "dropped": []}
+
+
+def test_carry_over_drops_and_defaults_an_incompatible_selection():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': ['Blue', 'Green']}"
+    previous = "{'Hat': 'Cap', 'Eyes': 'Blue'}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, {previous})")
+    assert result == {"chosen": {"Hat": "Wizard Hat", "Eyes": "Blue"}, "dropped": ["Hat"]}
+
+
+def test_carry_over_first_pick_has_nothing_to_drop():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': ['Blue']}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, {{}})")
+    assert result == {"chosen": {"Hat": "Wizard Hat", "Eyes": "Blue"}, "dropped": []}
+
+
+def test_carry_over_drops_a_slot_with_no_options_on_the_new_body():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': [], 'Eyes': ['Blue']}"
+    previous = "{'Hat': 'Cap', 'Eyes': 'Blue'}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, {previous})")
+    assert result == {"chosen": {"Eyes": "Blue"}, "dropped": ["Hat"]}
+
+
+def test_carry_over_null_previous_is_treated_as_empty():
+    slots = "['Hat']"
+    slotOptions = "{'Hat': ['Wizard Hat']}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, null)")
+    assert result == {"chosen": {"Hat": "Wizard Hat"}, "dropped": []}
+
+
+def test_carry_over_never_drops_a_slot_that_was_never_chosen():
+    # The new body simply has no options for a slot the user hadn't touched
+    # yet -- that is not a "cleared selection" and must not be reported.
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': []}"
+    previous = "{'Hat': 'Wizard Hat'}"
+    result = run_js(f"M.carryOverChosen({slots}, {slotOptions}, {previous})")
+    assert result == {"chosen": {"Hat": "Wizard Hat"}, "dropped": []}
+
+
+# ---------------------------------------------------------------------------
+# dropNoticeText(dropped) -> string | null  (T31 defect 2)
+# ---------------------------------------------------------------------------
+
+
+def test_drop_notice_text_empty_is_null():
+    assert run_js("M.dropNoticeText([])") is None
+    assert run_js("M.dropNoticeText(null)") is None
+
+
+def test_drop_notice_text_singular():
+    assert run_js("M.dropNoticeText(['Hat'])") == "1 trait doesn't fit this body and was cleared."
+
+
+def test_drop_notice_text_plural():
+    result = run_js("M.dropNoticeText(['Hat', 'Eyes'])")
+    assert result == "2 traits don't fit this body and were cleared."
+
+
+# ---------------------------------------------------------------------------
+# stepExpanded(picked, forcedOpen) -> bool  (T31 defect 3)
+# A Builder step (pick a blank / pick a body) starts expanded until something
+# is picked, then collapses to a summary -- unless the user forced it back
+# open, which always wins.
+# ---------------------------------------------------------------------------
+
+
+def test_step_expanded_nothing_picked_is_always_expanded():
+    assert run_js("M.stepExpanded(null, false)") is True
+    assert run_js("M.stepExpanded(null, true)") is True
+
+
+def test_step_expanded_collapses_once_picked():
+    assert run_js("M.stepExpanded({nft_id: 'A'}, false)") is False
+
+
+def test_step_expanded_forced_open_wins_even_when_picked():
+    assert run_js("M.stepExpanded({nft_id: 'A'}, true)") is True
+
+
+def test_step_expanded_works_with_string_picks():
+    assert run_js("M.stepExpanded('male', false)") is False
+    assert run_js("M.stepExpanded('', false)") is True  # empty string = nothing picked
+
+
+# ---------------------------------------------------------------------------
 # renderCloset() equip gating for a BLANK character (#523)
 # The Closet grid is the ONLY door to stagePendingEquip(), so its `compatible`
 # check is where a blank has to be stopped client-side. It must exclude blanks
