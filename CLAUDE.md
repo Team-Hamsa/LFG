@@ -1417,6 +1417,14 @@ Off-ledger trait order book for loose Closet assets. Design:
   decrement: `available = closet_assets.count − open/matched asks − pre-move
   holder fills` (`closet_market_store.encumbrance`). Equip/Assemble/Extract
   refuse listed units (`economy_flow._listed_error`).
+- **Browse > Traits lists open asks beside the NFT trait listings.**
+  `handle_market_listings` (kind=trait, `closet_market_enabled()`) reads them
+  fresh on every request, never from the 60 s cache, as `source: "closet"`
+  rows (`order_id`, no `nft_id`/`offer_index`), then filters, sorts and groups
+  them with the NFT rows. Sort ties break on `market_store.listing_key`
+  (offer_index, or `closet:<id>`). The client's Buy sends them to `POST
+  /api/closet/ask/{id}/buy`; the Wanted tab is bids only. Dev mock mode stays
+  NFT-only. Moving the NFT trait listings themselves into the Closet market is #548.
 - **Bids** lock BRIX in an XRPL TokenEscrow to the app wallet with a
   PREIMAGE-SHA-256 condition (`lfg_core/crypto_condition.py`); the fulfillment
   is Fernet-sealed with `CLOSET_MARKET_ENC_KEY`. Bids open only after the

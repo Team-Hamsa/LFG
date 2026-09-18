@@ -2781,6 +2781,24 @@ def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> st
     return trait_images.trait_image_url(cfg, slot, value)
 
 
+def _closet_ask_listing(order: dict[str, Any]) -> dict[str, Any]:
+    """An open Closet ask in the shape of a trait listing row, so Browse's
+    filters, sorts and grouping treat it like any other listing. It has no NFT
+    and no offer: Buy acts on `order_id` (POST /api/closet/ask/{id}/buy)."""
+    return {
+        "source": "closet",
+        "order_id": order["id"],
+        "offer_index": None,
+        "nft_id": None,
+        "seller": order["owner"],
+        "slot": order["slot"],
+        "value": order["value"],
+        "amount_brix": order["price_brix"],
+        "amount_drops": None,
+        "created_ts": order["created_ts"],
+    }
+
+
 def _serialize_listing_row(
     r: dict[str, Any], kind: str, cfg: trait_config.TraitConfig
 ) -> dict[str, Any]:
@@ -2818,6 +2836,9 @@ def _serialize_listing_row(
             clearing = brokers.clearing_drops(int(r["amount_drops"]), rate)
             out["clearing_drops"] = clearing
             out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
+    if r.get("source") == "closet":
+        out["source"] = "closet"
+        out["order_id"] = r["order_id"]
     # #239 per-kind denomination: characters carry amount_drops/amount_xrp,
     # trait listings amount_brix. Emitted by presence rather than kind so a
     # legacy live XRP trait row (awaiting the backfill's stale-close) still
@@ -2887,6 +2908,10 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     &seller= (#203: only listings by one wallet) — sort additionally accepts
     rarity_desc (#203: collection-wide statistical rarity, characters only;
     trait rows carry no rarity and sort as ties).
+
+    kind=trait also lists open Closet asks when the Closet market is on
+    (source "closet", order_id, no nft_id/offer_index), read fresh each request
+    and filtered, sorted and grouped with the NFT listings.
 
     Cache holds only the canonical unfiltered live join per (network, kind),
     TTL 60s; trait/price filter + sort + pagination run in-process on the
@@ -3032,6 +3057,11 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         filtered = [r for r in rows if not r.get("destination") or r["destination"] in allowed]
     else:
         filtered = [r for r in rows if not r.get("destination")]
+    if kind == "trait" and config.closet_market_enabled():
+        # Closet asks are trait listings too. Read fresh, never cached: a new
+        # ask shows (and a sold one drops) on the next request.
+        asks = await _closet_db(closet_market_store.open_asks)
+        filtered += [_closet_ask_listing(a) for a in asks]
     if min_drops is not None:
         filtered = [
             r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] >= min_drops
@@ -3069,16 +3099,15 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             )
         ]
 
+    listing_key = market_store.listing_key
     if sort == "price_asc":
-        filtered = sorted(filtered, key=lambda r: (market_store.listing_price(r), r["offer_index"]))
+        filtered = sorted(filtered, key=lambda r: (market_store.listing_price(r), listing_key(r)))
     elif sort == "price_desc":
-        filtered = sorted(
-            filtered, key=lambda r: (-market_store.listing_price(r), r["offer_index"])
-        )
+        filtered = sorted(filtered, key=lambda r: (-market_store.listing_price(r), listing_key(r)))
     elif sort == "rarity_desc":  # #203: rarest first; rows without a score last
-        filtered = sorted(filtered, key=lambda r: (-(r.get("rarity_score") or 0), r["offer_index"]))
+        filtered = sorted(filtered, key=lambda r: (-(r.get("rarity_score") or 0), listing_key(r)))
     else:  # newest
-        filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
+        filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), listing_key(r)))
 
     # #481: grouping runs AFTER filter + sort so (a) min/max_brix drop
     # individual offers and empty groups fall away, and (b) group order
@@ -5827,8 +5856,8 @@ def _closet_keys(network: str) -> list[dict[str, Any]]:
 def _with_trait_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach the disk-verified trait-art URL to Closet Market rows (slot,
     value). Without it the client guesses the art under the active
-    character's body, which rarely holds it, and the Wanted / Closet
-    listings / Closet orders chips render blank. Sync (probes the layer
+    character's body, which rarely holds it, and the Wanted and Closet
+    orders chips render blank. Sync (probes the layer
     tree): call it on an executor thread, inside _closet_db. Each distinct
     (slot, value) is probed once per call — many bids can share a key."""
     cfg = trait_config.get_config()

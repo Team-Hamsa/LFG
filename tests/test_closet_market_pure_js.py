@@ -74,24 +74,13 @@ def test_book_row_and_badges():
 
 
 def test_book_row_carries_the_server_image_url():
-    """The Wanted / Closet listings chips render from the VM, so the server's
+    """The Wanted chips render from the VM, so the server's
     disk-verified image_url must survive the mapping; an older server that
     sends none maps to null (the client's body-pinned fallback)."""
     row = {"slot": "Head", "value": "Crown", "best_ask_brix": None, "best_bid_brix": "9"}
     url = "/api/layer?body=shared&trait=Head&value=Crown&thumb=1"
     assert run_js(f"M.mapBookRow({json.dumps({**row, 'image_url': url})})")["imageUrl"] == url
     assert run_js(f"M.mapBookRow({json.dumps(row)})")["imageUrl"] is None
-
-
-def test_best_ask_skips_own():
-    levels = {
-        "asks": [
-            {"id": "A", "owner": "rMe", "price_brix": "1"},
-            {"id": "B", "owner": "rYou", "price_brix": "2"},
-        ]
-    }
-    assert run_js(f"M.bestAskFor({json.dumps(levels)}, 'rMe').id") == "B"
-    assert run_js(f"M.bestAskFor({json.dumps({'asks': []})}, 'rMe')") is None
 
 
 def test_keys_group_by_slot():
@@ -149,4 +138,10 @@ def test_chip_labels():
     )
     assert (
         run_js("M.closetAssetLabel({slot: 'Head', value: 'Crown', count: 3})") == "Head: Crown ×3"
+    )
+
+
+def test_buy_disclosure_names_the_price_and_the_xrp_fallback():
+    assert run_js("M.buyDisclosure('4')") == (
+        "4 BRIX — it goes straight into your Closet. Not enough BRIX? You'll pay in XRP instead."
     )

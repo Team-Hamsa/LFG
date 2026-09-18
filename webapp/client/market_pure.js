@@ -214,6 +214,23 @@ export function badgeLabel(row) {
 }
 
 /**
+ * A listing's unique id, matching the server's market_store.listing_key: the
+ * NFT offer's offer_index, or `closet:<order id>` for a Closet ask (which has
+ * no offer).
+ */
+export function listingKey(row) {
+  return row.offer_index != null ? row.offer_index : `closet:${row.order_id}`;
+}
+
+/**
+ * Whether the signed-in wallet is this listing's seller. The server refuses
+ * to sell you your own listing, so the detail view offers no Buy on it.
+ */
+export function isOwnListing(vm, wallet) {
+  return Boolean(wallet) && vm.seller === wallet;
+}
+
+/**
  * Shape a raw /api/market/listings (or /mine) row into a view-model for the
  * sticker-card grid: a display title, the kind badge, and pass-through
  * fields the renderer needs. Pure — no DOM node is built here.
@@ -236,6 +253,11 @@ export function mapListingRow(row) {
     priceLabel: priceLabel(row),
     seller: row.seller,
     offerIndex: row.offer_index,
+    // A Closet ask sells a trait straight out of the seller's Closet: no NFT,
+    // no offer. Buy acts on its order id instead.
+    closet: row.source === 'closet',
+    orderId: row.order_id ?? null,
+    key: listingKey(row),
     slot: row.slot ?? null,
     value: row.value ?? null,
     nftNumber: row.nft_number ?? null,

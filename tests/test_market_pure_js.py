@@ -708,3 +708,49 @@ def test_build_listings_params_group_flag():
     assert ["group", "1"] in pairs
     pairs = run_js("M.buildListingsParams({kind: 'trait', group: false})")
     assert not any(k == "group" for k, _ in pairs)
+
+
+# --- Browse > Traits merges Closet asks into the trait listings ---
+
+
+def test_listing_key_matches_the_server_convention():
+    """Same key as market_store.listing_key: the offer_index, or
+    closet:<order id> for a Closet ask (which has no offer)."""
+    assert run_js(
+        "[M.listingKey({offer_index: 'AB'}), M.listingKey({offer_index: null, order_id: 'o1'})]"
+    ) == ["AB", "closet:o1"]
+
+
+def test_map_listing_row_marks_a_closet_ask():
+    row = {
+        "kind": "trait",
+        "slot": "Hat",
+        "value": "Cap",
+        "amount_brix": "4",
+        "seller": "rS",
+        "offer_index": None,
+        "nft_id": None,
+        "order_id": "o1",
+        "source": "closet",
+        "buyable": True,
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["closet"] is True and vm["orderId"] == "o1" and vm["key"] == "closet:o1"
+    assert vm["external"] is False and vm["buyable"] is True
+    assert vm["priceLabel"] == "4 BRIX"
+
+
+def test_map_listing_row_nft_listing_is_not_a_closet_ask():
+    row = {"kind": "trait", "slot": "Hat", "value": "Cap", "amount_brix": "4", "offer_index": "AB"}
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["closet"] is False and vm["orderId"] is None and vm["key"] == "AB"
+
+
+def test_is_own_listing_needs_a_signed_in_wallet_that_matches_the_seller():
+    """The server refuses a buy of your own listing (NFT 400 / Closet
+    self_cross), so the detail view must not offer Buy on it."""
+    assert run_js("M.isOwnListing({seller: 'rA'}, 'rA')") is True
+    assert run_js("M.isOwnListing({seller: 'rA'}, 'rB')") is False
+    assert run_js("M.isOwnListing({seller: 'rA'}, null)") is False
+    assert run_js("M.isOwnListing({seller: null}, null)") is False
+    assert run_js("M.isOwnListing({seller: ''}, '')") is False

@@ -956,3 +956,36 @@ class TestGroupTraitRows:
         assert len(hat["offers"]) == 25
         assert hat["offers"][0]["amount_brix"] == "1" and hat["offers"][-1]["amount_brix"] == "25"
         assert hat["floor_brix"] == "1"
+
+
+# --- Browse > Traits shows Closet asks beside NFT listings ---
+
+
+def test_listing_key_is_the_offer_index_or_the_closet_order_id():
+    assert market_store.listing_key({"offer_index": "AB" * 32}) == "AB" * 32
+    assert market_store.listing_key({"offer_index": None, "order_id": "o1"}) == "closet:o1"
+
+
+def test_group_trait_rows_merges_a_closet_ask_at_a_tied_price():
+    """A Closet ask has no offer_index; an equal price must not fall through to
+    comparing None with an NFT listing's offer_index."""
+    nft = {
+        "slot": "Hat",
+        "value": "Cap",
+        "offer_index": "B" * 64,
+        "amount_brix": "5",
+        "destination": None,
+    }
+    ask = {
+        "slot": "Hat",
+        "value": "Cap",
+        "offer_index": None,
+        "order_id": "o1",
+        "source": "closet",
+        "amount_brix": "5",
+        "destination": None,
+    }
+    (group,) = market_store.group_trait_rows([ask, nft])
+    assert group["count"] == 2
+    assert group["floor_brix"] == "5"
+    assert [market_store.listing_key(o) for o in group["offers"]] == ["B" * 64, "closet:o1"]

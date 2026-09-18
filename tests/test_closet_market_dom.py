@@ -23,8 +23,6 @@ def test_markup_has_closet_market_surfaces():
     html = _read("webapp/client/index.html")
     for element_id in (
         "market-book",
-        "closet-book-asks",
-        "closet-book-asks-empty",
         "closet-book-bids",
         "closet-book-bids-empty",
         "closet-bid-new-btn",
@@ -60,7 +58,6 @@ def test_app_js_wires_closet_market():
         "async function openClosetBidForm(",
         "async function placeClosetBid(",
         "async function postClosetAsk(",
-        "async function buyBestClosetAsk(",
         "async function fillClosetBid(",
         "async function cancelClosetOrder(",
         "async function viewClosetFill(",
@@ -236,6 +233,115 @@ def test_closet_ask_other_refusal_reaches_show_error():
     assert len(seen["calls"]) == 1
 
 
+# --- Browse > Traits lists Closet asks beside the NFT trait listings ---
+
+
+def test_wanted_tab_leaves_closet_listings_to_browse():
+    """Closet asks are bought from Browse now; Wanted is bids only."""
+    html = _read("webapp/client/index.html")
+    assert 'id="closet-book-asks"' not in html
+    assert 'id="closet-book-asks-empty"' not in html
+    js = _read("webapp/client/app.js")
+    assert "closet-book-asks" not in js
+    assert "buyBestClosetAsk" not in js
+
+
+def test_listing_detail_tracks_offers_by_listing_key():
+    """A Closet ask has no offer_index, so the offer list and the overlay's
+    request id key on marketPure.listingKey instead."""
+    js = _read("webapp/client/app.js")
+    offers = js[
+        js.index("function renderListingOffers(") : js.index("async function openListingDetail(")
+    ]
+    assert "marketPure.listingKey(o) === activeKey" in offers
+    assert "o.offer_index === activeOfferIndex" not in offers
+    detail = js[
+        js.index("async function openListingDetail(") : js.index("async function loadMarketBrowse(")
+    ]
+    assert "const requestId = vm.key;" in detail
+    assert "renderListingOffers(offers, vm.key, offers, offersTotal)" in detail
+
+
+def _run_open_buy_flow(rows: list) -> dict:
+    """Execute app.js's real openBuyFlow under Node against the real pure
+    modules, with the flow/dialog collaborators stubbed."""
+    if _NODE is None:
+        pytest.skip("node is not installed on this host")
+    js = _read("webapp/client/app.js")
+    start = js.index("async function openBuyFlow(")
+    src = js[start : js.index("\nasync function ", start + 1)]
+    script = (
+        "import * as marketPure from './webapp/client/market_pure.js';\n"
+        "import * as closetPure from './webapp/client/closet_market_pure.js';\n"
+        + src
+        + """
+const seen = { confirms: [], flows: [], errors: [] };
+async function confirmDialog(opts) { seen.confirms.push(opts.text); return true; }
+function closetFillRender() {}
+function marketBuyRender() { return function nftBuyRender() {}; }
+async function marketFlow(kind, path, body, render) {
+  seen.flows.push([kind, path, body, render === closetFillRender ? 'closetFillRender' : render.name]);
+}
+function showError(msg) { seen.errors.push(msg); }
+(async () => {
+  for (const row of ROWS) await openBuyFlow(row);
+  console.log(JSON.stringify(seen));
+})();
+""".replace("ROWS", json.dumps(rows))
+    )
+    proc = subprocess.run(
+        [_NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_browse_buy_routes_a_closet_ask_to_the_closet_buy():
+    closet_row = {
+        "kind": "trait",
+        "slot": "Hat",
+        "value": "Cap",
+        "amount_brix": "4",
+        "source": "closet",
+        "order_id": "o/1",
+        "offer_index": None,
+        "nft_id": None,
+    }
+    nft_row = {
+        "kind": "trait",
+        "slot": "Hat",
+        "value": "Cap",
+        "amount_brix": "5",
+        "offer_index": "AB",
+    }
+    seen = _run_open_buy_flow([closet_row, nft_row])
+    assert seen["errors"] == []
+    assert seen["flows"] == [
+        ["closet_fill", "/api/closet/ask/o%2F1/buy", {}, "closetFillRender"],
+        ["buy", "/api/market/buy", {"offer_index": "AB"}, "nftBuyRender"],
+    ]
+    assert seen["confirms"][0] == (
+        "4 BRIX — it goes straight into your Closet. Not enough BRIX? You'll pay in XRP instead."
+    )
+
+
+def test_listing_detail_offers_no_buy_on_your_own_listing():
+    """Greptile on #550: Browse now shows your own Closet asks, and the server
+    refuses a buy of your own listing, so the action must not offer Buy."""
+    js = _read("webapp/client/app.js")
+    detail = js[
+        js.index("async function openListingDetail(") : js.index("async function loadMarketBrowse(")
+    ]
+    own = detail.index("marketPure.isOwnListing(vm, me && me.wallet)")
+    assert "action.textContent = 'Your listing';" in detail[own:]
+    assert own < detail.index("action.textContent = `Buy — ${vm.priceLabel}`;")
+
+
 _API_BASE = "https://api.test"
 _CHICKEN = "/api/layer?body=female&trait=Clothing&value=Chicken%20Suit%20Iridescent&thumb=1"
 _CROWN = "/api/layer?body=shared&trait=Head&value=Crown&thumb=1"
@@ -276,7 +382,6 @@ const seen = {};
 async function api(path) { return RESPONSES[path]; }
 function el(id) { return { id }; }
 function renderChipList(container, empty, entries) { seen[container.id] = entries.map((e) => e.imgSrc); }
-function buyBestClosetAsk() {}
 function openClosetBidForm() {}
 function cancelClosetOrder() {}
 function fillClosetBid() {}
@@ -369,7 +474,6 @@ def test_closet_market_chips_render_the_server_trait_image():
         }
     )
     assert seen == {
-        "closet-book-asks": [_API_BASE + _CROWN],
         "closet-book-bids": [_API_BASE + _CHICKEN],
         "mine-closet-orders": [_API_BASE + _LASER],
         "mine-closet-incoming": [_API_BASE + _CROWN],
