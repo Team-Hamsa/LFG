@@ -204,6 +204,11 @@ export function priceLabel(row) {
   // collapsed into one card) prices from its floor.
   if (row.count > 1 && row.floor_brix != null) return `from ${row.floor_brix} BRIX`;
   if (row.amount_brix != null) return `${row.amount_brix} BRIX`;
+  // A Buy-now external row (#426) prices at what the buyer signs for — the
+  // clearing price (ask + the broker's fee), as on its Buy-now button — so it
+  // can sit in the grid as a standard listing. The server sorts and filters
+  // those rows on the same number.
+  if (row.clearing_xrp != null) return `${displayXrp(row.clearing_xrp)} XRP`;
   if (row.amount_xrp != null) return `${displayXrp(row.amount_xrp)} XRP`;
   return '';
 }
@@ -304,6 +309,16 @@ export function rarityLabel(vm) {
 export function externalLabel(vm) {
   if (!vm.external) return '';
   return vm.marketplace ? `Listed on ${vm.marketplace}` : 'External listing';
+}
+
+/**
+ * Whether a browse card wears the #131 external treatment (faded, dashed,
+ * "Listed on <marketplace>" badge): only an external row with no Buy-now
+ * path, i.e. its broker's fee is unmeasured. A Buy-now row renders as a
+ * standard listing — its detail overlay still names the marketplace and fee.
+ */
+export function externalLook(vm) {
+  return vm.external && vm.clearingXrp == null;
 }
 
 /**
@@ -520,8 +535,9 @@ export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, max
   if (kind) pairs.push(['kind', kind]);
   // #481: server-side (slot, value) grouping for trait browse.
   if (group) pairs.push(['group', '1']);
-  // #131: opt-in known-broker external (read-only) rows.
-  if (includeExternal) pairs.push(['include_external', '1']);
+  // #131: opt-in known-broker external rows — true for all of them,
+  // 'supported' for just the Buy-now-capable ones (measured broker fee).
+  if (includeExternal) pairs.push(['include_external', includeExternal === 'supported' ? 'supported' : '1']);
   // #203: "listed by me" — server-side exact-match seller filter.
   if (seller) pairs.push(['seller', seller]);
   for (const t of traits || []) pairs.push(['trait', t]);

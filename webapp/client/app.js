@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=30';
+import * as marketPure from './market_pure.js?v=31';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
 import * as closetPure from './closet_market_pure.js?v=3';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
@@ -5093,10 +5093,11 @@ function renderMarketGrid(rows, { append = false } = {}) {
       chip.textContent = rarity;
       name.appendChild(chip);
     }
-    // #131: an external (brokered) listing renders as a visually distinct,
-    // non-buyable card — "Listed on <marketplace>" badge; the detail overlay
-    // links out instead of offering an in-app Buy.
-    if (vm.external) {
+    // #131: an external (brokered) listing we can't buy here renders as a
+    // visually distinct card — "Listed on <marketplace>" badge; the detail
+    // overlay links out. A Buy-now row (#426, measured broker fee) skips
+    // this and reads as a standard listing at its all-in price.
+    if (marketPure.externalLook(vm)) {
       card.classList.add('market-card-external');
       const badge = document.createElement('span');
       badge.className = 'market-card-external-badge';
@@ -5375,8 +5376,10 @@ async function loadMarketBrowse({ append = false } = {}) {
     // #131/#203: read these controls defensively — a stale cached
     // index.html paired with fresh app.js (Discord webview / browser cache
     // skew) would otherwise throw here, before the try below, and blank the
-    // whole grid. Missing element -> the old default behavior.
-    includeExternal: Boolean(el('market-include-external')?.checked ?? true),
+    // whole grid. Missing element -> the old default behavior. Unchecked
+    // still fetches the Buy-now-capable externals ('supported'): they render
+    // as standard listings, so the toggle hides only the ones we can't buy.
+    includeExternal: (el('market-include-external')?.checked ?? true) ? true : 'supported',
     seller: el('market-mine-only')?.checked && me && me.wallet ? me.wallet : '',
     // #481: one card per (slot, value) for traits — server-side, so paging
     // never splits a group and counts/floors are collection-wide.

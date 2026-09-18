@@ -696,10 +696,20 @@ def test_stop_startup_recovery_tolerates_tasks_that_never_started(monkeypatch):
 # --- Task 10: browse estimate -------------------------------------------------
 
 
-def _browse():
-    req = make_mocked_request("GET", "/api/market/listings?include_external=1")
+def _browse(include_external="1"):
+    req = make_mocked_request("GET", f"/api/market/listings?include_external={include_external}")
     rows = _body(_run(server.handle_market_listings(req)))["rows"]
     return next(r for r in rows if r.get("source") == "external")
+
+
+def test_browse_supported_mode_carries_the_fee_cover_estimate(env):
+    # "Show external listings" unchecked asks for include_external=supported;
+    # the cafe rows it still shows must quote the same refund.
+    _seed_char_with_cafe_listing(env["onchain"])
+    _campaign(env["app_db"])
+    row = _browse("supported")
+    assert row["fee_cover_drops"] == 80_572
+    assert row["fee_cover_coverage_bps"] == 10_000
 
 
 def test_browse_external_row_carries_the_fee_cover_estimate(env):

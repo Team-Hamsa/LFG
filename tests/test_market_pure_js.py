@@ -569,6 +569,74 @@ def test_build_listings_params_include_external():
     assert not any(k == "include_external" for k, _ in pairs)
 
 
+def test_build_listings_params_supported_external():
+    # "Show external listings" unchecked still asks for the Buy-now-capable
+    # external rows (they render as standard listings) — the server drops
+    # only the externals we can't buy here.
+    pairs = run_js('M.buildListingsParams({kind: "character", includeExternal: "supported"})')
+    assert ["include_external", "supported"] in pairs
+    assert ["include_external", "1"] not in pairs
+
+
+# --- Buy-now external rows read as standard listings ---
+
+CAFE_ROW = {
+    "nft_id": "N1",
+    "kind": "character",
+    "nft_number": 1,
+    "image": None,
+    "amount_drops": 4990000,
+    "amount_xrp": "4.99",
+    "seller": "rS",
+    "offer_index": "EXT1",
+    "buyable": False,
+    "source": "external",
+    "destination": "rpx9JThQ2y37FaGeeJP7PXDUVEXY3PHZSC",
+    "marketplace": "xrp.cafe",
+    "external_url": "https://xrp.cafe/nft/N1",
+    "broker_rate": 0.01589,
+    "clearing_drops": 5070572,
+    "clearing_xrp": "5.070572",
+}
+# Unmeasured broker: the server sends broker_rate null and no clearing fields.
+BIDDS_ROW = {
+    **{k: v for k, v in CAFE_ROW.items() if not k.startswith("clearing_")},
+    "offer_index": "EXT2",
+    "destination": "rpZqTPC8GvrSvEfFsUuHkmPCg29GdQuXhC",
+    "marketplace": "bidds",
+    "external_url": "https://bidds.com/nft/N1",
+    "broker_rate": None,
+}
+IN_APP_ROW = {
+    "nft_id": "N1",
+    "kind": "character",
+    "nft_number": 1,
+    "image": None,
+    "amount_drops": 4990000,
+    "amount_xrp": "4.99",
+    "seller": "rS",
+    "offer_index": "OWN1",
+    "buyable": True,
+}
+
+
+def test_price_label_buy_now_row_is_the_all_in_price():
+    # A Buy-now row's card and detail price is what the buyer signs for: the
+    # clearing price (ask + the broker's fee), rounded UP like the Buy-now
+    # button (5.070572 -> 5.08). Rows without one keep the seller's ask.
+    assert run_js(f"M.mapListingRow({json.dumps(CAFE_ROW)}).priceLabel") == "5.08 XRP"
+    assert run_js(f"M.mapListingRow({json.dumps(BIDDS_ROW)}).priceLabel") == "4.99 XRP"
+    assert run_js(f"M.mapListingRow({json.dumps(IN_APP_ROW)}).priceLabel") == "4.99 XRP"
+
+
+def test_external_look_only_for_rows_without_buy_now():
+    # The faded "Listed on <marketplace>" card is for externals we can't act
+    # on; a Buy-now row (measured broker fee) looks like an in-app listing.
+    assert run_js(f"M.externalLook(M.mapListingRow({json.dumps(CAFE_ROW)}))") is False
+    assert run_js(f"M.externalLook(M.mapListingRow({json.dumps(BIDDS_ROW)}))") is True
+    assert run_js(f"M.externalLook(M.mapListingRow({json.dumps(IN_APP_ROW)}))") is False
+
+
 # --- #203: rarity fields, rarity label, seller param ---
 
 

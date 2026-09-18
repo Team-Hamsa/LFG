@@ -171,6 +171,18 @@ def test_external_listing_wiring():
     assert ".nft-card.market-card-external" in css
 
 
+def test_buy_now_external_cards_render_standard():
+    # A Buy-now external row (measured broker fee) is a standard card: the
+    # faded treatment + "Listed on" badge are gated on externalLook(vm), and
+    # the toggle unchecked still fetches those rows ('supported' mode) so
+    # it hides only the externals we can't buy here.
+    js = _read("app.js")
+    grid = js[js.index("function renderMarketGrid") : js.index("function closeListingDetail")]
+    assert "if (marketPure.externalLook(vm)) {" in grid
+    assert "card.classList.add('market-card-external')" in grid
+    assert "? true : 'supported'" in js
+
+
 def test_browse_ux_wiring():
     # #203: pagination, rarity sort, "listed by me", and the listing detail
     # overlay replacing card-click-straight-to-buy.

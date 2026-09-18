@@ -17,6 +17,7 @@
 # specifically asks to exercise offline.
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from lfg_core import brokers, market_ops, market_store, trait_config, trait_images
@@ -210,10 +211,9 @@ class MockMarket:
             out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
             out["external_url"] = resolved["url"] if resolved else None
             # #426 clearing price, mirroring app._serialize_listing_row.
-            rate = resolved["broker_rate"] if resolved else None
-            out["broker_rate"] = rate
-            if rate is not None and row.get("amount_drops") is not None:
-                clearing = brokers.clearing_drops(int(row["amount_drops"]), rate)
+            out["broker_rate"] = resolved["broker_rate"] if resolved else None
+            clearing = brokers.buy_now_clearing(destination, row.get("amount_drops"))
+            if clearing is not None:
                 out["clearing_drops"] = clearing
                 out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
         # #239 per-kind denomination, mirroring app._serialize_listing_row.
@@ -243,23 +243,31 @@ class MockMarket:
         min_drops: int | None,
         max_drops: int | None,
         sort: str,
-        include_external: bool = False,
+        include_external: str | None = None,
     ) -> list[dict[str, Any]]:
+        # Mirrors app.handle_market_listings: include_external is None (no
+        # external rows), "all", or "supported" (Buy-now rows only), and a
+        # Buy-now row sorts/filters on its all-in clearing price.
+        def all_in(r: dict[str, Any]) -> int | None:
+            return brokers.buy_now_clearing(r.get("destination"), r.get("amount_drops"))
+
+        def xrp_price(r: dict[str, Any]) -> int | None:
+            clearing = all_in(r)
+            return clearing if clearing is not None else r.get("amount_drops")
+
+        def sort_price(r: dict[str, Any]) -> Decimal:
+            clearing = all_in(r)
+            return Decimal(clearing) if clearing is not None else market_store.listing_price(r)
+
         rows = [r for r in self._live() if r["kind"] == kind]
-        if not include_external:
+        if include_external is None:
             rows = [r for r in rows if not r.get("destination")]
+        elif include_external == "supported":
+            rows = [r for r in rows if not r.get("destination") or all_in(r) is not None]
         if min_drops is not None:
-            rows = [
-                r
-                for r in rows
-                if r.get("amount_drops") is not None and r["amount_drops"] >= min_drops
-            ]
+            rows = [r for r in rows if (p := xrp_price(r)) is not None and p >= min_drops]
         if max_drops is not None:
-            rows = [
-                r
-                for r in rows
-                if r.get("amount_drops") is not None and r["amount_drops"] <= max_drops
-            ]
+            rows = [r for r in rows if (p := xrp_price(r)) is not None and p <= max_drops]
         if trait_filters:
             rows = [
                 r
@@ -272,9 +280,9 @@ class MockMarket:
                 )
             ]
         if sort == "price_asc":
-            rows = sorted(rows, key=lambda r: (market_store.listing_price(r), r["offer_index"]))
+            rows = sorted(rows, key=lambda r: (sort_price(r), r["offer_index"]))
         elif sort == "price_desc":
-            rows = sorted(rows, key=lambda r: (-market_store.listing_price(r), r["offer_index"]))
+            rows = sorted(rows, key=lambda r: (-sort_price(r), r["offer_index"]))
         else:  # newest: the mock carries no created_ts, so this is stable input order
             rows = list(rows)
         return [self._serialize(r) for r in rows]

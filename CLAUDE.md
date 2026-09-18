@@ -1204,6 +1204,16 @@ empty.
   ("Still waiting on <marketplace>…"). One drop short never fills (silently);
   any overshoot goes to the seller, never the broker. We earn only the
   `offer_create`; the broker's accept carries its own SourceTag (#427).
+  **Buy-now rows read as standard listings:** the browse card drops the
+  faded "Listed on <marketplace>" look (`market_pure.externalLook`) and
+  prices at the all-in `clearing_xrp`; only unmeasured-broker rows keep the
+  external look. `include_external=supported` admits in-app rows plus Buy-now
+  rows only — the client sends it when "Show external listings" is
+  unchecked, so the toggle hides just the externals we can't buy. Price sort
+  and `min_xrp`/`max_xrp` run on that same all-in price
+  (`brokers.buy_now_clearing`, one function for the filter, sort and
+  serialized row), so a card never shows a price outside the bounds it
+  passed.
 - `GET /api/market/mine` — authed; four groups: the caller's own live
   `listings` (both kinds), `unlisted_characters`, `unlisted_trait_tokens`, and
   loose `closet_assets`.

@@ -224,3 +224,20 @@ def test_listings_dev_mode_trait_applies_brix_bounds():
     req = make_mocked_request("GET", "/api/market/listings?kind=trait&min_brix=10")
     body = json.loads(_run(server.handle_market_listings(req)).body)
     assert body["rows"] and all(float(r["amount_brix"]) >= 10 for r in body["rows"])
+
+
+def _dev_listing_ids(query):
+    req = make_mocked_request("GET", f"/api/market/listings?kind=character&{query}")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    return [r["offer_index"] for r in json.loads(resp.body)["rows"]]
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_listings_dev_mode_supported_external_prices_all_in():
+    # Parity with the real path: include_external=supported keeps the xrp.cafe
+    # row (Buy-now capable), and its XRP bounds use the all-in price — the
+    # 42 XRP ask is 42.678156 after cafe's fee, so max_xrp=42.5 drops it.
+    assert "MOCKOFFER-9003" in _dev_listing_ids("include_external=supported")
+    assert "MOCKOFFER-9003" not in _dev_listing_ids("include_external=1&max_xrp=42.5")
+    assert _dev_listing_ids("include_external=1&min_xrp=42.5") == ["MOCKOFFER-9003"]

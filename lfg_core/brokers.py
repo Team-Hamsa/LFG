@@ -203,3 +203,18 @@ def clearing_drops(ask_drops: int, broker_rate: float) -> int:
     while base > ask_drops and (base - 1) - math.ceil((base - 1) * broker_rate) >= ask_drops:
         base -= 1
     return base + _clearing_buffer_drops()
+
+
+def buy_now_clearing(destination: str | None, ask_drops: int | None) -> int | None:
+    """The Buy-now price (drops) of a listing destination-locked to
+    `destination` at `ask_drops`: its clearing_drops when the destination is
+    an allowlisted broker with a MEASURED fee rate (#426), else None (no or
+    unknown destination, an unmeasured broker, no XRP ask). One number for
+    the bid, the card price, and browse's price sort/filter."""
+    if not destination or ask_drops is None:
+        return None
+    entry = _load().get(destination)
+    rate = entry.get("broker_rate") if entry else None
+    if rate is None:
+        return None
+    return clearing_drops(int(ask_drops), rate)
