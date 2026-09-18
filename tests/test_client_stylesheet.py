@@ -6,6 +6,7 @@ select chevron would just vanish — so a missing asset fails here instead.
 
 import os
 import re
+from urllib.parse import unquote, urlsplit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENT = os.path.join(ROOT, "webapp", "client")
@@ -27,7 +28,10 @@ def _stylesheet() -> str:
 def _missing_assets(css: str, base_dir: str) -> list[str]:
     urls = re.findall(r"url\(\s*['\"]?([^'\")]+?)['\"]?\s*\)", css)
     local = [u for u in urls if not re.match(r"(data:|[a-z]+://|//|#)", u)]
-    return [u for u in local if not os.path.isfile(os.path.join(base_dir, u))]
+    # Resolve the path only: a ?v= cache-buster or #fragment isn't on disk.
+    return [
+        u for u in local if not os.path.isfile(os.path.join(base_dir, unquote(urlsplit(u).path)))
+    ]
 
 
 def test_every_stylesheet_url_ships_with_the_client():
@@ -36,8 +40,14 @@ def test_every_stylesheet_url_ships_with_the_client():
 
 
 def test_missing_asset_is_reported():
-    css = "a { background: url(assets/nope.svg); } b { mask: url('data:image/png;base64,AA'); }"
-    assert _missing_assets(css, CLIENT) == ["assets/nope.svg"]
+    css = (
+        "a { background: url(assets/nope.svg?v=1); }"
+        " b { mask: url('data:image/png;base64,AA'); }"
+        # A cache-buster query or an SVG #fragment isn't part of the filename.
+        " c { background: url(assets/select-chevron.svg?v=2); }"
+        ' d { mask: url("assets/select-chevron.svg#down"); }'
+    )
+    assert _missing_assets(css, CLIENT) == ["assets/nope.svg?v=1"]
 
 
 def test_every_select_gets_the_brand_treatment():
