@@ -4596,11 +4596,12 @@ function builderStepTitle(text) {
 // aria-controls tracking the grid it toggles. Steps with nothing picked yet
 // keep the plain (non-interactive) builderStepTitle — there is nothing to
 // collapse to.
-function builderStepHeader(text, expanded, controlsId, onToggle) {
+function builderStepHeader(text, expanded, controlsId, headerId, onToggle) {
   const h = document.createElement('h3');
   h.className = 'builder-step-title';
   const btn = document.createElement('button');
   btn.type = 'button';
+  btn.id = headerId;
   btn.className = 'builder-step-toggle';
   btn.setAttribute('aria-expanded', String(expanded));
   btn.setAttribute('aria-controls', controlsId);
@@ -4608,6 +4609,17 @@ function builderStepHeader(text, expanded, controlsId, onToggle) {
   btn.onclick = onToggle;
   h.appendChild(btn);
   return h;
+}
+
+// Greptile finding on #532: renderBuilder() rebuilds the whole builder
+// subtree, so any element that held keyboard focus (the toggle just
+// pressed, or the tile just picked) is destroyed and focus silently reverts
+// to <body>. Every handler that calls renderBuilder() from inside a step
+// re-focuses that step's own toggle button (a stable id, present whenever
+// something is picked) right after — the same target whether the step just
+// collapsed (a tile was picked) or is now shown expanded again.
+function focusBuilderStepToggle(headerId) {
+  el(headerId)?.focus();
 }
 
 function builderBlankStep() {
@@ -4618,8 +4630,12 @@ function builderBlankStep() {
   wrap.appendChild(blank
     ? builderStepHeader(
         expanded ? '1 · Pick a blank' : `1 · Blank: #${blank.edition} (change)`,
-        expanded, 'builder-blank-grid',
-        () => { builderState.blankForceOpen = !expanded; renderBuilder(); },
+        expanded, 'builder-blank-grid', 'builder-blank-toggle',
+        () => {
+          builderState.blankForceOpen = !expanded;
+          renderBuilder();
+          focusBuilderStepToggle('builder-blank-toggle');
+        },
       )
     : builderStepTitle('1 · Pick a blank'));
   const grid = document.createElement('div');
@@ -4642,6 +4658,7 @@ function builderBlankStep() {
         builderState.blank = b;
         builderState.blankForceOpen = false; // collapse: a choice was made
         renderBuilder();
+        focusBuilderStepToggle('builder-blank-toggle');
       };
       grid.appendChild(tile);
     }
@@ -4658,8 +4675,12 @@ function builderBodyStep() {
   wrap.appendChild(body
     ? builderStepHeader(
         expanded ? '2 · Pick a body' : `2 · Body: ${body} (change)`,
-        expanded, 'builder-body-grid',
-        () => { builderState.bodyForceOpen = !expanded; renderBuilder(); },
+        expanded, 'builder-body-grid', 'builder-body-toggle',
+        () => {
+          builderState.bodyForceOpen = !expanded;
+          renderBuilder();
+          focusBuilderStepToggle('builder-body-toggle');
+        },
       )
     : builderStepTitle('2 · Pick a body'));
   const grid = document.createElement('div');
@@ -4690,6 +4711,7 @@ function builderBodyStep() {
         builderState.dropNotice = buildPure.dropNoticeText(dropped);
         builderState.bodyForceOpen = false; // collapse: a choice was made
         renderBuilder();
+        focusBuilderStepToggle('builder-body-toggle');
       };
       grid.appendChild(tile);
     }

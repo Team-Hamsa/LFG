@@ -177,3 +177,42 @@ def test_blank_and_body_grids_carry_stable_ids_for_aria_controls():
 
 def test_stylesheet_has_step_toggle_styling():
     assert ".builder-step-toggle" in _stylesheet()
+
+
+# ---------------------------------------------------------------------------
+# Greptile finding on #532 (P2, app.js:4622): renderBuilder() replaces the
+# whole builder subtree, destroying the disclosure button that held keyboard
+# focus -- both reopening a step and picking a tile must restore focus to
+# that step's own toggle (a stable id) after the rebuild, or repeated
+# keyboard navigation loses the user's place.
+# ---------------------------------------------------------------------------
+
+
+def test_builder_step_header_accepts_a_stable_header_id():
+    js = _read("app.js")
+    body = _fn_body(js, "function builderStepHeader(", "\nfunction focusBuilderStepToggle(")
+    assert "btn.id = headerId;" in body
+
+
+def test_focus_builder_step_toggle_helper_refocuses_by_id():
+    js = _read("app.js")
+    body = _fn_body(
+        js, "function focusBuilderStepToggle(headerId)", "\nfunction builderBlankStep()"
+    )
+    assert "el(headerId)?.focus();" in body
+
+
+def test_blank_step_restores_focus_to_its_toggle_after_every_rebuild():
+    js = _read("app.js")
+    body = _fn_body(js, "function builderBlankStep()", "\nfunction builderBodyStep()")
+    assert "'builder-blank-toggle'" in body
+    # Once after the reopen-toggle handler's renderBuilder(), once after the
+    # tile-pick handler's renderBuilder() -- both rebuild the subtree.
+    assert body.count("focusBuilderStepToggle('builder-blank-toggle');") >= 2
+
+
+def test_body_step_restores_focus_to_its_toggle_after_every_rebuild():
+    js = _read("app.js")
+    body = _fn_body(js, "function builderBodyStep()", "\nfunction builderTraitStep()")
+    assert "'builder-body-toggle'" in body
+    assert body.count("focusBuilderStepToggle('builder-body-toggle');") >= 2
