@@ -173,6 +173,28 @@ def test_z_table_carries_every_layer_z_and_each_override(tmp_path):
     }
 
 
+NON_FINITE_Z = [".nan", ".inf", "-.inf", "1e999"]  # 1e999: a YAML str float() makes inf
+
+
+@pytest.mark.parametrize("z", NON_FINITE_Z)
+def test_load_config_rejects_non_finite_layer_z(tmp_path, z):
+    # z_table() ships every z to the browser in /api/economy, and json.dumps
+    # writes NaN/Infinity as bare tokens JSON.parse rejects — the whole
+    # Dressing Room payload would fail to load, not just the stacking.
+    bad = GOOD.replace("{name: Head, z: 80}", f"{{name: Head, z: {z}}}")
+    with pytest.raises(trait_config.TraitConfigError, match="finite"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
+@pytest.mark.parametrize("z", NON_FINITE_Z)
+def test_load_config_rejects_non_finite_override_z(tmp_path, z):
+    bad = GOOD.replace(
+        "{trait_type: Eyes, value: Wavy, z: 95}", f"{{trait_type: Eyes, value: Wavy, z: {z}}}"
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="finite"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
 def test_z_table_keeps_duplicate_overrides_in_config_order(tmp_path):
     # load_config does not reject a repeated (trait_type, value), and z_for is
     # FIRST-match — so the table must keep every entry in order (not collapse
