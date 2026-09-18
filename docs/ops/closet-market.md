@@ -140,3 +140,44 @@ To reconcile one owner:
 unmirrored fill it keeps the stale contents but records clio's current URI. That makes
 the stale mirror look current, so the next sweep pass overwrites the token and erases
 the newer version on-chain.
+
+## 7. House wallet (#548)
+
+The project's trait stock (the app wallet's NFT trait listings) sells through
+the Closet market from a house wallet. The app wallet is the issuer and can't
+own a Closet (#383).
+
+1. Fill `CLOSET_HOUSE_WALLET` and `CLOSET_HOUSE_SEED` in `.env` (placeholders
+   are already there). Fund the wallet with the XRP reserve. Add the address to
+   `HISTORICAL_HOUSE_WALLETS` in `lfg_core/system_wallets.py` (append-only, a
+   normal PR, then promote): setup and the migration refuse a house missing
+   there, so its history stays out of leaderboards and metrics even if the
+   house wallet changes later.
+2. Status, then the one-time setup (BRIX trust line + Closet claim, both signed
+   with the house seed):
+   ```bash
+   .venv/bin/python scripts/house_closet.py --network mainnet
+   .venv/bin/python scripts/house_closet.py --network mainnet --apply-setup
+   ```
+3. Review the plan: counts, total BRIX, the `None` units that are held, and
+   `crossing_bids` (open bids that fill the moment their ask posts, at the
+   bid's price):
+   ```bash
+   .venv/bin/python scripts/house_closet.py --network mainnet --migrate
+   ```
+4. Run it. Phase 1 burns each listed token into the house Closet and closes its
+   listing; phase 2 posts the asks. The service's 2-minute sweep settles any
+   fills.
+   ```bash
+   .venv/bin/python scripts/house_closet.py --network mainnet --migrate --apply
+   ```
+5. Check Browse and `scripts/audit_trait_economy.py` (the census must not move).
+
+Re-running is safe: `reports/house_migration_<net>.json` records every item,
+including each Deposit's journal id before its burn. A run that died mid-item is
+judged from that journal: a completed Deposit is recorded (never burned again),
+and one that may have burned without crediting the house is `needs_attention`.
+`failed` items (nothing changed) are retried. `needs_attention` items are not:
+find the Deposit journal named in the plan file under `ECONOMY_RECORDS_DIR` and
+resolve it first. Deposits refuse while the house has a live order or an
+unfinished fill.

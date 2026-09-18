@@ -231,6 +231,12 @@ input[type="text"] {
   font-size: .9rem;
   transition: border-color var(--speed), box-shadow var(--speed);
 }
+/* A text input on its own in a card (the price box on Place a bid / List
+   for sale) sizes with the form instead of the card, which reaches ~790px
+   once the app widens at >=760px (Discord desktop), and centers its text
+   like the rest of the card. Inputs that share a row (filters, the listing
+   bid form) keep their flex sizing. */
+.card > input[type="text"] { max-width: 280px; text-align: center; }
 input[type="text"]:focus {
   outline: none;
   border-color: var(--blue);
@@ -1328,6 +1334,28 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
    than block because the customizable select lays out its label + chevron
    on the grid set above (a native select treats it as plain block). */
 #closet-bid-form-panel select { display: grid; width: fit-content; margin: 4px auto 10px; }
+
+/* Standalone trait art (decorateTraitArt in app.js): transparent layer PNGs
+   had nothing behind them, so dark art — every eyebrow — disappeared into the
+   dark cards. Checkerboard for most traits; face traits (Eyes/Eyebrows/Mouth)
+   sit on a faint default body so they read in context. */
+.trait-art {
+  background-color: #5a5a5a;
+  background-image:
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%),
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.trait-art-face {
+  background-color: var(--surface-2);
+  background-image:
+    linear-gradient(rgba(34, 34, 34, .35), rgba(34, 34, 34, .35)),
+    var(--trait-body);
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 
 /* Standalone trait art (decorateTraitArt in app.js): transparent layer PNGs
    had nothing behind them, so dark art — every eyebrow — disappeared into the
