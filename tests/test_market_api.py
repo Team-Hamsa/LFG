@@ -2549,13 +2549,113 @@ def test_browse_include_external_revalidates_against_fresh_allowlist(onchain_env
     )
     assert len(_run(_read_json(resp))["rows"]) == 1  # cache now filled
 
-    monkeypatch.setattr(server.brokers, "known_destinations", lambda: frozenset())
+    # The effective allowlist no longer has the broker (built-ins can't be
+    # dropped by an overlay, so simulate it at the allowlist read itself).
+    monkeypatch.setattr(server.brokers, "_load", lambda: {})
     resp = _run(
         server.handle_market_listings(
             _mocked_request("GET", "/api/market/listings?include_external=1")
         )
     )
     assert _run(_read_json(resp))["rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# Buy-now external rows (#426, measured broker fee) read as standard listings:
+# include_external=supported keeps them when the toggle is off, and price
+# sort / XRP bounds run on their all-in price — the number their card shows.
+# ---------------------------------------------------------------------------
+
+BIDDS_BROKER = "rpZqTPC8GvrSvEfFsUuHkmPCg29GdQuXhC"  # built-in, fee rate unmeasured
+CHAR4 = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000004"
+
+
+def _seed_mixed_market(onchain_path):
+    """In-app at 42.5 XRP (A…); xrp.cafe ask 42 XRP (E…, all-in 42.678156 —
+    brokers.clearing_drops at 0.015890); bidds ask 42.55 XRP (B…, no measured
+    rate, so it prices at its ask). By ask alone the order is E < A < B."""
+    conn = _reopen(onchain_path)
+    for nft_id, number in ((CHAR1, 1), (CHAR2, 2), (CHAR4, 4)):
+        _seed_character(conn, nft_id, SELLER, number)
+    _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, amount_drops=42_500_000)
+    _seed_listing(
+        conn,
+        offer_index="E" * 64,
+        nft_id=CHAR2,
+        amount_drops=42_000_000,
+        destination=XRPCAFE_BROKER,
+    )
+    _seed_listing(
+        conn,
+        offer_index="B" * 64,
+        nft_id=CHAR4,
+        amount_drops=42_550_000,
+        destination=BIDDS_BROKER,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _browse_ids(query):
+    resp = _run(
+        server.handle_market_listings(_mocked_request("GET", f"/api/market/listings?{query}"))
+    )
+    assert resp.status == 200
+    return [r["offer_index"] for r in _run(_read_json(resp))["rows"]]
+
+
+def test_browse_supported_external_keeps_buy_now_rows_only(onchain_env):
+    # Toggle off: the cafe row (Buy-now capable) stays alongside in-app
+    # listings; bidds (unmeasured, still the faded external look) is hidden.
+    _seed_mixed_market(onchain_env)
+    assert sorted(_browse_ids("include_external=supported")) == ["A" * 64, "E" * 64]
+
+
+def test_browse_price_sort_uses_all_in_price_for_buy_now_rows(onchain_env):
+    # The cafe card shows 42.678156 (ask 42 + cafe's fee), so it sorts after
+    # the in-app 42.5 and bidds' 42.55 ask.
+    _seed_mixed_market(onchain_env)
+    assert _browse_ids("include_external=1&sort=price_asc") == ["A" * 64, "B" * 64, "E" * 64]
+    assert _browse_ids("include_external=1&sort=price_desc") == ["E" * 64, "B" * 64, "A" * 64]
+
+
+def test_browse_xrp_bounds_use_all_in_price_for_buy_now_rows(onchain_env):
+    # max 42.6: the cafe row's 42 XRP ask is under it, but its all-in 42.678156
+    # (what the card shows and the buyer pays) is not.
+    _seed_mixed_market(onchain_env)
+    assert _browse_ids("include_external=1&max_xrp=42.6") == ["A" * 64, "B" * 64]
+    assert _browse_ids("include_external=1&min_xrp=42.6") == ["E" * 64]
+
+
+def test_browse_reads_the_broker_allowlist_once_per_request(onchain_env, monkeypatch):
+    # An operator's overlay edit landing mid-request (cafe's rate pulled after
+    # the request's first allowlist read) must not split the response across
+    # two allowlist versions: a row admitted as Buy-now serializes as one, its
+    # broker_rate matching the rate its clearing price was computed at.
+    _seed_external_listing(onchain_env)
+    _browse_ids("include_external=supported")  # warm the cache (its fill reads the allowlist)
+    measured = brokers._load()
+    unmeasured = {
+        **measured,
+        XRPCAFE_BROKER: {**measured[XRPCAFE_BROKER], "broker_rate": None},
+    }
+    reads = []
+
+    def overlay_edited_after_first_read():
+        reads.append(None)
+        return measured if len(reads) == 1 else unmeasured
+
+    monkeypatch.setattr(brokers, "_load", overlay_edited_after_first_read)
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=supported")
+        )
+    )
+    rows = _run(_read_json(resp))["rows"]
+    assert [r["offer_index"] for r in rows] == ["E" * 64]
+    assert rows[0]["broker_rate"] == 0.015890
+    assert rows[0]["clearing_drops"] == 42_678_156
+    assert len(reads) == 1  # one snapshot served the whole request
 
 
 # ---------------------------------------------------------------------------

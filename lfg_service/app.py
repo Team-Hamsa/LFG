@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 import uuid as uuid_lib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
@@ -2802,7 +2802,10 @@ def _closet_ask_listing(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _serialize_listing_row(
-    r: dict[str, Any], kind: str, cfg: trait_config.TraitConfig
+    r: dict[str, Any],
+    kind: str,
+    cfg: trait_config.TraitConfig,
+    broker_table: Mapping[str, brokers.BrokerEntry] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "nft_id": r["nft_id"],
@@ -2822,7 +2825,11 @@ def _serialize_listing_row(
         out["buyable"] = False
         out["source"] = "external"
         out["destination"] = destination
-        resolved = brokers.resolve(destination, r["nft_id"])
+        # One allowlist read for the whole row (the caller's, when browse
+        # passes its per-request snapshot) so broker_rate and clearing_drops
+        # can never come from two versions of an overlay edited mid-request.
+        table = broker_table if broker_table is not None else brokers.snapshot()
+        resolved = brokers.resolve(destination, r["nft_id"], table)
         out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
         out["external_url"] = resolved["url"] if resolved else None
         # #426: a broker with a MEASURED fee rate lets the client offer "Buy
@@ -2832,10 +2839,10 @@ def _serialize_listing_row(
         # would produce bids that silently never fill. buyable stays False:
         # the row is still not settleable by us and the /api/market/buy 409
         # guard is unchanged — the bot settles, we only place the offer.
-        rate = resolved["broker_rate"] if resolved else None
-        out["broker_rate"] = rate
-        if rate is not None and r.get("amount_drops") is not None:
-            clearing = brokers.clearing_drops(int(r["amount_drops"]), rate)
+        out["broker_rate"] = resolved["broker_rate"] if resolved else None
+        # The same number browse sorts and XRP-filters these rows on.
+        clearing = brokers.buy_now_clearing(destination, r.get("amount_drops"), table)
+        if clearing is not None:
             out["clearing_drops"] = clearing
             out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
     if r.get("source") == "closet":
@@ -2906,7 +2913,10 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=
     &group=1 (#481: kind=trait only — one row per (slot, value) with count /
     floor_brix / offers[], paginated over groups)
-    &include_external= (#131: opt-in known-broker external rows, buyable:false)
+    &include_external= (#131: opt-in known-broker external rows, buyable:false;
+    =supported admits only the Buy-now ones — #426, measured broker fee —
+    which the client renders as standard listings. Price sort and the XRP
+    bounds use a Buy-now row's all-in clearing price, the one its card shows)
     &seller= (#203: only listings by one wallet) — sort additionally accepts
     rarity_desc (#203: collection-wide statistical rarity, characters only;
     trait rows carry no rarity and sort as ties).
@@ -2935,9 +2945,19 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     seller_filter = request.query.get("seller")
 
     # #131: opt-in to known-broker external (destination-locked) listings —
-    # read-only price-discovery rows, tagged buyable:false in the response.
-    # Default output stays destination-free, exactly as before.
-    include_external = request.query.get("include_external", "0") in ("1", "true")
+    # rows tagged buyable:false in the response. "1"/"true" = every known
+    # broker; "supported" = only Buy-now rows (#426: the broker's fee rate is
+    # measured, so the row carries a clearing price and the client renders it
+    # as a standard listing). Default output stays destination-free, exactly
+    # as before.
+    raw_external = request.query.get("include_external", "0")
+    include_external: str | None = (
+        "all"
+        if raw_external in ("1", "true")
+        else "supported"
+        if raw_external == "supported"
+        else None
+    )
     # #481: collapse identical (slot, value) trait listings into one row each
     # (count / floor_brix / offers[]). Trait-only; ignored for characters.
     group = kind == "trait" and request.query.get("group", "0") in ("1", "true")
@@ -3054,24 +3074,48 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     # re-check destination rows against a FRESH allowlist — a broker removed
     # from the allowlist (overlay file edit) mid-cache-TTL must stop being
     # surfaced immediately, not after the cache expires.
-    if include_external:
-        allowed = brokers.known_destinations()
+    # #426: a Buy-now row (broker fee measured) prices all-in — the clearing
+    # amount its card shows and its bid carries — for the XRP bounds and the
+    # price sort below, and is exactly what "supported" admits. Mapped per
+    # request (the allowlist is live; the cached rows are shared, never
+    # mutated).
+    # One allowlist snapshot serves the whole response — filter, sort and
+    # serialization — so an overlay edit landing mid-request can't admit a
+    # row as Buy-now and then serialize it without a clearing price.
+    broker_table = brokers.snapshot()
+    listing_key = market_store.listing_key
+    all_in: dict[str, int] = {}
+    if include_external is not None:
+        for r in rows:
+            clearing = brokers.buy_now_clearing(
+                r.get("destination"), r.get("amount_drops"), broker_table
+            )
+            if clearing is not None:
+                all_in[listing_key(r)] = clearing
+    if include_external == "all":
+        allowed = brokers.known_destinations(broker_table)
         filtered = [r for r in rows if not r.get("destination") or r["destination"] in allowed]
+    elif include_external == "supported":
+        filtered = [r for r in rows if not r.get("destination") or listing_key(r) in all_in]
     else:
         filtered = [r for r in rows if not r.get("destination")]
+
+    def xrp_price(r: dict[str, Any]) -> int | None:
+        return all_in.get(listing_key(r), r["amount_drops"])
+
+    def sort_price(r: dict[str, Any]) -> Decimal:
+        clearing = all_in.get(listing_key(r))
+        return Decimal(clearing) if clearing is not None else market_store.listing_price(r)
+
     if kind == "trait" and config.closet_market_enabled():
         # Closet asks are trait listings too. Read fresh, never cached: a new
         # ask shows (and a sold one drops) on the next request.
         asks = await _closet_db(closet_market_store.open_asks)
         filtered += [_closet_ask_listing(a) for a in asks]
     if min_drops is not None:
-        filtered = [
-            r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] >= min_drops
-        ]
+        filtered = [r for r in filtered if (p := xrp_price(r)) is not None and p >= min_drops]
     if max_drops is not None:
-        filtered = [
-            r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] <= max_drops
-        ]
+        filtered = [r for r in filtered if (p := xrp_price(r)) is not None and p <= max_drops]
     if min_brix is not None:
         floor = Decimal(min_brix)
         filtered = [
@@ -3101,11 +3145,10 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             )
         ]
 
-    listing_key = market_store.listing_key
     if sort == "price_asc":
-        filtered = sorted(filtered, key=lambda r: (market_store.listing_price(r), listing_key(r)))
+        filtered = sorted(filtered, key=lambda r: (sort_price(r), listing_key(r)))
     elif sort == "price_desc":
-        filtered = sorted(filtered, key=lambda r: (-market_store.listing_price(r), listing_key(r)))
+        filtered = sorted(filtered, key=lambda r: (-sort_price(r), listing_key(r)))
     elif sort == "rarity_desc":  # #203: rarest first; rows without a score last
         filtered = sorted(filtered, key=lambda r: (-(r.get("rarity_score") or 0), listing_key(r)))
     else:  # newest
@@ -3124,16 +3167,18 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     cfg = trait_config.get_config()
     rows_out = []
     for r in page:
-        out = _serialize_listing_row(r, kind, cfg)
+        out = _serialize_listing_row(r, kind, cfg, broker_table)
         if group:
             out["count"] = r["count"]
             out["floor_brix"] = r["floor_brix"]
-            out["offers"] = [_serialize_listing_row(o, kind, cfg) for o in r["offers"]]
+            out["offers"] = [
+                _serialize_listing_row(o, kind, cfg, broker_table) for o in r["offers"]
+            ]
         rows_out.append(out)
     if kind == "trait" and group and config.closet_market_enabled():
         summary = await _closet_db(closet_market_store.book_summary)
         _attach_closet_book(rows_out, page, summary)
-    if include_external and kind == "character":
+    if include_external is not None and kind == "character":
         fee_cover_state = await asyncio.get_event_loop().run_in_executor(
             None, _fee_cover_safe, _fee_cover_browse_state
         )

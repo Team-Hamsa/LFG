@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=30';
+import * as marketPure from './market_pure.js?v=31';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
 import * as closetPure from './closet_market_pure.js?v=3';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
@@ -402,13 +402,15 @@ function consumeRef() {
   try { localStorage.removeItem('lfg_ref'); } catch (_) { /* no storage */ }
 }
 
-function openExternal(url) {
+function openExternal(url, features) {
   // Returns the launch result so callers can detect a blocked window.open
   // (null). The Discord SDK opener's outcome is genuinely undetectable (it
   // returns a promise that resolves either way) — callers must treat only an
-  // explicit null as "blocked".
+  // explicit null as "blocked". `features` reaches only the plain-browser
+  // window.open; 'noopener' (for third-party pages) makes that return null
+  // even on success, so pass it only when ignoring the result.
   if (externalOpener) return externalOpener(url);
-  return window.open(url, '_blank');
+  return window.open(url, '_blank', features);
 }
 
 // --- Xaman sign-request delivery (#142) --------------------------------
@@ -5115,10 +5117,11 @@ function renderMarketGrid(rows, { append = false } = {}) {
       chip.textContent = rarity;
       name.appendChild(chip);
     }
-    // #131: an external (brokered) listing renders as a visually distinct,
-    // non-buyable card — "Listed on <marketplace>" badge; the detail overlay
-    // links out instead of offering an in-app Buy.
-    if (vm.external) {
+    // #131: an external (brokered) listing we can't buy here renders as a
+    // visually distinct card — "Listed on <marketplace>" badge; the detail
+    // overlay links out. A Buy-now row (#426, measured broker fee) skips
+    // this and reads as a standard listing at its all-in price.
+    if (marketPure.externalLook(vm)) {
       card.classList.add('market-card-external');
       const badge = document.createElement('span');
       badge.className = 'market-card-external-badge';
@@ -5283,8 +5286,27 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   const feeNote = el('listing-detail-fee');
   extLink.hidden = true;
   feeNote.hidden = true;
+  // #426: the marketplace deep link as a secondary action, beside a primary
+  // that isn't it (Buy now, or your own listing). Only external rows carry
+  // an externalUrl.
+  const showMarketplaceLink = () => {
+    if (!vm.externalUrl) return;
+    extLink.textContent = `View on ${vm.marketplace} ↗`;
+    extLink.hidden = false;
+    extLink.onclick = () => openExternal(vm.externalUrl, 'noopener');
+  };
   const buyNow = marketPure.buyNowLabel(vm);
-  if (vm.external && buyNow) {
+  if (marketPure.isOwnListing(vm, me && me.wallet)) {
+    // The server refuses to sell you your own listing, and Buy now on your
+    // own external listing is a bid on your own NFT, which it refuses too;
+    // don't offer an action that can only fail. Unlisting lives under Mine,
+    // and an external listing keeps its marketplace link so you can manage
+    // it there.
+    action.textContent = 'Your listing';
+    action.disabled = true;
+    action.onclick = null;
+    showMarketplaceLink();
+  } else if (vm.external && buyNow) {
     // #426: the broker's fee rate is measured, so the server computed the
     // minimum bid its bot will settle. Primary = Buy now (a plain native
     // bid at the clearing price; the broker's bot brokers the accept),
@@ -5294,21 +5316,11 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     action.onclick = () => { buyExternalNow(row, vm).catch((e) => showError(e.message)); };
     feeNote.textContent = marketPure.feeCoverNote(vm) || marketPure.externalFeeNote(vm);
     feeNote.hidden = false;
-    if (vm.externalUrl) {
-      extLink.textContent = `View on ${vm.marketplace} ↗`;
-      extLink.hidden = false;
-      extLink.onclick = () => window.open(vm.externalUrl, '_blank', 'noopener');
-    }
+    showMarketplaceLink();
   } else if (vm.external) {
     action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
     action.disabled = !vm.externalUrl;
-    action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
-  } else if (marketPure.isOwnListing(vm, me && me.wallet)) {
-    // The server refuses to sell you your own listing; don't offer a Buy
-    // that can only fail. Unlisting lives under Mine.
-    action.textContent = 'Your listing';
-    action.disabled = true;
-    action.onclick = null;
+    action.onclick = () => { if (vm.externalUrl) openExternal(vm.externalUrl, 'noopener'); };
   } else {
     action.textContent = `Buy — ${vm.priceLabel}`;
     action.disabled = false;
@@ -5398,8 +5410,10 @@ async function loadMarketBrowse({ append = false } = {}) {
     // #131/#203: read these controls defensively — a stale cached
     // index.html paired with fresh app.js (Discord webview / browser cache
     // skew) would otherwise throw here, before the try below, and blank the
-    // whole grid. Missing element -> the old default behavior.
-    includeExternal: Boolean(el('market-include-external')?.checked ?? true),
+    // whole grid. Missing element -> the old default behavior. Unchecked
+    // still fetches the Buy-now-capable externals ('supported'): they render
+    // as standard listings, so the toggle hides only the ones we can't buy.
+    includeExternal: (el('market-include-external')?.checked ?? true) ? true : 'supported',
     seller: el('market-mine-only')?.checked && me && me.wallet ? me.wallet : '',
     // #481: one card per (slot, value) for traits — server-side, so paging
     // never splits a group and counts/floors are collection-wide.

@@ -205,3 +205,42 @@ class TestClearingDrops:
             brokers.clearing_drops(100, 1.0)
         with pytest.raises(ValueError):
             brokers.clearing_drops(100, -0.1)
+
+
+class TestBuyNowClearing:
+    """The all-in price of a listing destination-locked to a broker: what the
+    Buy-now bid is, what the card shows, and what browse sorts/filters on."""
+
+    @pytest.fixture(autouse=True)
+    def _no_buffer(self, monkeypatch):
+        monkeypatch.delenv("BROKER_CLEARING_BUFFER_DROPS", raising=False)
+
+    def test_measured_broker_prices_at_its_clearing_amount(self):
+        # The #4691 cafe fill: ask 4,990,000 -> 5,070,572.
+        assert brokers.buy_now_clearing(XRPCAFE, 4_990_000) == 5_070_572
+
+    def test_unmeasured_broker_has_no_buy_now_price(self):
+        # bidds ships broker_rate None: guessing a rate would place bids that
+        # silently never fill.
+        assert brokers.buy_now_clearing("rpZqTPC8GvrSvEfFsUuHkmPCg29GdQuXhC", 4_990_000) is None
+
+    def test_in_app_unknown_or_askless_rows_have_none(self):
+        assert brokers.buy_now_clearing(None, 4_990_000) is None
+        assert brokers.buy_now_clearing("", 4_990_000) is None
+        assert brokers.buy_now_clearing("rPrivatePeerDest111111111111111111", 4_990_000) is None
+        assert brokers.buy_now_clearing(XRPCAFE, None) is None
+
+    def test_broker_measured_later_via_overlay_gets_a_price(self, tmp_path, monkeypatch):
+        # Measuring a broker's fee (allowlist overlay) is all it takes for its
+        # listings to become Buy-now rows: 1,000,000 at 2% -> 1,020,409, the
+        # least bid leaving the seller >= the ask after ceil(bid * 2%).
+        path = tmp_path / "allow.json"
+        path.write_text(
+            json.dumps(
+                {"rpZqTPC8GvrSvEfFsUuHkmPCg29GdQuXhC": {"name": "bidds", "broker_rate": 0.02}}
+            )
+        )
+        monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
+        assert (
+            brokers.buy_now_clearing("rpZqTPC8GvrSvEfFsUuHkmPCg29GdQuXhC", 1_000_000) == 1_020_409
+        )
