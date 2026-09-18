@@ -133,6 +133,13 @@ the same Closet token can lose an update. For each such item:
    `needs_attention` if the session recorded a burn hash or an unknown-outcome
    transaction, otherwise `failed`.
 
+The item's Deposit journal id is saved to the plan file before the burn. If a
+run dies mid-item, the next run reads that journal first: a completed Deposit
+(`complete` / `complete_pending_mirror`) is recorded without burning again; a
+journal that shows no burn (`failed_burn`) is retried normally; a plain
+`failed` journal with no burn or pending hash and the token still held is
+retried; anything else (the burn may have happened) is `needs_attention`.
+
 **Phase 2 — list.** Runs only when no item is `planned`, `failed` or
 `needs_attention`. For each
 `deposited` item: `create_ask(owner=house, price)`, then `cross_incoming`. Record
@@ -145,7 +152,10 @@ cannot race the service.
 The house wallet is a project wallet. Add it to the leaderboard system accounts
 (`_lb_system_accounts`, so it doesn't top the BRIX boards with sale proceeds)
 and to the SourceTag metrics' operator wallets (so its two setup transactions
-don't count as a user).
+don't count as a user). Both read `CLOSET_HOUSE_WALLET` at call time; for a
+later rotation, every house address also goes into the append-only
+`system_wallets.HISTORICAL_HOUSE_WALLETS` the day it goes into service (#414),
+and setup and the migration refuse a house that isn't listed there.
 
 ## Side effects
 
@@ -177,7 +187,11 @@ don't count as a user).
   sold token is skipped; listing rows closed; phase 2 asks at the old prices; a
   standing bid crosses at the bid price.
 - Setup: TrustSet and accept built for the house account with SourceTag and memos.
-- Exclusions: the house wallet is in both lists.
+- Exclusions: the house wallet is in both lists; setup and the migration refuse
+  a house missing from the durable roster.
+- Crash resume: a Deposit that completed before the plan save is recorded, not
+  burned again; one that died between the burn and the credit is
+  `needs_attention`.
 
 ## Out of scope
 

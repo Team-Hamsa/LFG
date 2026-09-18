@@ -24,3 +24,9 @@ def test_an_unset_house_adds_nothing(monkeypatch):
     monkeypatch.setattr(config, "CLOSET_HOUSE_WALLET", "")
     assert "" not in server._lb_system_accounts()
     assert "" not in stm.excluded_wallets()
+
+
+def test_house_wallets_are_part_of_the_durable_roster():
+    from lfg_core import system_wallets
+
+    assert system_wallets.HISTORICAL_HOUSE_WALLETS <= system_wallets.DURABLE_SYSTEM_ACCOUNTS

@@ -1436,9 +1436,11 @@ Off-ledger trait order book for loose Closet assets. Design:
   standing bid at or above one fills at the bid's price). Deposits refuse while
   the house has a live order or fill; the plan file
   `reports/house_migration_<net>.json` makes re-runs resume, and a post-burn
-  failure (`needs_attention`) is never retried automatically. The house wallet
-  is excluded from leaderboards and SourceTag metrics like the other project
-  wallets.
+  failure (`needs_attention`) is never retried automatically; each Deposit's
+  journal id is saved before its burn, so a run that died mid-item resumes from
+  that journal. The house wallet is excluded from leaderboards and SourceTag
+  metrics like the other project wallets, and setup/migrate refuse a house that
+  is not in `system_wallets.HISTORICAL_HOUSE_WALLETS` (append-only, #414).
 - **Bids** lock BRIX in an XRPL TokenEscrow to the app wallet with a
   PREIMAGE-SHA-256 condition (`lfg_core/crypto_condition.py`); the fulfillment
   is Fernet-sealed with `CLOSET_MARKET_ENC_KEY`. Bids open only after the

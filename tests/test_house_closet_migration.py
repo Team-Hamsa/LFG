@@ -5,7 +5,7 @@ from cryptography.fernet import Fernet
 
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
-from lfg_core import config, market_store
+from lfg_core import config, market_store, system_wallets
 from lfg_core import economy_store as es
 from lfg_core import house_closet as hc
 from lfg_core.market_store import MarketListing, upsert_listing
@@ -126,6 +126,7 @@ def _ready_env(monkeypatch):
     monkeypatch.setattr(config, "ECONOMY_ENABLED", True)
     monkeypatch.setattr(config, "CLOSET_MARKET_ENABLED", True)
     monkeypatch.setattr(config, "CLOSET_MARKET_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(system_wallets, "DURABLE_SYSTEM_ACCOUNTS", frozenset({HOUSE}))
 
 
 def test_check_ready_fails_closed(tmp_path, monkeypatch):
@@ -145,6 +146,10 @@ def test_check_ready_fails_closed(tmp_path, monkeypatch):
         hc.check_ready(conn, HOUSE, state, brix_line=None, limit="1000000000")
     with pytest.raises(hc.MigrationRefused, match="trust line"):
         hc.check_ready(conn, HOUSE, state, brix_line={"limit": "10"}, limit="1000000000")
+    monkeypatch.setattr(system_wallets, "DURABLE_SYSTEM_ACCOUNTS", frozenset())
+    with pytest.raises(hc.MigrationRefused, match="HISTORICAL_HOUSE_WALLETS"):
+        hc.check_ready(conn, HOUSE, state, brix_line=line, limit="1000000000")
+    _ready_env(monkeypatch)
     state["items"]["TX"] = {"status": hc.NEEDS_ATTENTION}
     with pytest.raises(hc.MigrationRefused, match="need attention"):
         hc.check_ready(conn, HOUSE, state, brix_line=line, limit="1000000000")
@@ -186,6 +191,7 @@ def _migration(tmp_path, **fake_kw):
     )
     state = hc.load_state(deps.plan_path)
     hc.merge_plan(state, hc.build_plan(conn, APP), HOUSE)
+    hc.save_state(deps.plan_path, state)  # as scripts/house_closet.py does before phase 1
     return conn, f, deps, state
 
 
@@ -285,3 +291,52 @@ def test_list_phase_adopts_an_ask_a_crash_left_unrecorded(tmp_path):
         "SELECT COUNT(*) FROM closet_orders WHERE owner = ? AND side = 'ask'", (HOUSE,)
     ).fetchone()[0]
     assert asks == 1
+
+
+class _Crash(BaseException):
+    """The process dying: not caught by run_deposit's `except Exception`."""
+
+
+def _burned_on_ledger(f, nft_id):
+    f.owner_for[nft_id] = None  # the fake ledger no longer shows the app wallet holding it
+
+
+def test_a_crash_after_a_completed_deposit_resumes_as_deposited(tmp_path, monkeypatch):
+    conn, f, deps, state = _migration(tmp_path)
+    real_close = hc.market_store.close_listing
+
+    def crash(*args, **kwargs):
+        raise _Crash()
+
+    monkeypatch.setattr(hc.market_store, "close_listing", crash)
+    with pytest.raises(_Crash):
+        _run(hc.deposit_phase(state, deps))
+    # The Deposit completed, but the plan file never recorded it.
+    saved = hc.load_state(deps.plan_path)
+    assert saved["items"]["TA"]["status"] == hc.PLANNED
+    assert saved["items"]["TA"]["journal_id"]
+    _burned_on_ledger(f, "TA")
+    monkeypatch.setattr(hc.market_store, "close_listing", real_close)
+
+    assert _run(hc.deposit_phase(saved, deps)) is True
+    assert saved["items"]["TA"]["status"] == hc.DEPOSITED
+    assert f.burns.count(("TA", APP)) == 1  # never burned twice
+    assert tuple(_live(conn, "TA")) == (0, "cancelled")
+
+
+def test_a_crash_between_the_burn_and_the_credit_needs_attention(tmp_path):
+    conn, f, deps, state = _migration(tmp_path)
+
+    async def crash_modify(nft_id, owner, url):
+        raise _Crash()
+
+    deps.economy.closet_modify_fn = crash_modify
+    with pytest.raises(_Crash):
+        _run(hc.deposit_phase(state, deps))
+    saved = hc.load_state(deps.plan_path)
+    _burned_on_ledger(f, "TA")
+    deps.economy.closet_modify_fn = f.closet_modify
+
+    assert _run(hc.deposit_phase(saved, deps)) is False
+    assert saved["items"]["TA"]["status"] == hc.NEEDS_ATTENTION
+    assert f.burns.count(("TA", APP)) == 1

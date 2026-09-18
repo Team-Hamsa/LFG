@@ -25,7 +25,7 @@ from xrpl.wallet import Wallet
 
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
-from lfg_core import config, economy_flow, market_ops, market_store, memos
+from lfg_core import config, economy_flow, market_ops, market_store, memos, system_wallets
 from lfg_core import economy_store as es
 
 
@@ -100,6 +100,18 @@ LISTED = "listed"
 
 class MigrationRefused(RuntimeError):
     """A precondition failed. Nothing was changed."""
+
+
+def require_durable_exclusion(house: str) -> None:
+    """A house wallet goes into service only once it is in the append-only
+    durable roster: leaderboards and metrics exclude it by config too, but a
+    later rotation would reclassify its archived activity as a user's (#414)."""
+    if house not in system_wallets.DURABLE_SYSTEM_ACCOUNTS:
+        raise MigrationRefused(
+            f"add {house} to lfg_core/system_wallets.py HISTORICAL_HOUSE_WALLETS "
+            "(append-only) before it goes into service, so its history stays "
+            "excluded from leaderboards and metrics if the house ever changes"
+        )
 
 
 @dataclass(frozen=True)
@@ -248,6 +260,7 @@ def check_ready(
             f"{house} needs a BRIX trust line with a limit of at least {limit}; "
             "run --apply-setup first"
         )
+    require_durable_exclusion(house)
     stuck = [n for n, e in state["items"].items() if e["status"] == NEEDS_ATTENTION]
     if stuck:
         raise MigrationRefused(
@@ -257,6 +270,9 @@ def check_ready(
 
 
 _RETRYABLE = (PLANNED, FAILED)
+# Deposit journal statuses (economy_flow.run_deposit) a resumed item is judged by.
+_JOURNAL_COMPLETE = ("complete", "complete_pending_mirror")
+_JOURNAL_UNCHANGED = ("failed_burn",)  # the burn definitively did not happen
 
 
 @dataclass
@@ -268,9 +284,34 @@ class MigrationDeps:
     plan_path: str
 
 
+def _prior_journal(deps: MigrationDeps, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The Deposit journal of this item's previous attempt, if it wrote one."""
+    if not entry.get("journal_id"):
+        return None
+    path = os.path.join(deps.economy.records_dir, f"deposit-{entry['journal_id']}.json")
+    try:
+        with open(path) as fh:
+            return dict(json.load(fh))
+    except FileNotFoundError:
+        return None
+
+
+def _deposited(conn: sqlite3.Connection, entry: dict[str, Any]) -> None:
+    """Bookkeeping once the unit is in the house Closet. The burn deleted the
+    sell offer on-ledger, but the listener does not close listings on a burn;
+    without this the row lingers until the nightly market sweep."""
+    market_store.close_listing(conn, entry["offer_index"], "cancelled")
+    entry.update(status=DEPOSITED if entry["action"] == LIST else HELD, error=None)
+
+
 async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
     """Burn each planned token into the house Closet. True once nothing is left
-    to deposit; False when it stopped on a failure (the item's error says why)."""
+    to deposit; False when it stopped on a failure (the item's error says why).
+
+    Each item's Deposit journal id is saved before its burn, so a run that died
+    mid-item is judged from that journal on the next run: a completed Deposit is
+    recorded, never burned again, and one that may have burned without crediting
+    the house is `needs_attention`, never retried."""
     items = state["items"]
     todo = sorted(n for n, e in items.items() if e["status"] in _RETRYABLE)
     if not todo:
@@ -283,12 +324,36 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
         )
     for nft_id in todo:
         entry = items[nft_id]
+        prior = _prior_journal(deps, entry)
+        prior_status = prior["status"] if prior else None
+        if prior_status in _JOURNAL_COMPLETE:
+            _deposited(conn, entry)
+            save_state(deps.plan_path, state)
+            continue
         info = await deps.economy.trait_info_fn(nft_id)  # type: ignore[misc]
         if info is None:
             entry.update(status=FAILED, error="could not look up the token on-ledger")
             save_state(deps.plan_path, state)
             return False
-        if info.get("is_burned") or info.get("owner") != deps.app_wallet:
+        held = not info.get("is_burned") and info.get("owner") == deps.app_wallet
+        if prior is not None and prior_status not in _JOURNAL_UNCHANGED:
+            # A previous attempt got past its checks. Retry only a plain failure
+            # that provably burned nothing and left the token where it was.
+            retry = (
+                prior_status == "failed"
+                and held
+                and not prior.get("burn_hash")
+                and not prior.get("pending_tx_hash")
+            )
+            if not retry:
+                entry.update(
+                    status=NEEDS_ATTENTION,
+                    error="a previous attempt may have burned this token without crediting "
+                    f"the house Closet (Deposit journal {entry['journal_id']}: {prior_status})",
+                )
+                save_state(deps.plan_path, state)
+                return False
+        if not held:
             entry.update(
                 status=SKIPPED,
                 error=f"no longer held by the app wallet (owner {info.get('owner')}, "
@@ -299,14 +364,12 @@ async def deposit_phase(state: dict[str, Any], deps: MigrationDeps) -> bool:
         session = economy_flow.DepositSession(
             owner=deps.app_wallet, nft_id=nft_id, credit_to=deps.house
         )
+        entry["journal_id"] = session.id
+        save_state(deps.plan_path, state)  # before the burn: see the docstring
         await economy_flow.run_deposit(session, deps.economy)
-        entry.update(journal_id=session.id, burn_hash=session.burn_hash)
+        entry["burn_hash"] = session.burn_hash
         if session.state == economy_flow.DONE:
-            # The burn deleted the sell offer on-ledger, but the listener does not
-            # close listings on a burn; without this the row lingers until the
-            # nightly market sweep.
-            market_store.close_listing(conn, entry["offer_index"], "cancelled")
-            entry.update(status=DEPOSITED if entry["action"] == LIST else HELD, error=None)
+            _deposited(conn, entry)
             save_state(deps.plan_path, state)
             continue
         burned = bool(session.burn_hash or session.pending_tx_hash)
@@ -405,6 +468,7 @@ async def setup_house(wallet: Wallet, deps: SetupDeps, *, limit: str) -> dict[st
     BRIX), then the house Closet, minted if needed and accepted with the house
     seed. Returns what each step did."""
     house = wallet.classic_address
+    require_durable_exclusion(house)
     if await deps.account_fn(house) is None:
         raise MigrationRefused(
             f"{house} is not funded on this network; send it the XRP reserve first"

@@ -7,13 +7,18 @@ from xrpl.models.transactions import NFTokenAcceptOffer, TrustSet
 from xrpl.wallet import Wallet
 
 from lfg_core import closet_token as ct
-from lfg_core import config
+from lfg_core import config, system_wallets
 from lfg_core import economy_store as es
 from lfg_core import house_closet as hc
 from tests.test_economy_flow_deposit import _F, _deps, _run
 
 HOUSE_WALLET = Wallet.create()
 HOUSE = HOUSE_WALLET.classic_address
+
+
+@pytest.fixture(autouse=True)
+def _house_is_durably_excluded(monkeypatch):
+    monkeypatch.setattr(system_wallets, "DURABLE_SYSTEM_ACCOUNTS", frozenset({HOUSE}))
 
 
 class _Chain(_F):
@@ -122,4 +127,13 @@ def test_setup_confirms_a_landed_accept_without_resubmitting(tmp_path):
     conn, deps = _setup_deps(tmp_path, chain)
     es.set_closet_token(conn, HOUSE, "C-house", "AB", status=ct.PENDING_ACCEPT, offer_id="OLD")
     assert _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))["closet"] == ct.ACTIVE
+    assert chain.submitted == []
+
+
+def test_setup_refuses_a_house_missing_from_the_durable_roster(tmp_path, monkeypatch):
+    monkeypatch.setattr(system_wallets, "DURABLE_SYSTEM_ACCOUNTS", frozenset())
+    chain = _Chain()
+    conn, deps = _setup_deps(tmp_path, chain)
+    with pytest.raises(hc.MigrationRefused, match="HISTORICAL_HOUSE_WALLETS"):
+        _run(hc.setup_house(HOUSE_WALLET, deps, limit="1000000000"))
     assert chain.submitted == []

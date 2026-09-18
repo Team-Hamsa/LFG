@@ -148,7 +148,11 @@ the Closet market from a house wallet. The app wallet is the issuer and can't
 own a Closet (#383).
 
 1. Fill `CLOSET_HOUSE_WALLET` and `CLOSET_HOUSE_SEED` in `.env` (placeholders
-   are already there). Fund the wallet with the XRP reserve.
+   are already there). Fund the wallet with the XRP reserve. Add the address to
+   `HISTORICAL_HOUSE_WALLETS` in `lfg_core/system_wallets.py` (append-only, a
+   normal PR, then promote): setup and the migration refuse a house missing
+   there, so its history stays out of leaderboards and metrics even if the
+   house wallet changes later.
 2. Status, then the one-time setup (BRIX trust line + Closet claim, both signed
    with the house seed):
    ```bash
@@ -169,8 +173,11 @@ own a Closet (#383).
    ```
 5. Check Browse and `scripts/audit_trait_economy.py` (the census must not move).
 
-Re-running is safe: `reports/house_migration_<net>.json` records every item.
-`failed` items (nothing changed) are retried. `needs_attention` items (burned,
-or burn outcome unknown) are not: find the Deposit journal named in the plan
-file under `ECONOMY_RECORDS_DIR` and resolve it first. Deposits refuse while
-the house has a live order or an unfinished fill.
+Re-running is safe: `reports/house_migration_<net>.json` records every item,
+including each Deposit's journal id before its burn. A run that died mid-item is
+judged from that journal: a completed Deposit is recorded (never burned again),
+and one that may have burned without crediting the house is `needs_attention`.
+`failed` items (nothing changed) are retried. `needs_attention` items are not:
+find the Deposit journal named in the plan file under `ECONOMY_RECORDS_DIR` and
+resolve it first. Deposits refuse while the house has a live order or an
+unfinished fill.
