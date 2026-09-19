@@ -36,26 +36,58 @@ def post_alert(webhook_url: str, body: str) -> bool:
 
 def assemble_alert_body(header: str, rows: list[str], trailer: list[str], limit: int = 1900) -> str:
     """Join `header`, `rows`, and `trailer` into an alert body that GUARANTEES
-    `header` and `trailer` survive, however many `rows` there are (#560 review
-    round 1: post_alert()'s own truncation is a blind `body[:1900]` — it has
-    no idea the trailer is the reproduction command / recovery instructions,
-    so a long finding list was silently eating the only actionable content on
-    exactly the worst nights). `rows` are the elidable part: kept in order
-    from the front, dropped from the back with an honest "... and N more"
-    count so a shortened list is never mistaken for a complete one.
+    the return value is never longer than `limit` (#560 review round 3) while
+    keeping `trailer` — the reproduction/remediation commands, the part an
+    operator acts on — intact ahead of everything else:
 
-    `limit` matches post_alert's own truncation point, so under normal
-    operation this makes that truncation a no-op; it only still applies in a
-    pathological case this function itself cannot fix (header + trailer alone
-    already at or past the limit, or one single `rows` entry longer than the
-    entire budget)."""
+    1. If it all fits, return it as-is.
+    2. Otherwise elide `rows` from the back, in order, replaced with an
+       honest "... and N more" count, keeping `header` and `trailer` whole
+       (#560 review round 1: post_alert()'s own truncation is a blind
+       `body[:1900]` that has no idea `trailer` matters, so a long finding
+       list was silently eating the only actionable content on exactly the
+       worst nights).
+    3. If `header` + `trailer` alone (every row elided) still doesn't fit,
+       trim `header` — never `trailer` — down to whatever room is left,
+       even to nothing.
+    4. Only if `trailer` alone already exceeds `limit` (e.g. #560 review
+       round 3: audit_trait_economy's `report_path` is caller-supplied via an
+       unconstrained `--report-dir` and lives inside a trailer line) does the
+       trailer itself give: keep as many WHOLE trailer lines as fit,
+       preferring the SHORTEST ones first, since a single unbounded line
+       (like a report path) is what can blow up, never the short, universal
+       remediation commands — so a short line always wins a spot over a long
+       one. If even the shortest single line alone doesn't fit, it is
+       character-truncated as an absolute last resort.
+
+    This makes post_alert()'s own `body[:1900]` a no-op for every caller that
+    goes through this function; that slice is untouched and stays the
+    backstop for any caller that does not."""
     full = "\n".join([header, *rows, *trailer])
     if len(full) <= limit:
         return full
+
     for keep in range(len(rows), -1, -1):
         elided = len(rows) - keep
         elision = [f"... and {elided} more"] if elided else []
         candidate = "\n".join([header, *rows[:keep], *elision, *trailer])
-        if len(candidate) <= limit or keep == 0:
+        if len(candidate) <= limit:
             return candidate
-    return full  # unreachable — the keep == 0 iteration always returns
+
+    trailer_block = "\n".join(trailer)
+    if len(trailer_block) <= limit:
+        budget = limit - len(trailer_block) - (1 if trailer_block else 0)
+        pieces = [p for p in (header[: max(budget, 0)], trailer_block) if p]
+        return "\n".join(pieces)
+
+    order = sorted(range(len(trailer)), key=lambda i: len(trailer[i]))
+    keep_idx: set[int] = set()
+    used = 0
+    for i in order:
+        cost = len(trailer[i]) + (1 if keep_idx else 0)
+        if used + cost <= limit:
+            keep_idx.add(i)
+            used += cost
+    if keep_idx:
+        return "\n".join(trailer[i] for i in sorted(keep_idx))
+    return min(trailer, key=len)[:limit]

@@ -245,6 +245,45 @@ def test_assemble_alert_body_elides_rows_but_keeps_the_trailer():
     assert "finding 299" not in body  # some rows really were dropped
 
 
+def test_assemble_alert_body_trims_the_header_not_the_trailer_when_even_that_does_not_fit():
+    """#560 review round 3 (CodeRabbit): eliding every row still isn't enough
+    when `header` alone is absurd — the function must GUARANTEE its own
+    return value is <= limit, never lean on post_alert's blind body[:1900]
+    to do it (that would cut the trailer, exactly what round 1 fixed). The
+    header gives, not the trailer: an operator acts on the trailer."""
+    trailer = ["Run the remediation command.", "Report: reports/x.md"]
+    body = ate.assemble_alert_body("H" * 5000, [], trailer)
+    assert len(body) <= 1900
+    assert body.endswith("\n".join(trailer))  # the whole trailer, untouched
+    assert "Run the remediation command." in body
+
+
+def test_assemble_alert_body_shortest_trailer_line_wins_when_trailer_alone_is_too_long():
+    """One tier deeper than the above: if the TRAILER itself (not just the
+    header) already exceeds the limit — e.g. one caller-supplied line, like a
+    report path, is itself enormous — the short, universal remediation line
+    must survive and the one enormous line must be the thing that gives, not
+    the other way around."""
+    huge_report_line = "Report: " + ("x" * 3000)
+    trailer = ["Run the remediation command.", huge_report_line]
+    body = ate.assemble_alert_body("normal header", [], trailer)
+    assert len(body) <= 1900
+    assert "Run the remediation command." in body
+    assert huge_report_line not in body
+
+
+def test_build_alert_body_survives_an_absurdly_long_report_path():
+    """The REAL reachability path CodeRabbit named: audit_trait_economy.py
+    accepts an unconstrained --report-dir, so report_path (embedded in the
+    trailer's own last line) can be made arbitrarily long by the caller."""
+    report = trait_economy.ConservationReport(trait_drift={}, ok=True)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    huge_path = "reports/" + ("x" * 3000) + ".md"
+    body = ate.build_alert_body("mainnet", 1, report, completeness, huge_path)
+    assert len(body) <= 1900
+    assert "Run scripts/reconcile_supply_growth.py" in body  # remediation survives
+
+
 def test_build_alert_body_many_rows_still_ends_with_the_report_path():
     trait_drift = {(f"Slot{i}", "Value"): -1 for i in range(300)}
     report = trait_economy.ConservationReport(trait_drift=trait_drift, ok=False)
