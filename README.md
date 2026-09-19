@@ -465,12 +465,9 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#473 — Joey browser extension arm: sign in + sign via injected provider (XLS-72d)](../../issues/473)
 - [ ] [#474 — feat: social sign-in (X, Discord, Google, Apple)](../../issues/474)
 - [ ] [#475 — feat: auto-post admin/campaign events to X with templated campaign image](../../issues/475)
-- [ ] [#483 — Trait marketplace: hide or restyle empty-slot (None) trait tokens](../../issues/483)
 - [ ] [#484 — Trait marketplace: richer browse filters (value search, body affinity, ownership, seller)](../../issues/484)
 - [ ] [#485 — Trait marketplace: price context on cards (shop anchor, last sold, floor)](../../issues/485)
-- [ ] [#486 — Trait marketplace: explain the two-signature XRP on-ramp in the buy flow](../../issues/486)
 - [ ] [#487 — Trait marketplace: try-on preview before buying](../../issues/487)
-- [ ] [#488 — Trait marketplace: post-buy 'settling into your Closet' state](../../issues/488)
 - [ ] [#489 — Trait marketplace: mobile layout — collapse filters behind a drawer](../../issues/489)
 - [ ] [#494 — feat: rarity transparency — show per-trait mint odds vs collection share, drift, and how the engine works](../../issues/494)
 - [ ] [#498 — Marketplace: batch cross-listing of external listings onto LFG (blocked on #219)](../../issues/498)
@@ -484,6 +481,9 @@ collection (not a general tool). Full rationale per row in
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#488 — Trait marketplace: post-buy 'settling into your Closet' state](../../issues/488) (closed 2026-09-19)
+- [x] [#486 — Trait marketplace: explain the two-signature XRP on-ramp in the buy flow](../../issues/486) (closed 2026-09-19)
+- [x] [#483 — Trait marketplace: hide or restyle empty-slot (None) trait tokens](../../issues/483) (closed 2026-09-19)
 - [x] [#470 — Closet-native trait listings: sell traits without minting a token first](../../issues/470) (closed 2026-09-17)
 - [x] [#463 — Joey browser-extension support via @joeywallet/wallet-sdk (XLS-72d injected provider)](../../issues/463) (closed 2026-09-17)
 - [x] [#399 — Sign in with Joey Wallet (WalletConnect)](../../issues/399) (closed 2026-09-17)
@@ -491,9 +491,6 @@ collection (not a general tool). Full rationale per row in
 - [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
 - [x] [#496 — feat(marketplace): buy offers / bids on traits in the trait marketplace](../../issues/496) (closed 2026-09-14)
 - [x] [#490 — SourceTag badge: publish a funder-deduped unique_actors count](../../issues/490) (closed 2026-09-13)
-- [x] [#481 — Trait marketplace: collapse duplicate (slot, value) listings into one card](../../issues/481) (closed 2026-09-11)
-- [x] [#477 — feat(x): auto-poster attaches the branded share-card render instead of raw NFT art](../../issues/477) (closed 2026-09-10)
-- [x] [#447 — Multi-wallet-provider signin on the web surface via XRPL Commons xrpl-connect + explicit wallet linking](../../issues/447) (closed 2026-08-28)
 <!-- roadmap:end -->
 
 <details>
