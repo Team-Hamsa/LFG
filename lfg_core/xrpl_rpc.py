@@ -110,6 +110,20 @@ raises) — so callers' existing handling
 (``is_successful`` checks, ``IndeterminateResultError``, the #385 malformed
 retry) behaves unchanged.
 
+Busy retry rounds
+-----------------
+Failing over only helps while SOME endpoint has capacity. On 2026-09-19
+01:36 UTC s1, s2 and xrplcluster all shed load within the same second, so
+the walk ended in ~1 s and BRIX claims were refused ``claim_unavailable``.
+When a whole pass ends with every endpoint having ANSWERED "busy" (a soft
+error code or an endpoint-level HTTP status), the pass is repeated after each
+delay in ``BUSY_RETRY_BACKOFF_SECONDS`` (env ``XRPL_RPC_BUSY_RETRY_BACKOFF``,
+comma-separated seconds, default ``1,2.5``; empty disables). A pass with any
+transport failure (connect error, timeout, malformed body) is not repeated:
+an unreachable endpoint gives no load signal, and waiting out N more request
+timeouts would only stall the caller. Repeating a pass re-posts the identical
+payload, so the duplicate-submit argument above covers it unchanged.
+
 Endpoint restriction
 --------------------
 ``restrict_to(urls)`` narrows the factories' DEFAULT url list
@@ -130,7 +144,9 @@ Scope: JSON-RPC only. ``XRPL_WS_URL`` / ``XRPL_CLIO_WS_URL`` are not covered.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -200,6 +216,33 @@ TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
 _http_transport: httpx.AsyncBaseTransport | None = None
 
 COOLDOWN_SECONDS = 45.0
+
+_DEFAULT_BUSY_BACKOFF = (1.0, 2.5)
+
+
+def parse_busy_backoff(raw: str | None) -> tuple[float, ...]:
+    """`XRPL_RPC_BUSY_RETRY_BACKOFF` -> delays. Unset = default; empty = no
+    retry rounds; anything unparseable or negative falls back to the default."""
+    if raw is None:
+        return _DEFAULT_BUSY_BACKOFF
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    try:
+        delays = tuple(float(p) for p in parts)
+    except ValueError:
+        logger.warning("XRPL_RPC_BUSY_RETRY_BACKOFF=%r is invalid; using the default", raw)
+        return _DEFAULT_BUSY_BACKOFF
+    if any(d < 0 for d in delays):
+        logger.warning("XRPL_RPC_BUSY_RETRY_BACKOFF=%r is negative; using the default", raw)
+        return _DEFAULT_BUSY_BACKOFF
+    return delays
+
+
+BUSY_RETRY_BACKOFF_SECONDS: tuple[float, ...] = parse_busy_backoff(
+    os.getenv("XRPL_RPC_BUSY_RETRY_BACKOFF")
+)
+
+# Test seam: the wait between busy passes.
+_sleep = asyncio.sleep
 
 _cooldown_until: dict[str, float] = {}
 _cooldown_lock = threading.Lock()
@@ -319,38 +362,54 @@ async def failover_request(
     # request model fails immediately instead of cooling down every URL.
     payload = request_to_json_rpc(request)
     method = str(payload.get("method"))
-    order = _attempt_order(urls)
     last_response: Response | None = None
     last_exc: BaseException | None = None
-    for index, url in enumerate(order):
-        try:
-            response = await _post_json_rpc(url, payload, timeout)
-        except DefinitiveRequestFailure:
-            raise
-        except HTTPStatusFailure as exc:
-            reason = f"HTTP {exc.status}"
-            if exc.response is not None:
-                last_exc, last_response = None, exc.response
-            else:
-                last_exc, last_response = exc, None
-        except TRANSPORT_ERRORS as exc:
-            reason = type(exc).__name__
-            last_exc, last_response = exc, None
-        else:
-            code = _soft_error(response)
-            if code is None:
-                _mark_ok(url)
-                return response
-            reason = code
-            last_exc, last_response = None, response
-        _mark_failed(url)
-        if index + 1 < len(order):
+    delays = BUSY_RETRY_BACKOFF_SECONDS
+    for attempt in range(len(delays) + 1):
+        if attempt:
+            delay = delays[attempt - 1]
             logger.warning(
-                "XRPL JSON-RPC %s failed over from %s (%s); trying next endpoint",
+                "XRPL JSON-RPC %s: every endpoint busy; retrying in %.1fs (round %d/%d)",
                 method,
-                url,
-                reason,
+                delay,
+                attempt + 1,
+                len(delays) + 1,
             )
+            await _sleep(delay)
+        order = _attempt_order(urls)
+        all_busy = True
+        for index, url in enumerate(order):
+            try:
+                response = await _post_json_rpc(url, payload, timeout)
+            except DefinitiveRequestFailure:
+                raise
+            except HTTPStatusFailure as exc:
+                reason = f"HTTP {exc.status}"
+                if exc.response is not None:
+                    last_exc, last_response = None, exc.response
+                else:
+                    last_exc, last_response = exc, None
+            except TRANSPORT_ERRORS as exc:
+                reason = type(exc).__name__
+                last_exc, last_response = exc, None
+                all_busy = False
+            else:
+                code = _soft_error(response)
+                if code is None:
+                    _mark_ok(url)
+                    return response
+                reason = code
+                last_exc, last_response = None, response
+            _mark_failed(url)
+            if index + 1 < len(order):
+                logger.warning(
+                    "XRPL JSON-RPC %s failed over from %s (%s); trying next endpoint",
+                    method,
+                    url,
+                    reason,
+                )
+        if not all_busy:
+            break
     if last_response is not None:
         return last_response
     assert last_exc is not None

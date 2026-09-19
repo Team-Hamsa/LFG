@@ -758,3 +758,74 @@ def test_all_fail_last_5xx_text_raises_request_failure(monkeypatch):
     with pytest.raises(XRPLRequestFailureException) as info:
         _sync(client.request, Ledger(ledger_index="validated"))
     assert info.value.error == 502
+
+
+# --- busy retry rounds (2026-09-19: every endpoint shed load at once) ---
+
+
+@pytest.fixture
+def _busy_rounds(monkeypatch):
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(xrpl_rpc, "BUSY_RETRY_BACKOFF_SECONDS", (1.0, 2.5))
+    monkeypatch.setattr(xrpl_rpc, "_sleep", fake_sleep)
+    return sleeps
+
+
+def test_all_busy_pass_is_retried_after_backoff(monkeypatch, _busy_rounds):
+    t = _install(
+        monkeypatch,
+        {A: [_err("tooBusy"), _ok({"ledger_index": 9})], B: [_err("tooBusy")]},
+    )
+    resp = _run(xrpl_rpc.failover_request([A, B], Ledger(ledger_index="validated")))
+    assert resp.is_successful() and resp.result == {"ledger_index": 9}
+    assert _busy_rounds == [1.0]
+    assert t.urls == [A, B, A]
+
+
+def test_http_503_counts_as_busy(monkeypatch, _busy_rounds):
+    busy = xrpl_rpc.HTTPStatusFailure(503, "Server is overloaded", None)
+    _install(monkeypatch, {A: [busy, _ok({"ledger_index": 3})]})
+    resp = _run(xrpl_rpc.failover_request([A], Ledger(ledger_index="validated")))
+    assert resp.result == {"ledger_index": 3}
+    assert _busy_rounds == [1.0]
+
+
+def test_busy_rounds_are_bounded_and_surface_the_last_answer(monkeypatch, _busy_rounds):
+    t = _install(monkeypatch, {A: [_err("tooBusy")], B: [_err("slowDown")]})
+    resp = _run(xrpl_rpc.failover_request([A, B], Ledger(ledger_index="validated")))
+    assert not resp.is_successful() and resp.result["error"] == "slowDown"
+    assert _busy_rounds == [1.0, 2.5]
+    assert len(t.calls) == 6
+
+
+def test_transport_failure_in_a_pass_is_not_retried(monkeypatch, _busy_rounds):
+    t = _install(monkeypatch, {A: [_err("tooBusy")], B: [httpx.ConnectTimeout("slow")]})
+    with pytest.raises(httpx.ConnectTimeout):
+        _run(xrpl_rpc.failover_request([A, B], Ledger(ledger_index="validated")))
+    assert _busy_rounds == []
+    assert t.urls == [A, B]
+
+
+def test_real_answer_is_never_retried(monkeypatch, _busy_rounds):
+    t = _install(monkeypatch, {A: [_err("txnNotFound")]})
+    resp = _run(xrpl_rpc.failover_request([A], Tx(transaction="AB" * 32)))
+    assert resp.result["error"] == "txnNotFound"
+    assert _busy_rounds == [] and len(t.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, (1.0, 2.5)),
+        ("", ()),
+        ("0.5, 2", (0.5, 2.0)),
+        ("abc", (1.0, 2.5)),
+        ("-1", (1.0, 2.5)),
+    ],
+)
+def test_parse_busy_backoff(raw, expected):
+    assert xrpl_rpc.parse_busy_backoff(raw) == expected
