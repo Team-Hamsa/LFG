@@ -478,6 +478,7 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#553 — feat(market): XRP collection offers for characters (escrow-backed, like trait bids)](../../issues/553)
 - [ ] [#554 — feat: time-bounded bounties (most shares / most BRIX paid out) — bounties phase 2](../../issues/554)
 - [ ] [#555 — feat: NFT & trait rewards for bounties — bounties phase 3](../../issues/555)
+- [ ] [#576 — Reconcile a payment that lands just after a mint cancel](../../issues/576)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
