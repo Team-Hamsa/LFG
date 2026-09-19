@@ -392,3 +392,49 @@ def test_bulk_cancel_checks_the_ledger_first(monkeypatch, verdict, status, state
     assert job.state == state
     assert calls and calls[0]["expected_amount"] == "30"
     assert calls[0]["not_before"] == job.created_at - 10
+
+
+# ---------------------------------------------------------------------------
+# review follow-ups (PR #575)
+# ---------------------------------------------------------------------------
+
+
+def test_account_nfts_raises_on_an_error_answer(monkeypatch):
+    """Greptile P1: an error body read as an empty page reports an empty
+    wallet (or a non-burnable NFT) instead of XRPL unavailability."""
+    _patch_rpc(monkeypatch, _busy())
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.get_account_nfts(SENDER, BRIX_ISSUER))
+
+
+def test_find_unclaimed_payment_checks_every_endpoint_before_saying_no(monkeypatch):
+    """Greptile P1: a responsive but LAGGING endpoint answers False. That is
+    not proof of non-payment while another endpoint already sees it."""
+
+    def answer(url, req):
+        if url == "ws://primary":
+            return _ok({"transactions": []})  # lagging: payment not visible yet
+        return _ok({"transactions": [_payment_entry("E" * 64)]})
+
+    contacted = _patch_ws(monkeypatch, answer)
+    assert _run(_find()) is True
+    assert contacted == ["ws://primary", "ws://fallback"]
+
+
+def test_find_unclaimed_payment_stalled_pagination_is_unknown_not_no(monkeypatch):
+    """CodeRabbit: the no-progress guard's False means 'scan aborted', which
+    must never read as 'nothing was paid'."""
+    # unrelated traffic (different sender) on a marker page that never gets
+    # older: the scan can't reach the not_before floor
+    filler = _payment_entry("F" * 64, when=time.time() - 3600)
+    filler["tx_json"]["Account"] = "rSomeoneElse"
+    _patch_ws(monkeypatch, lambda url, req: _ok({"transactions": [filler], "marker": {"p": 1}}))
+    assert _run(_find(not_before=time.time() - 7200)) is None
+
+
+def test_payment_repoll_seconds_rejects_unusable_values():
+    """Greptile P2 / CodeRabbit: 0, negatives and non-finite values would
+    make the wait spin on account_tx or disable the re-poll entirely."""
+    assert config.payment_repoll_seconds("2.5") == 2.5
+    for bad in ("0", "-1", "nan", "inf", "", "abc", None):
+        assert config.payment_repoll_seconds(bad) == config.PAYMENT_REPOLL_DEFAULT

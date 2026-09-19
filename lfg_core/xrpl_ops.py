@@ -1127,6 +1127,13 @@ async def get_account_nfts(address: str, issuer: str) -> list[dict[str, Any]]:
     while True:
         response = await client.request(AccountNFTs(account=address, marker=marker, limit=400))
         result = response.result
+        if not response.is_successful():
+            # An error body (every endpoint tooBusy, ...) has no
+            # `account_nfts`; reading it as an empty page would report an
+            # empty wallet instead of XRPL unavailability (Greptile P1).
+            raise RuntimeError(
+                f"account_nfts for {address} failed: {result.get('error', 'unknown error')}"
+            )
         for nft in result.get("account_nfts", []):
             if nft.get("Issuer") != issuer:
                 continue
@@ -2649,6 +2656,43 @@ def _tx_hash(entry: dict[str, Any], tx: dict[str, Any]) -> str | None:
     return h if isinstance(h, str) else None
 
 
+class HistoryScanIncomplete(RuntimeError):
+    """An account history scan could not be completed, so its "no matching
+    payment" result proves nothing. Never let this read as "unpaid"."""
+
+
+async def _scan_endpoints_for_payment(
+    account: str,
+    claim: Callable[[dict[str, Any], Any, dict[str, Any]], bool],
+    not_before: float,
+    *,
+    label: str,
+) -> bool | None:
+    """Run `claim` over `account`'s recent history on EVERY websocket
+    endpoint until one matches.
+
+    True as soon as an endpoint matches; False when at least one endpoint
+    completed a scan and none matched; None when no endpoint could finish
+    one. A responsive but LAGGING endpoint answers "no" for a payment
+    another endpoint already sees (Greptile P1), so a single False is not
+    taken as the verdict."""
+    answered = False
+    for url in _ws_endpoints():
+        try:
+            async with AsyncWebsocketClient(url) as websocket:
+                found = await asyncio.wait_for(
+                    _recent_payment_exists(websocket, account, claim, not_before),
+                    timeout=15,
+                )
+        except Exception as e:
+            logging.warning(f"{label} failed on {url}: {e!r}")
+            continue
+        if found:
+            return True
+        answered = True
+    return False if answered else None
+
+
 async def _recent_payment_exists(
     websocket: Any,
     account: str,
@@ -2702,13 +2746,15 @@ async def _recent_payment_exists(
         if not marker:
             return False
         if oldest is None or (prev_oldest is not None and oldest >= prev_oldest):
-            logging.warning(
-                f"Payment history scan for {account} aborted: page made no "
-                f"progress toward the not_before floor (oldest {oldest}, "
-                f"previous {prev_oldest}); an unconsumed payment may exist "
-                f"beyond it"
+            # "Scan aborted" is not "nothing was paid": an unconsumed payment
+            # may exist beyond this page, and the cancel guard would read a
+            # False here as proof of non-payment (CodeRabbit). Raise so the
+            # caller retries on another endpoint and, failing that, answers
+            # "unknown".
+            raise HistoryScanIncomplete(
+                f"payment history scan for {account} made no progress toward "
+                f"the not_before floor (oldest {oldest}, previous {prev_oldest})"
             )
-            return False
         prev_oldest = oldest
 
 
@@ -2794,19 +2840,12 @@ async def wait_for_payment(
         if not allow_credit:
             return False
         await asyncio.sleep(config.PAYMENT_GRACE_SECONDS)
-        for url in _ws_endpoints():
-            try:
-                async with AsyncWebsocketClient(url) as websocket:
-                    if await asyncio.wait_for(
-                        _recent_payment_exists(websocket, destination, claim, backfill_not_before),
-                        timeout=15,
-                    ):
-                        logging.info(f"✅ Payment found in post-timeout grace check ({context})")
-                        return True
-                return False
-            except Exception as e:
-                logging.error(f"Post-timeout grace check failed on {url} ({context}): {e!r}")
-        return False
+        found = await _scan_endpoints_for_payment(
+            destination, claim, backfill_not_before, label=f"Post-timeout grace check ({context})"
+        )
+        if found:
+            logging.info(f"✅ Payment found in post-timeout grace check ({context})")
+        return bool(found)
 
     # A dropped websocket must not look like "payment never arrived": keep
     # reconnecting until the deadline, re-checking recent history each time
@@ -2906,16 +2945,9 @@ async def find_unclaimed_payment(
         tx_hash = _tx_hash(entry, tx)
         return tx_hash is not None and payment_ledger.consumed_payment(tx_hash) is None
 
-    for url in _ws_endpoints():
-        try:
-            async with AsyncWebsocketClient(url) as websocket:
-                return await asyncio.wait_for(
-                    _recent_payment_exists(websocket, destination, unclaimed, not_before),
-                    timeout=15,
-                )
-        except Exception as e:
-            logging.warning(f"Unclaimed-payment check failed on {url}: {e!r}")
-    return None
+    return await _scan_endpoints_for_payment(
+        destination, unclaimed, not_before, label=f"Unclaimed-payment check for {destination}"
+    )
 
 
 class ClaimNotSubmitted(RuntimeError):
