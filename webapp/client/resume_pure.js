@@ -6,8 +6,10 @@
 
 // Priority: money/irreversibility first. A user can realistically only have
 // one live flow (every start handler 409s `session_active` on a second), so
-// ties are a defensive rarity.
-export const FLOW_ORDER = ['mint', 'bulk', 'swap', 'market', 'economy', 'shop'];
+// ties are a defensive rarity. closet sits right after market: Closet Market
+// bid/fill screens are rendered by the same market-flow machinery (see
+// TERMINAL.closet below).
+export const FLOW_ORDER = ['mint', 'bulk', 'swap', 'market', 'closet', 'economy', 'shop'];
 
 // Client-side mirror of each flow's server TERMINAL_STATES (defensive: the
 // server prunes terminal sessions before answering, but a race must never
@@ -17,18 +19,28 @@ export const FLOW_ORDER = ['mint', 'bulk', 'swap', 'market', 'economy', 'shop'];
 //   (webapp) / shop_flow TERMINAL_STATES.
 // Note swap's offers_ready is terminal by design: the accept offers already
 // sit in Xaman; resume must not re-drive signing.
+// closet's two values are NOT lfg_core/closet_market_store.py's own bid/fill
+// state names (pending_escrow/open/matched/.../mirrored/refunded/indeterminate
+// — see lfg_core/closet_market_flow.py's module docstring for both state
+// machines): lfg_service/app.py's _closet_bid_view/_closet_fill_view translate
+// those into this same market_flow vocabulary specifically so a Closet bid/
+// fill screen can reuse marketFlow/pollMarketFlow/attachMarketResume
+// unchanged (app.js's MARKET_RESUME_RENDER/MARKET_STATUS_PATH already key
+// closet_bid/closet_fill for exactly this) — 'done'/'failed' are the only
+// two terminal values that vocabulary has.
 const TERMINAL = {
   mint: new Set(['offer_ready', 'done', 'failed', 'payment_timeout', 'cancelled']),
   bulk: new Set(['done', 'failed', 'payment_timeout', 'cancelled']),
   swap: new Set(['done', 'failed', 'offers_ready', 'payment_timeout', 'cancelled']),
   market: new Set(['done', 'failed', 'unknown', 'listed']),
+  closet: new Set(['done', 'failed']),
   economy: new Set(['done', 'failed']),
   shop: new Set(['done', 'failed']),
 };
 
 // pickActiveFlow(sessions) -> {flow, session} | null
 //   sessions: the /api/sessions/active envelope ({mint,bulk,swap,market,
-//   economy,shop}, each a session dict or null). Returns the highest-priority
+//   closet,economy,shop}, each a session dict or null). Returns the highest-priority
 //   live session (intact, so the caller can route on session.kind etc.), or
 //   null when nothing is resumable.
 export function pickActiveFlow(sessions) {

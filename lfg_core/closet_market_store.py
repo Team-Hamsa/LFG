@@ -1089,3 +1089,42 @@ def fills_needing_attention(conn: sqlite3.Connection) -> list[str]:
             "SELECT id FROM closet_fills WHERE state NOT IN ('mirrored', 'refunded', 'failed') ORDER BY updated_ts"
         )
     ]
+
+
+def pending_bids_for_owner(
+    conn: sqlite3.Connection, owner: str, *, since_ts: int
+) -> list[dict[str, Any]]:
+    """#503: every one of the owner's still-signing bids (PENDING_ESCROW)
+    created no earlier than `since_ts`, for GET /api/sessions/active's resume
+    payload -- NOT every live bid. An OPEN/MATCHED/CANCELLING bid is normal
+    book state (visible via orders_for_owner), not a signature the relaunched
+    Activity needs to put back in front of the user. `has_live_bid` scopes
+    uniqueness per (owner, slot, value), so a wallet can hold several
+    concurrent pending_escrow bids on different traits at once -- the caller
+    ranks which one to resume (app.py's _closet_pick_view)."""
+    return _many(
+        conn,
+        "SELECT * FROM closet_orders WHERE owner = ? AND side = ? AND state = ? "
+        "AND created_ts >= ? ORDER BY created_ts",
+        (owner, SIDE_BID, PENDING_ESCROW, since_ts),
+    )
+
+
+def unfinished_fills_for_wallet(
+    conn: sqlite3.Connection, wallet: str, *, since_ts: int
+) -> list[dict[str, Any]]:
+    """#503: every one of the wallet's (buyer or seller side) fills that
+    hasn't reached a TERMINAL_FILL_STATES outcome, created no earlier than
+    `since_ts`, for GET /api/sessions/active's resume payload. A wallet can
+    hold several concurrent non-terminal fills at once -- the caller ranks
+    which one to resume (app.py's _closet_pick_view). Bounded so a fill
+    parked non-terminal for a long time (`indeterminate` most plausibly, per
+    this module's own docstring) reads as stuck-for-an-operator rather than a
+    live resume candidate."""
+    states = ", ".join("?" for _ in TERMINAL_FILL_STATES)
+    return _many(
+        conn,
+        "SELECT * FROM closet_fills WHERE (seller = ? OR buyer = ?) AND created_ts >= ? "
+        f"AND state NOT IN ({states}) ORDER BY created_ts",  # noqa: S608 - '?' placeholders only
+        (wallet, wallet, since_ts, *TERMINAL_FILL_STATES),
+    )

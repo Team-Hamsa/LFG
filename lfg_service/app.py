@@ -5998,7 +5998,15 @@ def _closet_fill_view(fill: dict[str, Any], wallet: str) -> dict[str, Any]:
         s == closet_market_store.FUNDS_PENDING
         and fill["funds_source"] == closet_market_store.FUNDS_PAYMENT
         and not fill["signed_txid"]
+        and wallet == fill["buyer"]
     ):
+        # (#503 fix round 2, Greptile P1) Only the buyer ever signs this
+        # Payment -- without the role check a SELLER polling/resuming the
+        # SAME fill (their own ask, someone else's still-unsigned buy) also
+        # read as "awaiting_signature" and was shown a QR to pay a bill that
+        # isn't theirs. The seller's view of this exact state now falls
+        # through to the general "pending" bucket below (unchanged
+        # vocabulary -- the client already renders that as "Settling").
         state = "awaiting_signature"
     elif s in (closet_market_store.PAID, closet_market_store.MIRRORED) or (
         s == closet_market_store.ASSET_MOVED and wallet == fill["buyer"]
@@ -9131,15 +9139,100 @@ async def handle_mint_active(request):
     return web.json_response({"session": session.to_dict() if session else None})
 
 
+# #503: a Closet Market fill (buyer or seller side) still moving BRIX/a trait
+# past this age reads as stuck for an operator, not a live resume candidate
+# -- the same reasoning an `indeterminate` fill needs a ledger-index-bounded
+# retry for (closet_market_flow.py's fill state machine docstring).
+_CLOSET_FILL_RESUME_WINDOW_SECONDS = 1800
+
+
+_ClosetCandidate = tuple[dict[str, Any], dict[str, Any]]
+
+
+def _closet_actionable_candidates(candidates: list[_ClosetCandidate]) -> list[_ClosetCandidate]:
+    """#503 (fix round 2, CodeRabbit): drop any candidate whose view state is
+    terminal FOR THIS WALLET (done/failed -- the same two values app.js's own
+    TERMINAL.closet treats as terminal) before ranking. `state` here is
+    already read off the SAME _closet_bid_view/_closet_fill_view mapping
+    every other closet endpoint uses, never a second copy of it.
+
+    This matters beyond just "don't show a dead screen": unfinished_fills_
+    for_wallet only excludes the PERSISTED TERMINAL_FILL_STATES (mirrored/
+    refunded/failed), but a fill can be role-terminal earlier than that --
+    e.g. `paid` reads as `done` for both sides, `asset_moved` reads as `done`
+    only for the buyer. Left unfiltered, a role-terminal row could win
+    _closet_pick_view's ranking (or just be the only fill row) and get
+    returned as `closet` -- which the client's TERMINAL.closet would then
+    reject as non-resumable, silently losing the turn to check for a live
+    bid entirely. Filtering here, before the caller decides whether to fall
+    through to the bid query, is what keeps that fallback reachable."""
+    return [pair for pair in candidates if pair[1]["state"] not in ("done", "failed")]
+
+
+def _closet_pick_view(candidates: list[_ClosetCandidate]) -> dict[str, Any]:
+    """#503 (fix round 1): `has_live_bid`/a take-fill's ask scope uniqueness
+    per (owner, slot, value), so a wallet can hold several concurrent
+    non-terminal bids or fills at once -- the envelope has only one `closet`
+    slot, so pick the single best one to resume. Rank a row that still needs
+    the user's signature (view state == 'awaiting_signature' -- read off the
+    SAME _closet_bid_view/_closet_fill_view mapping every other closet
+    endpoint uses, never a second copy of that logic) ahead of one that's
+    merely settling/verifying; among equals (same tier) prefer the OLDEST
+    row -- it's closest to expiring, while the newest is likely still on the
+    user's own screen anyway. `candidates` must already be actionable (see
+    _closet_actionable_candidates) and non-empty."""
+    _, view = min(
+        candidates,
+        key=lambda pair: (
+            0 if pair[1]["state"] == "awaiting_signature" else 1,
+            pair[0]["created_ts"],
+        ),
+    )
+    return view
+
+
+def _closet_resume_view(conn: sqlite3.Connection, wallet: str) -> dict[str, Any] | None:
+    """#503: the `closet` entry for GET /api/sessions/active. A fill outranks
+    a bid: it means BRIX or a trait has already moved and settlement is in
+    flight (possibly still needing the buyer's Payment signature), while a
+    pending_escrow bid is only a QR the user hasn't scanned yet. Reuses
+    _closet_bid_view/_closet_fill_view unchanged, so app.js's existing
+    attachMarketResume (which already dispatches on kind closet_bid/
+    closet_fill via MARKET_RESUME_RENDER/MARKET_STATUS_PATH) renders and
+    polls a resumed entry exactly like the dedicated status endpoints do.
+
+    Every candidate list is filtered to what's still actionable for THIS
+    wallet before ranking (fix round 2) -- a role-terminal fill (or, in
+    principle, a role-terminal bid) must never win the pick, and must never
+    suppress the bid fallback by being the only fill row returned."""
+    now = int(time.time())
+    fills = closet_market_store.unfinished_fills_for_wallet(
+        conn, wallet, since_ts=now - _CLOSET_FILL_RESUME_WINDOW_SECONDS
+    )
+    fill_candidates = _closet_actionable_candidates(
+        [(f, _closet_fill_view(f, wallet)) for f in fills]
+    )
+    if fill_candidates:
+        return _closet_pick_view(fill_candidates)
+    orders = closet_market_store.pending_bids_for_owner(
+        conn, wallet, since_ts=now - xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
+    )
+    bid_candidates = _closet_actionable_candidates([(o, _closet_bid_view(o)) for o in orders])
+    if bid_candidates:
+        return _closet_pick_view(bid_candidates)
+    return None
+
+
 @require_wallet
 async def handle_sessions_active(request):
     """GET /api/sessions/active (#221): every live (non-terminal) flow for the
     caller in one payload, so a relaunched Activity webview can re-attach to
     whatever was in flight instead of booting to the mint home screen. Extends
     #216's per-flow /api/mint/active pattern across mint/bulk/swap/market/
-    economy/shop in a single round-trip. Read-only re-attach: no session is
-    created or advanced here, and no transaction is built (SourceTag/memos
-    were already stamped when the flow's payload was first built)."""
+    closet/economy/shop in a single round-trip. Read-only re-attach: no
+    session is created or advanced here, and no transaction is built
+    (SourceTag/memos were already stamped when the flow's payload was first
+    built)."""
     user = request["user"]
     uid, plat = user["id"], _platform(user)
     _expire_abandoned_all()
@@ -9168,6 +9261,30 @@ async def handle_sessions_active(request):
         ),
         None,
     )
+    # Closet Market bids/fills are durable DB rows, not in-memory sessions
+    # (unlike every other flow above) -- _closet_resume_view queries them
+    # directly rather than going through pick()/_active_session. Gated on
+    # closet_market_settleable() -- the same tier as every other "view your
+    # own state" closet handler (handle_closet_bid_status, handle_closet_
+    # fill_status, handle_closet_orders_mine) -- so a disabled stack does no
+    # closet DB work on an endpoint that's polled by EVERY wallet on EVERY
+    # boot: a raw _closet_db call re-runs three ensure_schema/init_db
+    # executescript passes (nft_index.init_db + economy_store.
+    # init_economy_schema + closet_market_store.ensure_schema) per call, and
+    # an enabled stack would otherwise be doing that on a DB the mainnet
+    # listener is also writing, for a feature that's off. try/except stays
+    # broad and stays a fallback, not a narrower catch that could 500: a
+    # closet lookup failing must never take down mint/swap/market/economy/
+    # shop resume in the same payload, which can't fail (plain dict
+    # lookups). Logs the full traceback (not just repr(e)) since this is a
+    # brand-new failure surface with no prior incident history to pattern-
+    # match against.
+    closet = None
+    if config.closet_market_settleable():
+        try:
+            closet = await _closet_db(_closet_resume_view, wallet)
+        except Exception:
+            logging.error(f"Closet Market resume lookup failed: {traceback.format_exc()}")
 
     return web.json_response(
         {
@@ -9175,6 +9292,7 @@ async def handle_sessions_active(request):
             "bulk": pick(bulk_sessions, bulk_mint_flow.TERMINAL_STATES),
             "swap": pick(swap_sessions, swap_flow.TERMINAL_STATES),
             "market": pick(market_sessions, market_flow.TERMINAL_STATES),
+            "closet": closet,
             "economy": pick(economy_sessions, economy_api.TERMINAL_STATES),
             "shop": shop,
         }

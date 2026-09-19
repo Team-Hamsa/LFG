@@ -297,6 +297,10 @@ def test_fill_view_state_mapping():
         server._closet_fill_view({**base, "state": "funds_pending"}, "rB")["state"]
         == "awaiting_signature"
     )
+    # (#503 fix round 2) only the BUYER owes this Payment signature -- the
+    # seller's view of the exact same row must not also read as something
+    # they need to sign.
+    assert server._closet_fill_view({**base, "state": "funds_pending"}, "rS")["state"] == "pending"
     assert (
         server._closet_fill_view({**base, "state": "funds_pending", "signed_txid": "T"}, "rB")[
             "state"
