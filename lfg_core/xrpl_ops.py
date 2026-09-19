@@ -1533,25 +1533,28 @@ async def get_trustline_state(
     itself failed and nothing can be concluded either way."""
     try:
         marker = None
-        async with AsyncWebsocketClient(config.WS_URL) as websocket:
-            while True:
-                response = await websocket.request(
-                    AccountLines(account=address, peer=issuer, marker=marker, limit=400)
-                )
-                result = response.result
-                # xrpl-py does NOT raise on an error response (tooBusy,
-                # actNotFound, ...): `result` simply lacks `lines`/`marker`,
-                # which would read as an exhausted page set = ABSENT. That
-                # verdict locks the client's claim button, so surface it as
-                # UNKNOWN instead (Greptile P1, PR #440).
-                if not response.is_successful():
-                    raise RuntimeError(result.get("error", "account_lines request failed"))
-                for line in result.get("lines", []):
-                    if line.get("currency") == currency and line.get("account") == issuer:
-                        return TrustlineState.PRESENT, Decimal(line.get("balance", "0"))
-                marker = result.get("marker")
-                if not marker:
-                    return TrustlineState.ABSENT, None
+        # JSON-RPC failover client (#493), not a single WS endpoint: a claim is
+        # refused outright when this lookup fails, so one busy node must not
+        # decide it (2026-09-19: claims 503'd on a lone tooBusy).
+        client = async_rpc_client()
+        while True:
+            response = await client.request(
+                AccountLines(account=address, peer=issuer, marker=marker, limit=400)
+            )
+            result = response.result
+            # xrpl-py does NOT raise on an error response (tooBusy,
+            # actNotFound, ...): `result` simply lacks `lines`/`marker`,
+            # which would read as an exhausted page set = ABSENT. That
+            # verdict locks the client's claim button, so surface it as
+            # UNKNOWN instead (Greptile P1, PR #440).
+            if not response.is_successful():
+                raise RuntimeError(result.get("error", "account_lines request failed"))
+            for line in result.get("lines", []):
+                if line.get("currency") == currency and line.get("account") == issuer:
+                    return TrustlineState.PRESENT, Decimal(line.get("balance", "0"))
+            marker = result.get("marker")
+            if not marker:
+                return TrustlineState.ABSENT, None
     except Exception as e:
         logging.warning(f"account_lines lookup failed for {address}: {e}")
         return TrustlineState.UNKNOWN, None

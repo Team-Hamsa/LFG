@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from lfg_core import brix_drip, history_store, xrpl_ops
+from lfg_core import brix_drip, config, history_store, xrpl_ops
 from lfg_service import app as server
 
 
@@ -383,20 +383,13 @@ class _WsResp:
 
 
 def _fake_ws(monkeypatch, responses):
-    class _Ws:
-        def __init__(self, *a, **k):
-            pass
+    """The lookup rides the JSON-RPC failover client (2026-09-19)."""
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
+    class _Client:
         async def request(self, req):
             return responses.pop(0)
 
-    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Ws)
+    monkeypatch.setattr(xrpl_ops, "async_rpc_client", lambda *a, **k: _Client())
 
 
 def _state(monkeypatch, responses):
@@ -424,18 +417,39 @@ def test_trustline_state_error_response_is_unknown_not_absent(monkeypatch):
     assert _state(monkeypatch, [resp]) == (xrpl_ops.TrustlineState.UNKNOWN, None)
 
 
+def test_trustline_state_uses_the_failover_pool(monkeypatch):
+    """One busy node must not refuse a claim: the lookup goes through the
+    JSON-RPC failover pool, so a tooBusy primary falls through to a healthy
+    fallback instead of reading UNKNOWN."""
+    from xrpl.models.response import Response, ResponseStatus
+
+    from lfg_core import xrpl_rpc
+
+    xrpl_rpc.reset_cooldowns()
+    monkeypatch.setattr(config, "JSON_RPC_URLS", ("https://busy/", "https://ok/"))
+    line = {"currency": "BRIX", "account": "rIssuer", "balance": "7"}
+
+    async def post(url, payload, timeout):
+        if url == "https://busy/":
+            return Response(status=ResponseStatus.ERROR, result={"error": "tooBusy"})
+        return Response(status=ResponseStatus.SUCCESS, result={"lines": [line]})
+
+    monkeypatch.setattr(xrpl_rpc, "_post_json_rpc", post)
+    try:
+        assert _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rIssuer")) == (
+            xrpl_ops.TrustlineState.PRESENT,
+            Decimal("7"),
+        )
+    finally:
+        xrpl_rpc.reset_cooldowns()
+
+
 def test_trustline_state_transport_failure_is_unknown(monkeypatch):
     class _Boom:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
+        async def request(self, req):
             raise ConnectionError("down")
 
-        async def __aexit__(self, *a):
-            return False
-
-    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Boom)
+    monkeypatch.setattr(xrpl_ops, "async_rpc_client", lambda *a, **k: _Boom())
     assert _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rI")) == (
         xrpl_ops.TrustlineState.UNKNOWN,
         None,
