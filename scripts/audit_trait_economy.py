@@ -33,6 +33,7 @@ from lfg_core import (  # noqa: E402
     nft_index,
     trait_economy,
 )
+from scripts._alerts import post_alert  # noqa: E402
 
 
 def classify_drift(
@@ -121,24 +122,6 @@ def build_alert_body(
     )
     lines.append(f"Report: {report_path}")
     return "\n".join(lines)
-
-
-def post_alert(webhook_url: str, body: str) -> bool:
-    """Best-effort POST to a Discord webhook; failures only log."""
-    import json
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(
-            webhook_url,
-            data=json.dumps({"content": body[:1900]}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=10)
-        return True
-    except Exception as exc:  # noqa: BLE001 — alerting must never fail the audit
-        print(f"alert webhook failed: {exc}", file=sys.stderr)
-        return False
 
 
 def format_economy_report(

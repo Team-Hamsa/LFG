@@ -201,6 +201,26 @@ def test_real_drift_still_fails_and_alerts(tmp_path, monkeypatch, capsys):
     assert rc == 1, out
     assert "Conservation: DRIFT" in out
     assert len(posted) == 1 and posted[0].startswith("**Trait economy audit: DRIFT**")
+    # Actionable without opening a DB: network + the report file's own path.
+    (report,) = os.listdir(tmp_path / "r")
+    report_path = os.path.join(str(tmp_path / "r"), report)
+    assert "testnet" in posted[0]
+    assert f"Report: {report_path}" in posted[0]
+
+
+def test_post_alert_never_raises_even_when_the_webhook_post_fails(monkeypatch):
+    """The shared alert helper's contract (scripts/_alerts.py): a webhook POST
+    that raises must never propagate — an audit's exit code can never depend
+    on whether Discord happens to be reachable. `ate.post_alert` is the SAME
+    function object every audit script imports, so this exercises the one
+    shared implementation directly rather than each caller."""
+    import urllib.request
+
+    def boom(*args, **kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert ate.post_alert("https://discord.invalid/webhook", "body") is False
 
 
 def test_benign_drift_with_a_completeness_violation_alerts_as_violations():

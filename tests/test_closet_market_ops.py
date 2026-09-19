@@ -217,3 +217,52 @@ def test_unforwarded_brix_refund_pending_with_refund_brix():
     cms.update_fill(c, fill["id"], state=cms.REFUND_PENDING, refund_brix="2.5")
     owed = audit.unforwarded_brix(c)
     assert owed == Decimal("2.5")
+
+
+# --- #560: alert-webhook wiring (scripts/_alerts.post_alert, shared with
+# audit_trait_economy.py and fee_cover_report.py) ---
+
+
+def _run_main(monkeypatch, conn, *, webhook=None, onchain=False):
+    """Drive audit_closet_market.main() against a prepared in-memory conn,
+    bypassing the real _economy_deps.open_index (network/on-disk DB
+    resolution) the CLI normally uses. Returns (rc, posted bodies)."""
+    monkeypatch.setattr(audit._economy_deps, "open_index", lambda network: conn)
+    posted: list[str] = []
+    monkeypatch.setattr(audit, "post_alert", lambda url, body: posted.append(body) or True)
+    argv = ["--network", "testnet"]
+    if onchain:
+        argv.append("--onchain")
+    if webhook:
+        argv += ["--alert-webhook", webhook]
+    rc = audit.main(argv)
+    return rc, posted
+
+
+def test_main_non_clean_run_with_webhook_posts_once_with_network_and_report(monkeypatch):
+    c = _conn()
+    fill = _settled_fill(c, forward=False)
+    rc, posted = _run_main(monkeypatch, c, webhook="https://discord.invalid/webhook")
+    assert rc == 1
+    assert len(posted) == 1
+    body = posted[0]
+    assert "testnet" in body
+    assert fill["id"] in body  # the specific offending row, not just a count
+    assert "Report: scripts/audit_closet_market.py --network testnet" in body
+
+
+def test_main_non_clean_run_without_webhook_posts_nothing(monkeypatch):
+    c = _conn()
+    _settled_fill(c, forward=False)
+    monkeypatch.delenv("ECONOMY_AUDIT_WEBHOOK_URL", raising=False)
+    rc, posted = _run_main(monkeypatch, c, webhook=None)
+    assert rc == 1  # same exit code as today
+    assert posted == []
+
+
+def test_main_clean_run_with_webhook_posts_nothing(monkeypatch):
+    c = _conn()
+    _settled_fill(c)
+    rc, posted = _run_main(monkeypatch, c, webhook="https://discord.invalid/webhook")
+    assert rc == 0
+    assert posted == []
