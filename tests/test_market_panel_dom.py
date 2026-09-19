@@ -57,6 +57,21 @@ def test_app_js_imports_market_pure():
     assert "from './market_pure.js" in js  # ?v= cache-buster suffix allowed
 
 
+def test_index_has_onramp_explainer_copy():
+    html = _read("index.html")
+    assert 'id="flow-onramp-explainer"' in html
+    assert (
+        "Traits are priced in BRIX. You don't hold enough, so step 1 swaps XRP "
+        "for exactly the BRIX needed through the AMM, and step 2 buys the "
+        "trait. If you stop after step 1 you keep the BRIX."
+    ) in html
+
+
+def test_app_js_wires_onramp_explainer_element():
+    js = _read("app.js")
+    assert "el('flow-onramp-explainer').hidden = !explainer;" in js
+
+
 def test_app_js_has_single_market_flow_driver():
     js = _read("app.js")
     assert "async function marketFlow(kind, startPath, body, render)" in js
@@ -87,12 +102,21 @@ def test_app_js_royalty_disclosure_and_closet_prompt_wired():
     assert "marketPure.safeComputeRoyalty(" in js
     assert "marketPure.CLOSET_REQUIRED_MESSAGE" in js
     assert "promptClosetRequired" in js
-    assert "added to your Closet" in js
+    # #488: the DONE-state trait-buy copy now goes through the pure helper
+    # (marketBuyRender) rather than a literal string, so honesty about
+    # settlement progress is unit-tested once in test_market_pure_js.py
+    # instead of re-asserted here.
+    assert "marketPure.buyDoneCopy(" in js
 
 
 def test_app_js_trait_wizard_step_labels_used():
     js = _read("app.js")
     assert "marketPure.traitWizardStepLabel(" in js
+
+
+def test_app_js_onramp_step_label_used():
+    js = _read("app.js")
+    assert "marketPure.onrampStepLabel(" in js
 
 
 def test_no_70_percent_or_30_percent_fee_copy_anywhere_in_client():
@@ -574,3 +598,170 @@ def test_standalone_card_inputs_are_capped_not_full_bleed():
     parents = _direct_parent_ids(_read("index.html"))
     assert parents["closet-bid-price"] == "closet-bid-form-panel"
     assert parents["market-list-price"] == "market-list-form-panel"
+
+
+# --- #486 / #488: marketBuyRender is a pure view-model builder (no DOM) --
+# execute the real function under Node against the real market_pure.js, no
+# stub DOM required (contrast _run_open_listing_detail above, which needs
+# one).
+
+
+def _run_market_buy_render(cases: list) -> list:
+    """Execute app.js's real marketBuyRender + its signText/threshold-constant
+    dependencies under Node against the real market_pure.js, once per
+    [listingKind, sessionDict] case. Returns each call's view-model object."""
+    if _NODE is None:
+        pytest.skip("node is not installed on this host")
+    js = _read("app.js")
+    sign_start = js.index("function signText(")
+    sign_src = js[sign_start : js.index("\n}\n", sign_start) + 3]
+    const_start = js.index("const BUY_SETTLING_REASSURE_POLLS")
+    const_src = js[const_start : js.index("\n", const_start) + 1]
+    render_start = js.index("function marketBuyRender(listingKind) {")
+    render_src = js[render_start : js.index("\n}\n", render_start) + 3]
+    script = (
+        "import * as marketPure from './webapp/client/market_pure.js';\n"
+        + sign_src
+        + "\n"
+        + const_src
+        + "\n"
+        + render_src
+        + """
+const out = CASES.map(([listingKind, s]) => marketBuyRender(listingKind)(s));
+console.log(JSON.stringify(out));
+""".replace("CASES", json.dumps(cases))
+    )
+    proc = subprocess.run(
+        [_NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"node script failed:\n{script}\n--- stderr ---\n{proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+_ONRAMP_STEP1 = [
+    "trait",
+    {
+        "state": "awaiting_onramp",
+        "pay_with": "XRP",
+        "price_xrp_quote": "12.5",
+        "push": None,
+        "instruction": None,
+        "xumm_url": "https://xumm.app/sign/U1",
+    },
+]
+_ONRAMP_STEP2 = [
+    "trait",
+    {
+        "state": "awaiting_signature",
+        "pay_with": "XRP",
+        "push": None,
+        "instruction": None,
+        "xumm_url": "https://xumm.app/sign/U2",
+    },
+]
+_BRIX_HOLDER_SIGN = [
+    "trait",
+    {
+        "state": "awaiting_signature",
+        "pay_with": "BRIX",
+        "push": None,
+        "instruction": None,
+        "xumm_url": "https://xumm.app/sign/U3",
+    },
+]
+_DONE_UNSETTLED = ["trait", {"state": "done", "settled": False, "_settlingPolls": 0}]
+_DONE_SETTLED = ["trait", {"state": "done", "settled": True, "_settlingPolls": 0}]
+_DONE_STUCK = ["trait", {"state": "done", "settled": False, "_settlingPolls": 10}]
+_DONE_CHARACTER = ["character", {"state": "done"}]
+
+
+def test_market_buy_render_onramp_explainer_and_step_labels():
+    """#486: the explainer panel + step indicator appear exactly on the
+    trait-buy XRP on-ramp path, and leave the BRIX-holder single-signature
+    path (and characters, which never on-ramp) unchanged."""
+    step1, step2, brix_holder = _run_market_buy_render(
+        [_ONRAMP_STEP1, _ONRAMP_STEP2, _BRIX_HOLDER_SIGN]
+    )
+    assert "Step 1 of 2" in step1["title"]
+    assert step1["explainer"] is True
+    assert "Step 2 of 2" in step2["title"]
+    assert step2["explainer"] is True
+    assert brix_holder["title"] == "\U0001f4b3 Confirm purchase"
+    assert not brix_holder.get("explainer")
+
+
+def test_market_buy_render_done_copy_honesty():
+    """#488: the DONE-state copy tells the truth about settlement progress
+    instead of unconditionally declaring the trait already in the Closet;
+    characters (no settlement step) are untouched."""
+    unsettled, settled, stuck, character_done = _run_market_buy_render(
+        [_DONE_UNSETTLED, _DONE_SETTLED, _DONE_STUCK, _DONE_CHARACTER]
+    )
+    assert unsettled["text"] == "Bought \u2014 settling into your Closet\u2026"
+    assert settled["text"] == "Added to your Closet."
+    assert stuck["text"] == "Still settling \u2014 it will land in your Closet shortly."
+    assert character_done["text"] == "The NFT is on its way to your wallet."
+
+
+def test_buy_unsettled_gates_continued_polling():
+    """#488: buyUnsettled is what keeps pollMarketFlow / marketFlow /
+    attachMarketResume polling a trait buy past its ledger-terminal DONE
+    state until settlement actually lands -- pin its truth table directly."""
+    if _NODE is None:
+        pytest.skip("node is not installed on this host")
+    js = _read("app.js")
+    start = js.index("function buyUnsettled(kind, s) {")
+    src = js[start : js.index("\n}\n", start) + 3]
+    script = (
+        src
+        + """
+const out = [
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: false}),
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: true}),
+  buyUnsettled('buy', {listing_kind: 'character', state: 'done', settled: null}),
+  buyUnsettled('bid', {listing_kind: 'trait', state: 'done', settled: false}),
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'awaiting_signature', settled: null}),
+];
+console.log(JSON.stringify(out));
+"""
+    )
+    proc = subprocess.run(
+        [_NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"node script failed:\n{script}\n--- stderr ---\n{proc.stderr}"
+    unsettled_done, settled_done, character_done, wrong_kind, not_yet_done = json.loads(proc.stdout)
+    assert unsettled_done is True
+    assert settled_done is False
+    assert character_done is False
+    assert wrong_kind is False
+    assert not_yet_done is False
+
+
+def test_poll_market_flow_and_resume_keep_polling_while_buy_unsettled():
+    """#488: the three call sites that decide whether to keep polling
+    (pollMarketFlow's own continuation, marketFlow's initial dispatch,
+    attachMarketResume's resume dispatch) all route through buyUnsettled
+    rather than isMarketTerminal alone."""
+    js = _read("app.js")
+    assert (
+        "if (unsettled || !marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);"
+        in js
+    )
+    assert (
+        "if (buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);"
+        in js
+    )
+    assert (
+        "if (buyUnsettled(session.kind, session) || !marketPure.isMarketTerminal(session.state)) {"
+        in js
+    )

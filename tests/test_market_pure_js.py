@@ -291,6 +291,68 @@ def test_trait_wizard_step_labels():
     assert run_js("M.traitWizardStepLabel('nonsense')") == ""
 
 
+# --- #486: trait-buy XRP on-ramp step labels ---
+
+
+def test_onramp_step_label_xrp_path():
+    assert (
+        run_js('M.onrampStepLabel({state: "awaiting_onramp", pay_with: "XRP"})')
+        == "Step 1 of 2 — buy BRIX with XRP"
+    )
+    assert (
+        run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: "XRP"})')
+        == "Step 2 of 2 — accept the trait"
+    )
+
+
+def test_onramp_step_label_brix_holder_path_is_empty():
+    # A BRIX holder never on-ramps — a single signature, no step indicator.
+    assert run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: "BRIX"})') == ""
+
+
+def test_onramp_step_label_unknown_state_is_empty():
+    assert run_js('M.onrampStepLabel({state: "pending", pay_with: "XRP"})') == ""
+    assert run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: null})') == ""
+
+
+# --- #488: trait-buy DONE-state settlement copy ---
+
+
+def test_buy_done_copy_unsettled():
+    assert run_js("M.buyDoneCopy({settled: false})") == "Bought — settling into your Closet…"
+
+
+def test_buy_done_copy_settled():
+    assert run_js("M.buyDoneCopy({settled: true})") == "Added to your Closet."
+
+
+def test_buy_done_copy_stuck_reassures_without_claiming_done():
+    assert (
+        run_js("M.buyDoneCopy({settled: false, stuck: true})")
+        == "Still settling — it will land in your Closet shortly."
+    )
+    # `stuck` is irrelevant once actually settled.
+    assert run_js("M.buyDoneCopy({settled: true, stuck: true})") == "Added to your Closet."
+
+
+# --- #483: "None" (empty-slot) trait tokens read as removal, not blank art ---
+
+
+def test_map_listing_row_trait_none_value_title():
+    row = {
+        "nft_id": "T9",
+        "kind": "trait",
+        "slot": "Back",
+        "value": "None",
+        "image": None,
+        "amount_brix": "5",
+        "seller": "rSeller",
+        "offer_index": "OFF9",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["title"] == "Remove Back"
+
+
 # --- marketFlow terminal-state check ---
 
 

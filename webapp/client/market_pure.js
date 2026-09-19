@@ -242,8 +242,15 @@ export function isOwnListing(vm, wallet) {
  */
 export function mapListingRow(row) {
   const isTrait = row.kind === 'trait';
+  // #483: a "None" trait value is a real, buyable token (equipping it clears
+  // the slot) but has no art and a "<Slot>: None" title reads as a data bug,
+  // not a feature -- so it gets its own title. Default browse hides these
+  // rows (hide_none=1 server-side); this only matters when a caller opts
+  // back in with hide_none=0.
   const title = isTrait
-    ? `${row.slot}: ${row.value}`
+    ? row.value === 'None'
+      ? `Remove ${row.slot}`
+      : `${row.slot}: ${row.value}`
     : row.nft_number != null
       ? `#${row.nft_number}`
       : row.nft_id;
@@ -563,6 +570,40 @@ export const TRAIT_WIZARD_STEP_LABELS = {
 
 export function traitWizardStepLabel(state) {
   return TRAIT_WIZARD_STEP_LABELS[state] || '';
+}
+
+// --- #488: trait-buy DONE-state settlement copy ---
+//
+// A trait buy's session reaches state "done" the poll its NFTokenAcceptOffer
+// validates -- that only means the buyer now controls the token, not that it
+// has been burned back into their Closet yet (_settle_trait_sale / the
+// 2-minute settlement sweep does that, normally inline with the same poll
+// that discovers the sale, occasionally left to the sweep on a transient
+// failure). `settled` mirrors the live market_listings.settled column
+// (GET /api/market/buy/{id}); `stuck` is set by the poller once a buyer has
+// been waiting past the sweep's normal window -- the backend keeps retrying
+// regardless, this only changes what the buyer is told.
+export function buyDoneCopy({ settled, stuck = false }) {
+  if (settled === true) return 'Added to your Closet.';
+  if (stuck) return 'Still settling — it will land in your Closet shortly.';
+  return 'Bought — settling into your Closet…';
+}
+
+// --- #486: trait-buy XRP on-ramp step labels ---
+//
+// A buyer with too little BRIX gets a two-signature flow (market_flow.py's
+// BuySession: AWAITING_ONRAMP -> a self-Payment buys the exact BRIX needed
+// from the AMM into their own wallet -- ONRAMP_CONFIRMED -> AWAITING_SIGNATURE
+// -> the normal accept). A BRIX holder never sees this: one signature, no
+// step indicator. Mirrors traitWizardStepLabel's lookup-table shape.
+const ONRAMP_STEP_LABELS_XRP = {
+  awaiting_onramp: 'Step 1 of 2 — buy BRIX with XRP',
+  awaiting_signature: 'Step 2 of 2 — accept the trait',
+};
+
+export function onrampStepLabel({ state, pay_with }) {
+  if (pay_with !== 'XRP') return '';
+  return ONRAMP_STEP_LABELS_XRP[state] || '';
 }
 
 // --- marketFlow's terminal-state check (list/cancel/buy/trait-sell share

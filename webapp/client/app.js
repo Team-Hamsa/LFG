@@ -1989,7 +1989,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, push, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
+function showFlow({ title, text, qrData, link, push, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper, explainer }) {
   flowRenderGen++;
   showPanel('flow-panel');
   renderSteps(stage);
@@ -2000,6 +2000,10 @@ function showFlow({ title, text, qrData, link, push, image, video, done, stage, 
   }
   el('flow-title').textContent = title;
   el('flow-text').textContent = text || '';
+  // #486: the two-step XRP-on-ramp explainer -- shown only by the buy flow's
+  // XRP on-ramp states (marketBuyRender), hidden by every other caller that
+  // never passes it.
+  el('flow-onramp-explainer').hidden = !explainer;
   el('flow-spinner').hidden = !spinner;
   // #142: deep-link-primary on touch devices (auto-open once per payload),
   // QR-primary on desktop — one decision path for every sign screen.
@@ -5040,6 +5044,27 @@ let marketFlowTimer = null;
 // by invalidateFlowPolls().
 let marketFlowGen = 0;
 
+// #488: a trait buy's session state reaches DONE once the accept tx
+// validates -- that only means the buyer now controls the token, not that
+// the settlement burn-back into their Closet (_settle_trait_sale, normally
+// triggered inline with the same poll that discovers the sale) has landed.
+// Recognizing this sub-state lets the poller keep going past DONE instead of
+// declaring victory the moment the ledger accept lands; always false for a
+// character buy (no Closet settlement step) or once `settled` reports true.
+function buyUnsettled(kind, s) {
+  return kind === 'buy' && s.listing_kind === 'trait' && s.state === 'done' && s.settled !== true;
+}
+// Reassurance-only threshold for marketBuyRender's copy: the primary
+// settlement trigger fires inline with the SAME poll that discovers the
+// sale, so this almost never fires in practice -- it exists only so a buyer
+// who hits the rarer sweep-retry path (a transient settlement failure)
+// isn't left staring at "..." with no explanation. The screen keeps polling
+// either way (buyUnsettled above); only the copy changes. Well under the
+// settlement sweep's own ~10 minute budget (_SWEEP_MAX_ATTEMPTS x
+// _SWEEP_PERIOD_SECONDS in lfg_service/app.py) -- a UI reassurance cue, not
+// a claim the backend has actually given up.
+const BUY_SETTLING_REASSURE_POLLS = 10; // ~30s at the 3s poll interval
+
 function highlightTabs(containerId, dataKey, activeValue) {
   for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
     const active = btn.dataset[dataKey] === activeValue;
@@ -5594,6 +5619,10 @@ function pollMarketFlow(kind, sessionId, render) {
   // after each render this poller makes itself.
   let ownerGen = flowRenderGen;
   const path = MARKET_STATUS_PATH[kind](sessionId);
+  // #488: consecutive polls this specific loop has seen a trait buy sitting
+  // DONE-but-unsettled — scoped to this poll loop (never a module-level
+  // counter), so it can never leak across sessions or survive a resume.
+  let settlingPolls = 0;
   const tick = async () => {
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
@@ -5607,9 +5636,12 @@ function pollMarketFlow(kind, sessionId, render) {
       return;
     }
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
+    const unsettled = buyUnsettled(kind, s);
+    settlingPolls = unsettled ? settlingPolls + 1 : 0;
+    s._settlingPolls = settlingPolls;
     showFlow(render(s));
     ownerGen = flowRenderGen; // our own render; keep ownership current
-    if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
+    if (unsettled || !marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
   };
   marketFlowTimer = setTimeout(tick, 3000);
 }
@@ -5637,7 +5669,7 @@ function attachMarketResume(session) {
   clearTimeout(marketFlowTimer);
   showPanel('flow-panel');
   showFlow(render(session));
-  if (!marketPure.isMarketTerminal(session.state)) {
+  if (buyUnsettled(session.kind, session) || !marketPure.isMarketTerminal(session.state)) {
     pollMarketFlow(session.kind, session.id, render);
   }
   return true;
@@ -5726,7 +5758,7 @@ async function marketFlow(kind, startPath, body, render) {
     return;
   }
   showFlow(render(s));
-  if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
+  if (buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
 }
 
 // qrData is the string re-encoded into the branded QR by qrUrl()/`/api/qr.png`.
@@ -5769,19 +5801,36 @@ function marketBuyRender(listingKind) {
       return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
     }
     if (s.state === 'done') {
-      return {
-        title: '🎉 Purchase complete!',
-        text: listingKind === 'trait' ? 'Sold — added to your Closet.' : 'The NFT is on its way to your wallet.',
-        done: true,
-      };
+      // #488: the accept tx validating doesn't mean the trait has landed in
+      // the buyer's Closet yet -- buyDoneCopy is honest about the gap (and,
+      // via `stuck`, reassures a buyer on the rare slow-settlement path)
+      // instead of unconditionally declaring "added to your Closet".
+      const text = listingKind === 'trait'
+        ? marketPure.buyDoneCopy({ settled: s.settled, stuck: (s._settlingPolls || 0) >= BUY_SETTLING_REASSURE_POLLS })
+        : 'The NFT is on its way to your wallet.';
+      return { title: '🎉 Purchase complete!', text, done: true };
     }
+    // #486: step indicator + explainer for the two-signature XRP on-ramp
+    // (empty for a BRIX holder's single-signature path, and for characters,
+    // which never on-ramp).
+    const step = listingKind === 'trait' ? marketPure.onrampStepLabel(s) : '';
     if (s.state === 'awaiting_signature') {
-      return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+      return {
+        title: step ? `💳 ${step}` : '💳 Confirm purchase',
+        text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'),
+        qrData: s.xumm_url, link: s.xumm_url, push: s.push,
+        explainer: Boolean(step),
+      };
     }
     // #239 two-step on-ramp: sign the XRP→BRIX top-up first, then the accept.
     if (s.state === 'awaiting_onramp') {
       const quote = s.price_xrp_quote ? ` (~${s.price_xrp_quote} XRP)` : '';
-      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+      return {
+        title: step ? `💱 ${step}${quote}` : `💱 Get BRIX${quote}`,
+        text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'),
+        qrData: s.xumm_url, link: s.xumm_url, push: s.push,
+        explainer: Boolean(step),
+      };
     }
     if (s.state === 'onramp_confirmed') {
       return { title: '⏳ BRIX acquired', text: 'Preparing your purchase…', spinner: true };
