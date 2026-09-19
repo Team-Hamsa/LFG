@@ -38,6 +38,7 @@ import _economy_deps  # noqa: E402
 
 from lfg_core import closet_market_flow, config, market_ops, xrpl_ops  # noqa: E402
 from lfg_core import closet_market_store as cms  # noqa: E402
+from scripts._alerts import assemble_alert_body, post_alert  # noqa: E402
 
 STUCK_SECONDS = 3600
 PAYOUT_FAILING_ATTEMPTS = 10  # e.g. the counterparty removed their BRIX trust line
@@ -166,12 +167,40 @@ async def audit_onchain(conn: sqlite3.Connection) -> list[str]:
     return problems
 
 
+def build_alert_body(network: str, problems: list[str], onchain: bool) -> str:
+    """Compact Discord-webhook message for a non-clean Closet Market audit run
+    (#560). Every row is already a human-readable line from audit_rows() /
+    audit_onchain() — a stuck fill names its id and how long it has sat, an
+    over-encumbered owner names itself — so the alert is actionable without
+    opening a DB. The reproduction command and docs pointer are a fixed
+    trailer guaranteed to survive however many rows there are (review round
+    1: post_alert's own truncation is a blind body[:1900] that would
+    otherwise cut them first, on exactly the worst nights) — see
+    scripts/_alerts.assemble_alert_body."""
+    plural = "" if len(problems) == 1 else "s"
+    header = f"**Closet Market audit: FAIL** ({network}, {len(problems)} problem{plural})"
+    cmd = f"scripts/audit_closet_market.py --network {network}"
+    if onchain:
+        cmd += " --onchain"
+    trailer = [
+        f"Report: {cmd}",
+        "See docs/ops/closet-market.md §5 (Reading a stuck fill) for next steps.",
+    ]
+    return assemble_alert_body(header, problems, trailer)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--network", required=True, choices=["mainnet", "testnet"])
     parser.add_argument("--onchain", action="store_true")
+    parser.add_argument(
+        "--alert-webhook",
+        default=os.environ.get("ECONOMY_AUDIT_WEBHOOK_URL"),
+        help="Discord webhook URL to post to when the run finds drift "
+        "(default: $ECONOMY_AUDIT_WEBHOOK_URL; unset = no alert)",
+    )
     args = parser.parse_args(argv)
     conn = _economy_deps.open_index(args.network)
     try:
@@ -183,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     for p in problems:
         print(f"DRIFT {p}")
     print("PASS" if not problems else f"FAIL ({len(problems)} problems)")
+    if problems and args.alert_webhook:
+        post_alert(args.alert_webhook, build_alert_body(args.network, problems, args.onchain))
     return 1 if problems else 0
 
 

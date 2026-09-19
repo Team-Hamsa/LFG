@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import pwd
+import re
 
 import pytest
 
@@ -195,3 +196,81 @@ def test_report_cli_exit_code_follows_the_audit(app_db, capsys):
     conn.close()
     assert fee_cover_report.main(["--network", NET, "--audit"]) == 1
     assert "AUDIT FAIL" in capsys.readouterr().out
+
+
+# --- #560: alert-webhook wiring (scripts/_alerts.post_alert, shared with
+# audit_trait_economy.py and audit_closet_market.py) ---
+
+
+def _run_report(monkeypatch, argv):
+    posted: list[str] = []
+    monkeypatch.setattr(
+        fee_cover_report, "post_alert", lambda url, body: posted.append(body) or True
+    )
+    rc = fee_cover_report.main(argv)
+    return rc, posted
+
+
+def _non_clean_app_db(app_db):
+    conn = _refund(app_db, refund=200_000, fee=80_642, royalty=100_000, budget=150_000)
+    conn.close()
+    return app_db
+
+
+def test_report_cli_non_clean_with_webhook_posts_once_with_network_and_report(app_db, monkeypatch):
+    _non_clean_app_db(app_db)
+    rc, posted = _run_report(
+        monkeypatch,
+        ["--network", NET, "--audit", "--alert-webhook", "https://discord.invalid/webhook"],
+    )
+    assert rc == 1
+    assert len(posted) == 1
+    body = posted[0]
+    assert NET in body
+    assert "ACC1" in body  # the specific finding's accept hash, not just a count
+    assert f"Report: scripts/fee_cover_report.py --network {NET} --audit" in body
+
+
+def test_report_cli_non_clean_without_webhook_posts_nothing(app_db, monkeypatch):
+    _non_clean_app_db(app_db)
+    monkeypatch.delenv("ECONOMY_AUDIT_WEBHOOK_URL", raising=False)
+    rc, posted = _run_report(monkeypatch, ["--network", NET, "--audit"])
+    assert rc == 1  # same exit code as today
+    assert posted == []
+
+
+def test_report_cli_clean_with_webhook_posts_nothing(app_db, monkeypatch):
+    conn = _refund(app_db)
+    conn.close()
+    rc, posted = _run_report(
+        monkeypatch,
+        ["--network", NET, "--audit", "--alert-webhook", "https://discord.invalid/webhook"],
+    )
+    assert rc == 0
+    assert posted == []
+
+
+def test_report_cli_without_audit_posts_nothing_even_with_webhook(app_db, monkeypatch):
+    """A plain report (no --audit) is not a finding, even if the underlying
+    data would fail an audit and a webhook is configured."""
+    _non_clean_app_db(app_db)
+    rc, posted = _run_report(
+        monkeypatch, ["--network", NET, "--alert-webhook", "https://discord.invalid/webhook"]
+    )
+    assert rc == 0
+    assert posted == []
+
+
+def test_build_alert_body_many_rows_keeps_trailer_and_says_how_many_elided():
+    """#560 review round 1: a night with many fee-cover violations must not
+    truncate away the reproduction/requeue commands."""
+    violations = [f"ACC{i}: refund {80000 + i} exceeds promise {70000 + i}" for i in range(200)]
+    body = fee_cover_report.build_alert_body("mainnet", violations)
+    assert len(body) <= 1900
+    assert body.endswith(
+        "Report: scripts/fee_cover_report.py --network mainnet --audit\n"
+        "After fixing the cause, requeue with scripts/recover_fee_cover_refunds.py "
+        "--network mainnet --requeue <accept_hash>"
+    )
+    assert re.search(r"\.\.\. and \d+ more", body)
+    assert "ACC199" not in body

@@ -2,6 +2,7 @@
 # legitimately-grown edition pass conservation; remove it and it reads as drift.
 
 import os
+import re
 import sys
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
@@ -20,8 +21,12 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 import audit_trait_economy as ate  # noqa: E402
 
+from lfg_core import (  # noqa: E402
+    closet_reconcile,  # noqa: E402
+    nft_index,
+    trait_economy,
+)
 from lfg_core import economy_store as es  # noqa: E402
-from lfg_core import nft_index, trait_economy  # noqa: E402
 
 NON_BODY = trait_economy.NON_BODY_SLOTS
 
@@ -201,6 +206,127 @@ def test_real_drift_still_fails_and_alerts(tmp_path, monkeypatch, capsys):
     assert rc == 1, out
     assert "Conservation: DRIFT" in out
     assert len(posted) == 1 and posted[0].startswith("**Trait economy audit: DRIFT**")
+    # Actionable without opening a DB: network + the report file's own path.
+    (report,) = os.listdir(tmp_path / "r")
+    report_path = os.path.join(str(tmp_path / "r"), report)
+    assert "testnet" in posted[0]
+    assert f"Report: {report_path}" in posted[0]
+
+
+def test_post_alert_never_raises_even_when_the_webhook_post_fails(monkeypatch):
+    """The shared alert helper's contract (scripts/_alerts.py): a webhook POST
+    that raises must never propagate — an audit's exit code can never depend
+    on whether Discord happens to be reachable. `ate.post_alert` is the SAME
+    function object every audit script imports, so this exercises the one
+    shared implementation directly rather than each caller."""
+    import urllib.request
+
+    def boom(*args, **kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert ate.post_alert("https://discord.invalid/webhook", "body") is False
+
+
+# --- #560 review round 1: a long finding list must never eat the actionable
+# trailer — post_alert's own truncation is blind and cannot be relied on. ---
+
+
+def test_assemble_alert_body_elides_rows_but_keeps_the_trailer():
+    """The shared primitive every build_alert_body() now goes through."""
+    header = "HEADER"
+    trailer = ["TRAILER-1", "TRAILER-2: run this command"]
+    rows = [f"finding {i}: something went wrong here" for i in range(300)]
+    body = ate.assemble_alert_body(header, rows, trailer)
+    assert len(body) <= 1900
+    assert body.startswith(header)
+    assert body.endswith("\n".join(trailer))
+    assert re.search(r"\.\.\. and \d+ more", body)
+    assert "finding 299" not in body  # some rows really were dropped
+
+
+def test_assemble_alert_body_trims_the_header_not_the_trailer_when_even_that_does_not_fit():
+    """#560 review round 3 (CodeRabbit): eliding every row still isn't enough
+    when `header` alone is absurd — the function must GUARANTEE its own
+    return value is <= limit, never lean on post_alert's blind body[:1900]
+    to do it (that would cut the trailer, exactly what round 1 fixed). The
+    header gives, not the trailer: an operator acts on the trailer."""
+    trailer = ["Run the remediation command.", "Report: reports/x.md"]
+    body = ate.assemble_alert_body("H" * 5000, [], trailer)
+    assert len(body) <= 1900
+    assert body.endswith("\n".join(trailer))  # the whole trailer, untouched
+    assert "Run the remediation command." in body
+
+
+def test_assemble_alert_body_shortest_trailer_line_wins_when_trailer_alone_is_too_long():
+    """One tier deeper than the above: if the TRAILER itself (not just the
+    header) already exceeds the limit — e.g. one caller-supplied line, like a
+    report path, is itself enormous — the short, universal remediation line
+    must survive and the one enormous line must be the thing that gives, not
+    the other way around."""
+    huge_report_line = "Report: " + ("x" * 3000)
+    trailer = ["Run the remediation command.", huge_report_line]
+    body = ate.assemble_alert_body("normal header", [], trailer)
+    assert len(body) <= 1900
+    assert "Run the remediation command." in body
+    assert huge_report_line not in body
+
+
+def test_build_alert_body_survives_an_absurdly_long_report_path():
+    """The REAL reachability path CodeRabbit named: audit_trait_economy.py
+    accepts an unconstrained --report-dir, so report_path (embedded in the
+    trailer's own last line) can be made arbitrarily long by the caller."""
+    report = trait_economy.ConservationReport(trait_drift={}, ok=True)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    huge_path = "reports/" + ("x" * 3000) + ".md"
+    body = ate.build_alert_body("mainnet", 1, report, completeness, huge_path)
+    assert len(body) <= 1900
+    assert "Run scripts/reconcile_supply_growth.py" in body  # remediation survives
+
+
+def test_build_alert_body_many_rows_still_ends_with_the_report_path():
+    trait_drift = {(f"Slot{i}", "Value"): -1 for i in range(300)}
+    report = trait_economy.ConservationReport(trait_drift=trait_drift, ok=False)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    body = ate.build_alert_body("mainnet", 5000, report, completeness, "reports/big.md")
+    assert len(body) <= 1900
+    assert body.endswith(
+        "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
+        "(dry-run first), then re-audit.\n"
+        "Report: reports/big.md"
+    )
+    assert re.search(r"\.\.\. and \d+ more", body)
+
+
+def test_build_alert_body_keeps_closet_guidance_when_drift_elides_alongside_it():
+    """#560 review round 2 (Greptile): conservation drift with enough rows to
+    force elision, together with Closet ownership anomalies, is exactly the
+    busy night where the Closet-specific remediation command used to be the
+    first thing dropped (it was the last, and so first-elided, row). It must
+    now survive in the protected trailer alongside the generic supply one —
+    even though the Closet ownership ROWS it used to sit next to do not."""
+    trait_drift = {(f"Slot{i}", "Value"): -1 for i in range(300)}
+    report = trait_economy.ConservationReport(trait_drift=trait_drift, ok=False)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    closet_ownership = closet_reconcile.ClosetOwnershipReport(
+        project_rows=[
+            closet_reconcile.ClosetRow(owner="rIssuer", nft_id="CLOSET1", status="active")
+        ]
+    )
+    body = ate.build_alert_body(
+        "mainnet", 5000, report, completeness, "reports/big.md", closet_ownership
+    )
+    assert len(body) <= 1900
+    assert re.search(r"\.\.\. and \d+ more", body)  # elision really happened
+    assert "run scripts/reconcile_closet_tokens.py (dry-run first)." in body
+    assert body.endswith(
+        "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
+        "(dry-run first), then re-audit.\n"
+        "Report: reports/big.md"
+    )
+    # the specific Closet-ownership finding row is exactly what got elided —
+    # the point of the fix is that the instruction survives without it
+    assert "Closet keyed to project account rIssuer" not in body
 
 
 def test_benign_drift_with_a_completeness_violation_alerts_as_violations():

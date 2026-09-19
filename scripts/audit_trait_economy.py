@@ -33,6 +33,7 @@ from lfg_core import (  # noqa: E402
     nft_index,
     trait_economy,
 )
+from scripts._alerts import assemble_alert_body, post_alert  # noqa: E402
 
 
 def classify_drift(
@@ -85,60 +86,60 @@ def build_alert_body(
     closet_ownership: closet_reconcile.ClosetOwnershipReport | None = None,
 ) -> str:
     """Compact Discord-webhook message for a NON-CLEAN audit run, labelling
-    benign swap substitution separately from real conservation drift."""
+    benign swap substitution separately from real conservation drift. The
+    final remediation commands and report path are a fixed trailer guaranteed
+    to survive however many finding rows there are (review round 1: this is
+    the same flaw #560 shipped with — see scripts/_alerts.assemble_alert_body).
+    Review round 2: the Closet remediation command is ALSO promoted into that
+    trailer whenever Closet ownership violations are present — it was
+    previously the last (and so first-elided) row, meaning a busy night with
+    both conservation drift and Closet anomalies could lose its only
+    Closet-specific instruction while keeping the generic supply one."""
     classes = classify_drift(conservation)
-    lines = [
+    header = (
         f"**Trait economy audit: "
         f"{'DRIFT' if not conservation_clean(conservation) else 'VIOLATIONS'}** "
         f"({network}, {live_count} live characters)"
-    ]
+    )
+    closet_bad = closet_ownership is not None and not closet_ownership.ok
+    rows: list[str] = []
     if classes["real"]:
-        lines.append("Real conservation drift — investigate (do NOT re-freeze genesis):")
+        rows.append("Real conservation drift — investigate (do NOT re-freeze genesis):")
         for (slot, value), delta in sorted(classes["real"].items()):
-            lines.append(f"- {slot} | {value}: {delta:+d}")
+            rows.append(f"- {slot} | {value}: {delta:+d}")
     if classes["benign_swap"]:
-        lines.append(
+        rows.append(
             "Net-zero-per-slot pattern — benign swap substitution, review, likely not a leak:"
         )
         for (slot, value), delta in sorted(classes["benign_swap"].items()):
-            lines.append(f"- {slot} | {value}: {delta:+d}")
+            rows.append(f"- {slot} | {value}: {delta:+d}")
     if not completeness.ok:
-        lines.append(
+        rows.append(
             f"Completeness violations: orphan bodies {completeness.orphan_bodies or '—'}, "
             f"slot anomalies in editions {sorted(completeness.slot_anomalies) or '—'}"
         )
-    if closet_ownership is not None and not closet_ownership.ok:
+    if closet_bad:
+        assert closet_ownership is not None  # closet_bad already implies this
         for row in closet_ownership.project_rows:
-            lines.append(f"- Closet keyed to project account {row.owner} -> {row.nft_id} (#383)")
+            rows.append(f"- Closet keyed to project account {row.owner} -> {row.nft_id} (#383)")
         for nft_id, owners in sorted(closet_ownership.unresolved_duplicates.items()):
-            lines.append(
+            rows.append(
                 f"- Closet {nft_id} claimed by {', '.join(owners)} — needs clio arbitration"
             )
-        lines.append("Run scripts/reconcile_closet_tokens.py (dry-run first) for the above.")
-    lines.append(
+    trailer = [
         "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
-        "(dry-run first), then re-audit."
-    )
-    lines.append(f"Report: {report_path}")
-    return "\n".join(lines)
-
-
-def post_alert(webhook_url: str, body: str) -> bool:
-    """Best-effort POST to a Discord webhook; failures only log."""
-    import json
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(
-            webhook_url,
-            data=json.dumps({"content": body[:1900]}).encode(),
-            headers={"Content-Type": "application/json"},
+        "(dry-run first), then re-audit.",
+        f"Report: {report_path}",
+    ]
+    if closet_bad:
+        # Self-contained wording (not "...for the above"): the rows it refers
+        # to can themselves be elided while this trailer line always survives.
+        trailer.insert(
+            0,
+            "Closet ownership anomalies detected — run scripts/reconcile_closet_tokens.py "
+            "(dry-run first).",
         )
-        urllib.request.urlopen(req, timeout=10)
-        return True
-    except Exception as exc:  # noqa: BLE001 — alerting must never fail the audit
-        print(f"alert webhook failed: {exc}", file=sys.stderr)
-        return False
+    return assemble_alert_body(header, rows, trailer)
 
 
 def format_economy_report(
