@@ -46,3 +46,31 @@ export function videoFallback(poster, label) {
   if (!poster) return null;
   return { src: poster, alt: label || '' };
 }
+
+// Standalone trait art (a transparent /api/layer PNG shown on its own in a
+// grid tile, chip or detail view) has no backdrop, so dark art — every
+// eyebrow — vanished on the dark cards. Face traits are tiny and meaningless
+// without a face, so they sit on a faint default body of their own class; all
+// other trait art gets a checkerboard (CSS .trait-art). Returns null for
+// anything that isn't single-trait layer art.
+const FACE_SLOTS = new Set(['Eyes', 'Eyebrows', 'Mouth']);
+const DEFAULT_BODY = {
+  ape: 'Ape',
+  female: 'Curved Light',
+  male: 'Straight Light',
+  milady: 'Curved Light Milady',
+  skeleton: 'Metal Skeleton',
+};
+
+export function traitArtBackdrop(src) {
+  if (!src || !src.includes('/api/layer?')) return null;
+  const q = new URLSearchParams(src.slice(src.indexOf('?') + 1));
+  const slot = q.get('trait');
+  if (!slot || slot === 'Body') return null;
+  if (!FACE_SLOTS.has(slot)) return { face: false, bodySrc: null };
+  const cls = DEFAULT_BODY[q.get('body')] ? q.get('body') : 'male';
+  const base = src.slice(0, src.indexOf('/api/layer?'));
+  const bodySrc = `${base}/api/layer?body=${encodeURIComponent(cls)}` +
+    `&trait=Body&value=${encodeURIComponent(DEFAULT_BODY[cls])}&thumb=1`;
+  return { face: true, bodySrc };
+}

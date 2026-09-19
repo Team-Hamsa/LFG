@@ -1334,3 +1334,25 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
    than block because the customizable select lays out its label + chevron
    on the grid set above (a native select treats it as plain block). */
 #closet-bid-form-panel select { display: grid; width: fit-content; margin: 4px auto 10px; }
+
+/* Standalone trait art (decorateTraitArt in app.js): transparent layer PNGs
+   had nothing behind them, so dark art — every eyebrow — disappeared into the
+   dark cards. Checkerboard for most traits; face traits (Eyes/Eyebrows/Mouth)
+   sit on a faint default body so they read in context. */
+.trait-art {
+  background-color: #5a5a5a;
+  background-image:
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%),
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.trait-art-face {
+  background-color: var(--surface-2);
+  background-image:
+    linear-gradient(rgba(34, 34, 34, .35), rgba(34, 34, 34, .35)),
+    var(--trait-body);
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
