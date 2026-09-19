@@ -815,6 +815,7 @@ def test_rarity_odds_200_shape(rarity_api_env):
     resp = _run(server.handle_rarity_odds(req))
     assert resp.status == 200
     body = _run(_read_json(resp))
+    assert set(body) == {"body", "slots", "stale_slots", "generated_at"}
     assert body["body"] == "male"
     assert "Background" in body["slots"]
     rows = body["slots"]["Background"]
@@ -825,8 +826,57 @@ def test_rarity_odds_200_shape(rarity_api_env):
     assert isinstance(row["share_pct"], float)
     assert isinstance(row["live_count"], int)
     assert isinstance(row["enabled"], bool)
+    # rarity_api_env's app DB has no LFG table at all (fixture never creates
+    # one) -- rarity._is_stale short-circuits False without one, so nothing
+    # is ever reported stale here; test_rarity_odds_reports_stale_slots below
+    # exercises the genuinely-stale path with a real LFG table.
+    assert body["stale_slots"] == []
     assert isinstance(body["generated_at"], str)
     datetime.fromisoformat(body["generated_at"])  # parseable ISO timestamp
+
+
+def test_rarity_odds_reports_stale_slots(tmp_path, monkeypatch):
+    # #565 review round 1: the endpoint must surface staleness (Greptile P1)
+    # without ever reconciling it itself (that's a WRITE — see the module
+    # note above handle_rarity_odds). Build a DB where a category's cached
+    # live_count provably disagrees with the LFG table.
+    app_db = str(tmp_path / "stale_app.db")
+    conn = sqlite3.connect(app_db)
+    conn.execute("""CREATE TABLE LFG (
+        nft_number INTEGER PRIMARY KEY, nft_id TEXT, discord_id TEXT,
+        owner_address TEXT, metadata_url TEXT, image_url TEXT,
+        Background TEXT, Back TEXT, Body TEXT, Clothing TEXT, Eyes TEXT,
+        Eyebrows TEXT, Mouth TEXT, Hat TEXT, Accessory TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    rarity.ensure_schema(conn)
+    conn.execute(
+        """INSERT INTO trait_rarity (network, body, category, trait, live_count,
+           floor_weight, enabled) VALUES (?,?,?,?,?,?,?)""",
+        ("testnet", "male", "Background", "Red", 999, 0.005, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: app_db)
+    monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(server.config, "LAYER_SOURCE", "cdn")
+    server._RARITY_ODDS_CACHE.clear()
+    try:
+        req = _mocked_request("GET", "/api/rarity?body=male")
+        resp = _run(server.handle_rarity_odds(req))
+        assert resp.status == 200
+        body = _run(_read_json(resp))
+        assert body["stale_slots"] == ["Background"]
+
+        # And it must never have "fixed" the cache it just reported as stale.
+        check = sqlite3.connect(app_db)
+        live_count = check.execute(
+            "SELECT live_count FROM trait_rarity WHERE trait='Red'"
+        ).fetchone()[0]
+        check.close()
+        assert live_count == 999
+    finally:
+        server._RARITY_ODDS_CACHE.clear()
 
 
 def test_rarity_odds_unknown_body_400(rarity_api_env):

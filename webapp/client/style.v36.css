@@ -1215,6 +1215,9 @@ button.back:hover { color: var(--text); border: none; }
 }
 .odds-pct { flex: 0 0 auto; width: 4rem; text-align: right; font-weight: 700; color: var(--text); font-size: .85rem; }
 .odds-share { flex: 0 0 auto; width: 6.5rem; text-align: right; color: var(--muted); font-size: .78rem; }
+/* #565 review round 1: staleness disclosure note (distinct from the main
+   explainer paragraph, same .card-sub base). */
+.odds-stale-note { font-style: italic; margin-top: 8px; }
 
 /* Bulk mint quantity stepper (#215 UI) */
 .mint-row { display: flex; align-items: center; gap: 8px; justify-content: center; }

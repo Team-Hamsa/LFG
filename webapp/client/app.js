@@ -1563,6 +1563,10 @@ function setupLeaderboard() {
 // /api/rarity response -- the server already walks TRAIT_ORDER, so the
 // client just renders Object.keys(slots) in the order the server sent them.
 const oddsState = { body: 'male' };
+// Bumped on every loadOdds() call, same discipline as brixLoadGen (#565
+// Greptile P1: a body switch could otherwise let a slower, superseded
+// request's response render under a since-changed active tab).
+let oddsLoadGen = 0;
 
 function renderOddsRow(row) {
   const li = document.createElement('li');
@@ -1605,26 +1609,50 @@ function renderOddsSlots(slots) {
   el('odds-slots').replaceChildren(...sections);
 }
 
+function renderOddsStaleNote(staleSlots) {
+  const note = el('odds-stale-note');
+  if (!note) return; // cached older index.html
+  if (staleSlots && staleSlots.length) {
+    note.textContent = `Live counts may lag slightly for: ${staleSlots.join(', ')} — they refresh automatically on the next mint.`;
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
 async function loadOdds() {
   highlightTabs('odds-bodies', 'body', oddsState.body);
+  // Pinned to the generation this load was issued under: if a newer
+  // loadOdds() started (another body chip clicked) while this fetch was in
+  // flight, its response is dropped rather than repainted over the newer
+  // selection (Greptile P1 on PR #565; same pattern as loadBrix's
+  // brixLoadGen).
+  const loadGen = ++oddsLoadGen;
   const spinner = el('odds-spinner');
   const empty = el('odds-empty');
   spinner.hidden = false;
   empty.hidden = true;
+  let data = null;
   try {
-    const data = await api(`/api/rarity?body=${encodeURIComponent(oddsState.body)}`);
-    const slots = data.slots || {};
-    renderOddsSlots(slots);
-    const hasSlots = Object.keys(slots).length > 0;
-    empty.hidden = hasSlots;
-    if (!hasSlots) empty.textContent = 'No odds data yet for this body.';
+    data = await api(`/api/rarity?body=${encodeURIComponent(oddsState.body)}`);
   } catch (e) {
+    data = null;
+  }
+  if (loadGen !== oddsLoadGen) return; // superseded by a later body switch
+  spinner.hidden = true;
+  if (!data) {
     el('odds-slots').replaceChildren();
+    renderOddsStaleNote(null);
     empty.textContent = 'Odds unavailable.';
     empty.hidden = false;
-  } finally {
-    spinner.hidden = true;
+    return;
   }
+  const slots = data.slots || {};
+  renderOddsSlots(slots);
+  renderOddsStaleNote(data.stale_slots);
+  const hasSlots = Object.keys(slots).length > 0;
+  empty.hidden = hasSlots;
+  if (!hasSlots) empty.textContent = 'No odds data yet for this body.';
 }
 
 async function openOdds() {

@@ -2556,6 +2556,15 @@ async def handle_leaderboard(request):
 # handle_leaderboard/handle_shop_catalog above. Never reconciles toward a
 # target -- Option B (which target model to reconcile toward, if any) is a
 # separate, not-yet-decided owner call this endpoint doesn't prejudge.
+#
+# Staleness (#565 review round 1): weighted_pick reconciles a stale
+# live_count cache by calling recalculate_rarity -- a WRITE. This is a
+# PUBLIC, unauthenticated GET, so it must never do that (write amplification
+# / trivial DoS: hammer the endpoint, hammer the app DB). Instead it reports
+# `stale_slots`, via the read-only rarity.stale_categories, so the client can
+# say honestly "this may lag" rather than presenting a possibly-stale number
+# as authoritative. In practice this is rare -- live_count is reconciled on
+# every mint -- and self-heals on the next one either way.
 
 _RARITY_ODDS_CACHE_TTL = 60.0
 _RARITY_ODDS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
@@ -2570,11 +2579,13 @@ def _compute_mint_odds(network: str, body: str) -> dict[str, Any]:
     try:
         rarity.ensure_schema(conn)
         slots = rarity.mint_odds(conn, network, body)
+        stale_slots = rarity.stale_categories(conn, network, slots.keys())
     finally:
         conn.close()
     return {
         "body": body,
         "slots": slots,
+        "stale_slots": stale_slots,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
