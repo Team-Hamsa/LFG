@@ -8968,15 +8968,46 @@ async def handle_mint_active(request):
     return web.json_response({"session": session.to_dict() if session else None})
 
 
+# #503: a Closet Market fill (buyer or seller side) still moving BRIX/a trait
+# past this age reads as stuck for an operator, not a live resume candidate
+# -- the same reasoning an `indeterminate` fill needs a ledger-index-bounded
+# retry for (closet_market_flow.py's fill state machine docstring).
+_CLOSET_FILL_RESUME_WINDOW_SECONDS = 1800
+
+
+def _closet_resume_view(conn: sqlite3.Connection, wallet: str) -> dict[str, Any] | None:
+    """#503: the `closet` entry for GET /api/sessions/active. A fill outranks
+    a bid: it means BRIX or a trait has already moved and settlement is in
+    flight (possibly still needing the buyer's Payment signature), while a
+    pending_escrow bid is only a QR the user hasn't scanned yet. Reuses
+    _closet_bid_view/_closet_fill_view unchanged, so app.js's existing
+    attachMarketResume (which already dispatches on kind closet_bid/
+    closet_fill via MARKET_RESUME_RENDER/MARKET_STATUS_PATH) renders and
+    polls a resumed entry exactly like the dedicated status endpoints do."""
+    now = int(time.time())
+    fill = closet_market_store.unfinished_fill_for_wallet(
+        conn, wallet, since_ts=now - _CLOSET_FILL_RESUME_WINDOW_SECONDS
+    )
+    if fill is not None:
+        return _closet_fill_view(fill, wallet)
+    order = closet_market_store.pending_bid_for_owner(
+        conn, wallet, since_ts=now - xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
+    )
+    if order is not None:
+        return _closet_bid_view(order)
+    return None
+
+
 @require_wallet
 async def handle_sessions_active(request):
     """GET /api/sessions/active (#221): every live (non-terminal) flow for the
     caller in one payload, so a relaunched Activity webview can re-attach to
     whatever was in flight instead of booting to the mint home screen. Extends
     #216's per-flow /api/mint/active pattern across mint/bulk/swap/market/
-    economy/shop in a single round-trip. Read-only re-attach: no session is
-    created or advanced here, and no transaction is built (SourceTag/memos
-    were already stamped when the flow's payload was first built)."""
+    closet/economy/shop in a single round-trip. Read-only re-attach: no
+    session is created or advanced here, and no transaction is built
+    (SourceTag/memos were already stamped when the flow's payload was first
+    built)."""
     user = request["user"]
     uid, plat = user["id"], _platform(user)
     _expire_abandoned_all()
@@ -9005,6 +9036,17 @@ async def handle_sessions_active(request):
         ),
         None,
     )
+    # Closet Market bids/fills are durable DB rows, not in-memory sessions
+    # (unlike every other flow above) -- _closet_resume_view queries them
+    # directly rather than going through pick()/_active_session. A DB hiccup
+    # here is a NEW failure surface next to six flows that can't fail (plain
+    # dict lookups) -- degrade to no closet resume rather than 500 the whole
+    # endpoint and strand every other flow's resume too.
+    try:
+        closet = await _closet_db(_closet_resume_view, wallet)
+    except Exception as e:
+        logging.warning(f"Closet Market resume lookup failed: {e!r}")
+        closet = None
 
     return web.json_response(
         {
@@ -9012,6 +9054,7 @@ async def handle_sessions_active(request):
             "bulk": pick(bulk_sessions, bulk_mint_flow.TERMINAL_STATES),
             "swap": pick(swap_sessions, swap_flow.TERMINAL_STATES),
             "market": pick(market_sessions, market_flow.TERMINAL_STATES),
+            "closet": closet,
             "economy": pick(economy_sessions, economy_api.TERMINAL_STATES),
             "shop": shop,
         }

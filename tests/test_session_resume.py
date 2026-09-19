@@ -28,7 +28,16 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
-from lfg_core import market_flow, mint_flow, shop_flow, swap_flow  # noqa: E402
+from lfg_core import (  # noqa: E402
+    closet_market_store,
+    closet_token,
+    economy_store,
+    market_flow,
+    mint_flow,
+    shop_flow,
+    swap_flow,
+)
+from lfg_core.nft_index import init_db as init_onchain_db  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 from webapp import economy_api, mock_economy  # noqa: E402
 
@@ -68,7 +77,7 @@ async def _read_json(resp):
     return json.loads(resp.body.decode())
 
 
-FLOWS = ("mint", "bulk", "swap", "market", "economy", "shop")
+FLOWS = ("mint", "bulk", "swap", "market", "closet", "economy", "shop")
 
 
 @pytest.fixture
@@ -292,3 +301,131 @@ def test_swap_payload_carries_payment_link(dev_auth):
     body = _active(dev_auth)
     assert body["swap"]["payment_link"] == "https://xumm.app/sign/abc"
     assert body["swap"]["state"] not in swap_flow.TERMINAL_STATES
+
+
+# --- Closet Market resume (#503) ---------------------------------------------
+# GET /api/sessions/active grows a `closet` entry built from the SAME
+# _closet_bid_view/_closet_fill_view app.py already uses for the dedicated
+# /api/closet/bid/{id} and /api/closet/fill/{id} status polls, so a resumed
+# entry renders and polls through app.js's existing attachMarketResume
+# unchanged. Only two things are resume-worthy -- an OPEN book listing is
+# normal state, not "in flight":
+#  - a bid still waiting on its EscrowCreate signature (state pending_escrow)
+#    whose XUMM payload hasn't hit its own DEFAULT_EXPIRE_MINUTES TTL;
+#  - a fill (buyer or seller side) that hasn't reached a terminal state
+#    (lfg_core.closet_market_store.TERMINAL_FILL_STATES) within the last 30
+#    minutes -- past that window (an `indeterminate` fill, whose resolution
+#    per closet_market_flow.py's fill-machine docstring can genuinely take a
+#    while, is the state most likely to still be sitting there) it reads as
+#    stuck for an operator, not a live resume candidate.
+
+CLOSET_OWNER = mock_economy.DEV_OWNER  # what dev-mode require_wallet resolves
+CLOSET_SELLER = "rClosetResumeSeller000000000000000"
+
+
+@pytest.fixture
+def closet_resume_env(dev_auth, tmp_path, monkeypatch):
+    """Fresh per-test onchain.db (mirrors tests/test_closet_market_api.py's
+    closet_env) with CLOSET_OWNER and CLOSET_SELLER both holding an active
+    Closet, so the store-level create_pending_bid/create_ask/create_take_fill
+    calls below (no HTTP handler involved) don't refuse on closet_required."""
+    path = str(tmp_path / "onchain_testnet.db")
+    conn = init_onchain_db(path)
+    economy_store.init_economy_schema(conn)
+    for owner in (CLOSET_OWNER, CLOSET_SELLER):
+        economy_store.set_closet_token(conn, owner, f"C-{owner}", "00", status=closet_token.ACTIVE)
+    economy_store.set_closet_contents(conn, CLOSET_SELLER, [("Hat", "Wizard Hat", 1)], [])
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("ONCHAIN_DB_PATH", path)
+    return path
+
+
+def _closet_conn(path):
+    conn = init_onchain_db(path)
+    economy_store.init_economy_schema(conn)
+    return conn
+
+
+def test_pending_bid_with_live_payload_resumes(dev_auth, closet_resume_env):
+    conn = _closet_conn(closet_resume_env)
+    closet_market_store.create_pending_bid(
+        conn,
+        owner=CLOSET_OWNER,
+        slot="Hat",
+        value="Wizard Hat",
+        price_brix="10",
+        platform=None,
+        condition="COND",
+        fulfillment_enc="SEALED",
+        cancel_after=9_999_999_999,
+        payload_uuid="U1",
+        xumm_url="https://xumm.app/sign/u1",
+        qr_url="https://xumm.app/qr/u1",
+        push=None,
+    )
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["kind"] == "closet_bid"
+    assert body["closet"]["state"] == "awaiting_signature"
+    assert body["closet"]["slot"] == "Hat"
+    assert body["closet"]["value"] == "Wizard Hat"
+
+
+def test_pending_bid_with_expired_payload_omitted(dev_auth, closet_resume_env):
+    """Past xumm_ops.DEFAULT_EXPIRE_MINUTES (15) the QR itself is dead in
+    Xaman; resuming straight to it would strand the user on a spinner that
+    can never complete."""
+    conn = _closet_conn(closet_resume_env)
+    closet_market_store.create_pending_bid(
+        conn,
+        owner=CLOSET_OWNER,
+        slot="Hat",
+        value="Wizard Hat",
+        price_brix="10",
+        platform=None,
+        condition="COND",
+        fulfillment_enc="SEALED",
+        cancel_after=9_999_999_999,
+        payload_uuid="U1",
+        xumm_url="https://xumm.app/sign/u1",
+        qr_url="https://xumm.app/qr/u1",
+        push=None,
+        now=int(time.time()) - 20 * 60,
+    )
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"] is None
+
+
+def test_unfinished_fill_within_30min_resumes(dev_auth, closet_resume_env):
+    conn = _closet_conn(closet_resume_env)
+    ask = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Hat", value="Wizard Hat", price_brix="10", platform=None
+    )
+    closet_market_store.create_take_fill(
+        conn, ask["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 300
+    )
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["kind"] == "closet_fill"
+    assert body["closet"]["state"] == "awaiting_signature"
+    assert body["closet"]["role"] == "buyer"
+
+
+def test_indeterminate_fill_older_than_30min_excluded(dev_auth, closet_resume_env):
+    conn = _closet_conn(closet_resume_env)
+    ask = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Hat", value="Wizard Hat", price_brix="10", platform=None
+    )
+    fill = closet_market_store.create_take_fill(
+        conn, ask["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 2400
+    )
+    closet_market_store.update_fill(conn, fill["id"], state=closet_market_store.INDETERMINATE)
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"] is None

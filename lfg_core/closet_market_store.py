@@ -1089,3 +1089,37 @@ def fills_needing_attention(conn: sqlite3.Connection) -> list[str]:
             "SELECT id FROM closet_fills WHERE state NOT IN ('mirrored', 'refunded', 'failed') ORDER BY updated_ts"
         )
     ]
+
+
+def pending_bid_for_owner(
+    conn: sqlite3.Connection, owner: str, *, since_ts: int
+) -> dict[str, Any] | None:
+    """#503: the owner's most recent still-signing bid (PENDING_ESCROW)
+    created no earlier than `since_ts`, for GET /api/sessions/active's resume
+    payload -- NOT every live bid. An OPEN/MATCHED/CANCELLING bid is normal
+    book state (visible via orders_for_owner), not a signature the relaunched
+    Activity needs to put back in front of the user."""
+    return _one(
+        conn,
+        "SELECT * FROM closet_orders WHERE owner = ? AND side = ? AND state = ? "
+        "AND created_ts >= ? ORDER BY created_ts DESC LIMIT 1",
+        (owner, SIDE_BID, PENDING_ESCROW, since_ts),
+    )
+
+
+def unfinished_fill_for_wallet(
+    conn: sqlite3.Connection, wallet: str, *, since_ts: int
+) -> dict[str, Any] | None:
+    """#503: the wallet's (buyer or seller side) most recent fill that hasn't
+    reached a TERMINAL_FILL_STATES outcome, created no earlier than
+    `since_ts`, for GET /api/sessions/active's resume payload. Bounded so a
+    fill parked non-terminal for a long time (`indeterminate` most plausibly,
+    per this module's own docstring) reads as stuck-for-an-operator rather
+    than a live resume candidate."""
+    states = ", ".join("?" for _ in TERMINAL_FILL_STATES)
+    return _one(
+        conn,
+        "SELECT * FROM closet_fills WHERE (seller = ? OR buyer = ?) AND created_ts >= ? "
+        f"AND state NOT IN ({states}) ORDER BY created_ts DESC LIMIT 1",  # noqa: S608 - '?' placeholders only
+        (wallet, wallet, since_ts, *TERMINAL_FILL_STATES),
+    )

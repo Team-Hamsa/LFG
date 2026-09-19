@@ -41,7 +41,15 @@ def pick(sessions):
     return run_js(f"M.pickActiveFlow({json.dumps(sessions)})")
 
 
-EMPTY = {"mint": None, "bulk": None, "swap": None, "market": None, "economy": None, "shop": None}
+EMPTY = {
+    "mint": None,
+    "bulk": None,
+    "swap": None,
+    "market": None,
+    "closet": None,
+    "economy": None,
+    "shop": None,
+}
 
 
 def _with(**kw):
@@ -112,7 +120,49 @@ def test_market_session_returned_intact_for_routing():
 
 
 def test_flow_order_exported():
-    assert run_js("M.FLOW_ORDER") == ["mint", "bulk", "swap", "market", "economy", "shop"]
+    assert run_js("M.FLOW_ORDER") == [
+        "mint",
+        "bulk",
+        "swap",
+        "market",
+        "closet",
+        "economy",
+        "shop",
+    ]
+
+
+# --- Closet Market resume (#503) ---------------------------------------------
+# closet's `state` values come from lfg_service/app.py's _closet_bid_view /
+# _closet_fill_view, which translate closet_market_store's own bid/fill
+# vocabulary (pending_escrow/open/matched/cancelling/cancelled/expired/filled
+# for a bid; funds_pending/funded/asset_moved/paid/mirrored/refund_pending/
+# refunded/indeterminate/failed for a fill -- see lfg_core/closet_market_flow.py's
+# module docstring for both state machines) into market_flow's own shared
+# vocabulary (awaiting_signature/pending/done/failed) specifically so Closet
+# bid/fill screens can reuse marketFlow/pollMarketFlow/attachMarketResume
+# unchanged (see app.js's MARKET_RESUME_RENDER/MARKET_STATUS_PATH, which
+# already key `closet_bid`/`closet_fill` for exactly this). 'done' and
+# 'failed' are therefore the only two terminal values `state` can hold here --
+# not closet_market_store's own state names, which never reach the client.
+
+
+def test_closet_terminal_states():
+    live = {"id": "c1", "kind": "closet_bid", "state": "awaiting_signature"}
+    assert pick(_with(closet=live)) == {"flow": "closet", "session": live}
+    live_pending = {"id": "c1", "kind": "closet_fill", "state": "pending"}
+    assert pick(_with(closet=live_pending)) == {"flow": "closet", "session": live_pending}
+    assert pick(_with(closet={"id": "c1", "kind": "closet_bid", "state": "done"})) is None
+    assert pick(_with(closet={"id": "c1", "kind": "closet_fill", "state": "failed"})) is None
+
+
+def test_priority_market_over_closet():
+    got = pick(
+        _with(
+            market={"id": "k1", "state": "awaiting_signature", "kind": "buy"},
+            closet={"id": "c1", "state": "awaiting_signature", "kind": "closet_bid"},
+        )
+    )
+    assert got["flow"] == "market"
 
 
 # --- Greptile #376 P1: chained resume when two flows were live ---------------

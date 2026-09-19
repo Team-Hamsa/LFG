@@ -2782,6 +2782,11 @@ async function resumeAnyFlow() {
     case 'bulk': return attachBulkResume(session);
     case 'swap': return attachSwapResume(session);
     case 'market': return attachMarketResume(session);
+    // #503: closet bid/fill entries already carry kind closet_bid/closet_fill
+    // (lfg_service/app.py's _closet_bid_view/_closet_fill_view), which
+    // MARKET_RESUME_RENDER/MARKET_STATUS_PATH already key -- no separate
+    // attach function needed.
+    case 'closet': return attachMarketResume(session);
     case 'economy': return attachEconomyResume(session);
     case 'shop': await resumeShopBuy(session.id); return true;
   }
