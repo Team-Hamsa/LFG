@@ -8,6 +8,7 @@
 
 import random as _random
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -655,3 +656,146 @@ def get_odds(
         status = "disabled" if not enabled else boost_status(bi, bs, bsa, now)
         out.append((trait, count, share, weight, status))
     return sorted(out, key=lambda r: -r[3])
+
+
+def _is_mint_candidate(
+    trait: str,
+    enabled: int,
+    avail_set: set[str] | None,
+    cfg: Any,
+    body: str,
+    category: str,
+) -> bool:
+    """A row weighted_pick would actually draw from: admin-enabled, resolvable
+    in the current layer-store candidate set, AND legal for this body per
+    trait_config (mirrors traits.py::select_random_attributes' filter ahead
+    of its own weighted_pick call). Explicit params, not a closure, so ruff's
+    loop-variable-binding check (B023) can't flag a false trap: every call
+    site passes this iteration's own avail_set/category, never a stale one.
+
+    Deliberately excludes trait_config.conflicts -- see mint_odds's
+    docstring for why (path-dependent on other slots already rolled in the
+    same mint; would need simulation, not a cheap per-request check)."""
+    return bool(
+        enabled
+        and (avail_set is None or trait in avail_set)
+        and cfg.value_allowed(body, category, trait)
+    )
+
+
+def mint_odds(
+    conn: sqlite3.Connection,
+    network: str,
+    body: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Read-only mint-odds transparency table (#494 Option A): for every
+    TRAIT_ORDER slot with data, each trait's actual pick probability next to
+    its live collection share.
+
+    odds_pct is weighted_pick's own weight, normalized -- the exact candidate
+    set and the exact effective_weight math, just divided by the slot's
+    weight total and turned into a percentage. A candidate is enabled ∩
+    layer-store available (same auto-resolution get_odds uses) ∩ ALLOWED FOR
+    THIS BODY (trait_config.value_allowed — #565 Greptile P1: the real mint
+    path in traits.py::select_random_attributes filters through this exact
+    predicate before ever calling weighted_pick, so an odds view that skips
+    it overstates a body-restricted trait's odds and understates everyone
+    else's in the same slot). Parked (enabled=0), body-restricted, and any
+    other enabled row weighted_pick could never actually draw get odds_pct=0
+    -- the normalization over the remaining candidates IS the "shared out
+    proportionally" redistribution; there is no separate step.
+
+    Deliberately NOT modeled: `trait_config.conflicts`, which depends on
+    which values earlier slots already rolled in the SAME mint (path-
+    dependent) — an honest per-slot number would need a sum over every
+    earlier-slot outcome, i.e. simulation (scripts/simulate_rarity.py),
+    which is far too expensive per request. These are honest PRE-COMBINATION
+    odds; the client copy says so, and a specific pairing can still be ruled
+    out by trait_config.yaml exclusions.
+
+    Pure: no writes (no _ensure_rows, no recalculate_rarity — unlike
+    weighted_pick, this never mutates trait_rarity; see also stale_categories
+    below for why this endpoint must not reconcile), no randomness, and no
+    target-reconciliation model (Option B is a separate, not-yet-decided
+    owner call this function doesn't prejudge — odds here are always today's
+    smoothed live share, a martingale, never pulled toward a fixed target).
+
+    Does not call weighted_pick itself; tests/test_rarity_odds.py pins this
+    to weighted_pick's own captured weights so the two can't silently drift
+    apart."""
+    from lfg_core import trait_config
+    from lfg_core.swap_meta import TRAIT_ORDER
+
+    now = now or utcnow()
+    cfg = trait_config.get_config()
+    slots: dict[str, list[dict[str, Any]]] = {}
+    for category in TRAIT_ORDER:
+        rows = conn.execute(
+            """SELECT trait, live_count, floor_weight, boost_initial,
+                      boost_step_hours, boost_started_at, enabled
+               FROM trait_rarity WHERE network=? AND body=? AND category=?""",
+            (network, body, category),
+        ).fetchall()
+        if not rows:
+            continue
+        available = available_values(body, category)
+        avail_set = set(available) if available is not None else None
+        total = sum(r[1] for r in rows)
+        population = len(rows)
+        candidate_count = sum(
+            1 for r in rows if _is_mint_candidate(r[0], r[6], avail_set, cfg, body, category)
+        )
+        weights: dict[str, float] = {}
+        for trait, count, floor, bi, bs, bsa, enabled in rows:
+            if _is_mint_candidate(trait, enabled, avail_set, cfg, body, category):
+                weights[trait] = effective_weight(
+                    count,
+                    total,
+                    floor,
+                    bi,
+                    bs,
+                    bsa,
+                    now,
+                    population_size=population,
+                    candidate_count=candidate_count,
+                )
+        weight_total = sum(weights.values())
+        out: list[dict[str, Any]] = []
+        for trait, count, _floor, _bi, _bs, _bsa, enabled in rows:
+            share_pct = (count / total * 100) if total else 0.0
+            w = weights.get(trait, 0.0)
+            odds_pct = (w / weight_total * 100) if weight_total else 0.0
+            out.append(
+                {
+                    "value": trait,
+                    "odds_pct": odds_pct,
+                    "share_pct": share_pct,
+                    "live_count": count,
+                    "enabled": bool(enabled),
+                }
+            )
+        out.sort(key=lambda r: (-r["odds_pct"], r["value"]))
+        slots[category] = out
+    return slots
+
+
+def stale_categories(
+    conn: sqlite3.Connection, network: str, categories: Iterable[str]
+) -> list[str]:
+    """Read-only staleness check (#565 Greptile P1): which of `categories`
+    currently have a trait_rarity live_count cache that disagrees with the
+    LFG table -- i.e. weighted_pick would trigger a recalculate_rarity WRITE
+    the next time it were asked to pick from one of them.
+
+    mint_odds deliberately never reconciles this itself: it is read from a
+    PUBLIC, unauthenticated endpoint, and having a GET handler perform a
+    conditional DB write would be write amplification and a trivial DoS
+    vector (hammer the endpoint, hammer the app DB). Reuses the exact
+    read-only half of weighted_pick's own staleness check (_is_stale) --
+    never the write half (recalculate_rarity) -- so a caller that must stay
+    honest about potential staleness (rather than force reconciliation) can
+    surface it instead of silently presenting a possibly-lagging number as
+    authoritative. Never writes; safe to call from a public read path."""
+    return [c for c in categories if _is_stale(conn, network, c)]

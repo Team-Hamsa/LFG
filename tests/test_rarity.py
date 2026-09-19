@@ -1,4 +1,6 @@
 # Tests for the variable rarity engine (lfg_core/rarity.py).
+import asyncio
+import json
 import os
 import random
 import sqlite3
@@ -20,7 +22,11 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
+from aiohttp import web  # noqa: E402
+from aiohttp.test_utils import make_mocked_request  # noqa: E402
+
 from lfg_core import rarity  # noqa: E402
+from lfg_service import app as server  # noqa: E402
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -741,3 +747,193 @@ def test_reschedule_boost_rejects_finished_boost(conn):
         rarity.reschedule_boost(conn, "*", "Background", "Done", 100000, network="testnet", now=NOW)
     row = conn.execute("SELECT boost_step_hours FROM trait_rarity WHERE trait='Done'").fetchone()
     assert row == (24,)  # untouched
+
+
+# ---------------------------------------------------------------------------
+# GET /api/rarity (#494 Option A: mint-odds transparency)
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _mocked_request(method, path):
+    return make_mocked_request(method, path, app=web.Application())
+
+
+async def _read_json(resp):
+    return json.loads(resp.body.decode())
+
+
+def _seed_rarity_odds_row(app_db, trait, live, category="Background", body="male", **kw):
+    conn = sqlite3.connect(app_db)
+    rarity.ensure_schema(conn)
+    conn.execute(
+        """INSERT INTO trait_rarity (network, body, category, trait, live_count,
+           floor_weight, enabled) VALUES (?,?,?,?,?,?,?)""",
+        (
+            "testnet",
+            body,
+            category,
+            trait,
+            live,
+            kw.get("floor_weight", 0.005),
+            kw.get("enabled", 1),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def rarity_api_env(tmp_path, monkeypatch):
+    app_db = str(tmp_path / "app.db")
+    conn = sqlite3.connect(app_db)
+    rarity.ensure_schema(conn)
+    conn.close()
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: app_db)
+    monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
+    # Deterministic candidate set: see the `conn` fixture note above -- the
+    # repo-default LAYER_SOURCE=local would otherwise make mint_odds's
+    # available_values() scan a real (absent, in tests) layer tree.
+    monkeypatch.setattr(server.config, "LAYER_SOURCE", "cdn")
+    server._RARITY_ODDS_CACHE.clear()
+    yield app_db
+    server._RARITY_ODDS_CACHE.clear()
+
+
+def test_rarity_odds_200_shape(rarity_api_env):
+    app_db = rarity_api_env
+    _seed_rarity_odds_row(app_db, "Red", 4)
+    _seed_rarity_odds_row(app_db, "Blue", 6)
+    req = _mocked_request("GET", "/api/rarity?body=male")
+    resp = _run(server.handle_rarity_odds(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert set(body) == {"body", "slots", "stale_slots", "generated_at"}
+    assert body["body"] == "male"
+    assert "Background" in body["slots"]
+    rows = body["slots"]["Background"]
+    assert {r["value"] for r in rows} == {"Red", "Blue"}
+    row = next(r for r in rows if r["value"] == "Red")
+    assert set(row) == {"value", "odds_pct", "share_pct", "live_count", "enabled"}
+    assert isinstance(row["odds_pct"], float)
+    assert isinstance(row["share_pct"], float)
+    assert isinstance(row["live_count"], int)
+    assert isinstance(row["enabled"], bool)
+    # rarity_api_env's app DB has no LFG table at all (fixture never creates
+    # one) -- rarity._is_stale short-circuits False without one, so nothing
+    # is ever reported stale here; test_rarity_odds_reports_stale_slots below
+    # exercises the genuinely-stale path with a real LFG table.
+    assert body["stale_slots"] == []
+    assert isinstance(body["generated_at"], str)
+    datetime.fromisoformat(body["generated_at"])  # parseable ISO timestamp
+
+
+def test_rarity_odds_reports_stale_slots(tmp_path, monkeypatch):
+    # #565 review round 1: the endpoint must surface staleness (Greptile P1)
+    # without ever reconciling it itself (that's a WRITE — see the module
+    # note above handle_rarity_odds). Build a DB where a category's cached
+    # live_count provably disagrees with the LFG table.
+    app_db = str(tmp_path / "stale_app.db")
+    conn = sqlite3.connect(app_db)
+    conn.execute("""CREATE TABLE LFG (
+        nft_number INTEGER PRIMARY KEY, nft_id TEXT, discord_id TEXT,
+        owner_address TEXT, metadata_url TEXT, image_url TEXT,
+        Background TEXT, Back TEXT, Body TEXT, Clothing TEXT, Eyes TEXT,
+        Eyebrows TEXT, Mouth TEXT, Hat TEXT, Accessory TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    rarity.ensure_schema(conn)
+    conn.execute(
+        """INSERT INTO trait_rarity (network, body, category, trait, live_count,
+           floor_weight, enabled) VALUES (?,?,?,?,?,?,?)""",
+        ("testnet", "male", "Background", "Red", 999, 0.005, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: app_db)
+    monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(server.config, "LAYER_SOURCE", "cdn")
+    server._RARITY_ODDS_CACHE.clear()
+    try:
+        req = _mocked_request("GET", "/api/rarity?body=male")
+        resp = _run(server.handle_rarity_odds(req))
+        assert resp.status == 200
+        body = _run(_read_json(resp))
+        assert body["stale_slots"] == ["Background"]
+
+        # And it must never have "fixed" the cache it just reported as stale.
+        check = sqlite3.connect(app_db)
+        live_count = check.execute(
+            "SELECT live_count FROM trait_rarity WHERE trait='Red'"
+        ).fetchone()[0]
+        check.close()
+        assert live_count == 999
+    finally:
+        server._RARITY_ODDS_CACHE.clear()
+
+
+def test_rarity_odds_unknown_body_400(rarity_api_env):
+    req = _mocked_request("GET", "/api/rarity?body=robot")
+    resp = _run(server.handle_rarity_odds(req))
+    assert resp.status == 400
+
+
+def test_rarity_odds_missing_body_400(rarity_api_env):
+    req = _mocked_request("GET", "/api/rarity")
+    resp = _run(server.handle_rarity_odds(req))
+    assert resp.status == 400
+
+
+def test_rarity_odds_cache_hit_within_ttl(rarity_api_env, monkeypatch):
+    app_db = rarity_api_env
+    _seed_rarity_odds_row(app_db, "Red", 4)
+    calls = {"n": 0}
+    real_mint_odds = server.rarity.mint_odds
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return real_mint_odds(*a, **kw)
+
+    monkeypatch.setattr(server.rarity, "mint_odds", _counting)
+
+    req1 = _mocked_request("GET", "/api/rarity?body=male")
+    resp1 = _run(server.handle_rarity_odds(req1))
+    assert resp1.status == 200
+    body1 = _run(_read_json(resp1))
+
+    # Seed a second trait directly, bypassing the cache; a cached read within
+    # the TTL must not see it.
+    _seed_rarity_odds_row(app_db, "Green", 9)
+    req2 = _mocked_request("GET", "/api/rarity?body=male")
+    resp2 = _run(server.handle_rarity_odds(req2))
+    assert resp2.status == 200
+    body2 = _run(_read_json(resp2))
+
+    assert calls["n"] == 1
+    assert body1 == body2
+
+
+def test_rarity_odds_cache_keyed_by_body(rarity_api_env, monkeypatch):
+    app_db = rarity_api_env
+    _seed_rarity_odds_row(app_db, "Red", 4, body="male")
+    _seed_rarity_odds_row(app_db, "Pink", 4, body="female")
+    calls = {"n": 0}
+    real_mint_odds = server.rarity.mint_odds
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return real_mint_odds(*a, **kw)
+
+    monkeypatch.setattr(server.rarity, "mint_odds", _counting)
+
+    resp1 = _run(server.handle_rarity_odds(_mocked_request("GET", "/api/rarity?body=male")))
+    resp2 = _run(server.handle_rarity_odds(_mocked_request("GET", "/api/rarity?body=female")))
+    assert resp1.status == 200 and resp2.status == 200
+    assert calls["n"] == 2

@@ -128,6 +128,7 @@
         <button id="swap-btn" class="secondary">🏗️ Build</button>
         <button id="swapper-btn" class="secondary">🔁 Swap</button>
         <button id="market-btn" class="secondary">🛒 Trade</button>
+        <button id="odds-btn" class="secondary">🎲 Odds</button>
         <button id="offers-btn" class="secondary" hidden>🎁 Pending offers</button>
         <!-- Daily BRIX drip (#48): 1 BRIX per unlisted NFT per UTC day, accrued
              off-ledger and paid on claim. Hidden until the drip has produced
@@ -363,6 +364,35 @@
       <p id="closet-bid-note" class="cost"></p>
       <button id="closet-bid-confirm-btn" class="primary big">Lock bid</button>
       <p><button id="closet-bid-cancel-btn" class="back">← Cancel</button></p>
+    </section>
+
+    <!-- Mint odds transparency (#494 Option A): read-only view of per-trait
+         pick odds vs live collection share. Body chips are the fixed
+         VALID_BODIES set (lfg_core/trait_config.py) -- #565 Greptile P2
+         (body lists can drift): declined, see the PR thread; every other
+         fixed chip group in this app (lb-periods, lb-cats, market-tabs,
+         market-kind) is likewise static HTML, and VALID_BODIES needs
+         substantial other code (new layer art + trait_config.yaml) before a
+         member could ever change anyway. Slot order/content comes straight
+         from the /api/rarity response. -->
+    <section id="odds-panel" class="card" hidden>
+      <p><button id="odds-back-btn" class="back">← Back to the job site</button></p>
+      <h2>🎲 Mint odds</h2>
+      <p class="card-sub">Odds are the chance each trait is picked on your next mint. The engine weights each trait by its current share of the live collection (smoothed), so rare traits stay rare over time instead of being pulled toward a fixed target. Parked traits can't be minted; their odds are shared out proportionally across the rest of their slot. These figures are per-slot, before trait combination rules — a specific pairing can still be ruled out once earlier slots are picked.</p>
+      <div id="odds-bodies" class="lb-chips" role="tablist" aria-label="Body">
+        <button class="lb-chip active" role="tab" aria-selected="true" data-body="male">Male</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-body="female">Female</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-body="ape">Ape</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-body="milady">Milady</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-body="skeleton">Skeleton</button>
+      </div>
+      <div id="odds-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <p id="odds-empty" class="card-sub" hidden>Odds unavailable.</p>
+      <!-- #565 review round 1: honest staleness disclosure instead of the
+           endpoint silently reconciling (which would be an unauthenticated
+           write -- see lfg_service/app.py's handle_rarity_odds note). -->
+      <p id="odds-stale-note" class="card-sub odds-stale-note" hidden></p>
+      <div id="odds-slots"></div>
     </section>
 
     <section id="flow-panel" class="card" hidden>
