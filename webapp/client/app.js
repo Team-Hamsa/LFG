@@ -1310,7 +1310,7 @@ const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel',
                     'offers-panel', 'trustline-panel', 'claimall-panel',
-                    'link-panel', 'closet-bid-form-panel'];
+                    'link-panel', 'closet-bid-form-panel', 'odds-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -1555,6 +1555,81 @@ function setupLeaderboard() {
     lbState.anchor = next >= today ? null : next;
     loadLeaderboard();
   });
+}
+
+// --- Mint odds transparency (#494 Option A, home-screen entry) -----------
+// Read-only: per body, per slot, every trait's actual mint probability next
+// to its live collection share. Slot order/content come straight off the
+// /api/rarity response -- the server already walks TRAIT_ORDER, so the
+// client just renders Object.keys(slots) in the order the server sent them.
+const oddsState = { body: 'male' };
+
+function renderOddsRow(row) {
+  const li = document.createElement('li');
+  li.className = 'odds-row' + (row.enabled ? '' : ' odds-row-parked');
+  const value = document.createElement('span');
+  value.className = 'odds-value';
+  const valueText = document.createElement('span');
+  valueText.className = 'odds-value-text';
+  valueText.textContent = row.value;
+  value.appendChild(valueText);
+  if (!row.enabled) {
+    const badge = document.createElement('span');
+    badge.className = 'odds-badge';
+    badge.textContent = 'Parked';
+    value.appendChild(badge);
+  }
+  const odds = document.createElement('span');
+  odds.className = 'odds-pct';
+  odds.textContent = `${row.odds_pct.toFixed(2)}%`;
+  const share = document.createElement('span');
+  share.className = 'odds-share';
+  share.textContent = `${row.share_pct.toFixed(2)}% of collection`;
+  li.replaceChildren(value, odds, share);
+  return li;
+}
+
+function renderOddsSlots(slots) {
+  const sections = Object.keys(slots).map((slot) => {
+    const section = document.createElement('div');
+    section.className = 'odds-slot';
+    const heading = document.createElement('h4');
+    heading.className = 'odds-slot-title';
+    heading.textContent = slot;
+    const list = document.createElement('ul');
+    list.className = 'odds-list';
+    list.replaceChildren(...slots[slot].map(renderOddsRow));
+    section.replaceChildren(heading, list);
+    return section;
+  });
+  el('odds-slots').replaceChildren(...sections);
+}
+
+async function loadOdds() {
+  highlightTabs('odds-bodies', 'body', oddsState.body);
+  const spinner = el('odds-spinner');
+  const empty = el('odds-empty');
+  spinner.hidden = false;
+  empty.hidden = true;
+  try {
+    const data = await api(`/api/rarity?body=${encodeURIComponent(oddsState.body)}`);
+    const slots = data.slots || {};
+    renderOddsSlots(slots);
+    const hasSlots = Object.keys(slots).length > 0;
+    empty.hidden = hasSlots;
+    if (!hasSlots) empty.textContent = 'No odds data yet for this body.';
+  } catch (e) {
+    el('odds-slots').replaceChildren();
+    empty.textContent = 'Odds unavailable.';
+    empty.hidden = false;
+  } finally {
+    spinner.hidden = true;
+  }
+}
+
+async function openOdds() {
+  showPanel('odds-panel');
+  await loadOdds();
 }
 
 // --- Daily BRIX drip card (#48, home screen) ---
@@ -6601,6 +6676,22 @@ async function main() {
       const raw = closetBidPrice.value.trim();
       if (closetBidNote) closetBidNote.textContent = closetPure.bidDisclosure(marketPure.validateBrixPrice(raw).ok ? raw : null, closetBidTtlDays);
     };
+  }
+
+  // --- Mint odds (#494 Option A) ---
+  // Null-guarded: a cached older index.html has none of these nodes.
+  const oddsBtn = el('odds-btn');
+  if (oddsBtn) oddsBtn.onclick = () => openOdds();
+  const oddsBack = el('odds-back-btn');
+  if (oddsBack) oddsBack.onclick = () => showMintHome();
+  const oddsBodies = el('odds-bodies');
+  if (oddsBodies) {
+    oddsBodies.addEventListener('click', (e) => {
+      const btn = e.target.closest('.lb-chip');
+      if (!btn || btn.dataset.body === oddsState.body) return;
+      oddsState.body = btn.dataset.body;
+      loadOdds();
+    });
   }
 
   // Dev live-reload: runs even in degraded mode (no frame_id).

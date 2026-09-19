@@ -1197,6 +1197,25 @@ button.back:hover { color: var(--text); border: none; }
 .lb-value { flex: 0 0 auto; font-weight: 700; color: var(--text); font-size: .85rem; }
 .lb-me { margin: 8px 0 0; font-size: .82rem; color: var(--muted); }
 
+/* Mint odds transparency (#494 Option A) */
+.odds-slot { margin-top: 16px; text-align: left; }
+.odds-slot-title { margin: 0 0 6px; font-size: .95rem; color: var(--text); }
+.odds-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.odds-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; border-radius: 8px; background: var(--surface-2);
+}
+.odds-row.odds-row-parked { opacity: .55; }
+.odds-value { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--text); font-size: .85rem; }
+.odds-value-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.odds-badge {
+  flex: 0 0 auto; padding: 1px 7px; border-radius: 99px; background: var(--surface);
+  border: 1px solid var(--line); color: var(--muted); font-size: .62rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .03em;
+}
+.odds-pct { flex: 0 0 auto; width: 4rem; text-align: right; font-weight: 700; color: var(--text); font-size: .85rem; }
+.odds-share { flex: 0 0 auto; width: 6.5rem; text-align: right; color: var(--muted); font-size: .78rem; }
+
 /* Bulk mint quantity stepper (#215 UI) */
 .mint-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
 .qty-stepper { display: flex; align-items: center; gap: 4px; }

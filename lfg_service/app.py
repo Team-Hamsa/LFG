@@ -2549,6 +2549,63 @@ async def handle_leaderboard(request):
     )
 
 
+# --- GET /api/rarity (#494 Option A: mint-odds transparency) --------------
+# Read-only: per TRAIT_ORDER slot, every trait's actual weighted_pick
+# probability next to its live collection share, plus a "parked" flag for
+# disabled traits. Cached 60s per (network, body), same posture as
+# handle_leaderboard/handle_shop_catalog above. Never reconciles toward a
+# target -- Option B (which target model to reconcile toward, if any) is a
+# separate, not-yet-decided owner call this endpoint doesn't prejudge.
+
+_RARITY_ODDS_CACHE_TTL = 60.0
+_RARITY_ODDS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _compute_mint_odds(network: str, body: str) -> dict[str, Any]:
+    """Sync work for GET /api/rarity, run on an executor thread (same
+    posture as _compute_shop_catalog below): open a short-lived app-DB
+    connection on the calling thread — sqlite3 here is not serialized
+    (threadsafety=1), so connections are never shared across threads."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        slots = rarity.mint_odds(conn, network, body)
+    finally:
+        conn.close()
+    return {
+        "body": body,
+        "slots": slots,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+async def handle_rarity_odds(request: web.Request) -> web.Response:
+    """Public: GET /api/rarity?body=<body>. See module note above."""
+    body = request.query.get("body", "")
+    if body not in trait_config.VALID_BODIES:
+        return web.json_response({"error": f"unknown body: {body!r}"}, status=400)
+
+    network = config.XRPL_NETWORK
+    cache_key = (network, body)
+    now_mono = time.monotonic()
+    cached = _RARITY_ODDS_CACHE.get(cache_key)
+    if cached is not None and now_mono - cached[0] < _RARITY_ODDS_CACHE_TTL:
+        payload = cached[1]
+    else:
+        payload = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_mint_odds, network, body
+        )
+        for k in [
+            k
+            for k, (ts, _) in _RARITY_ODDS_CACHE.items()
+            if now_mono - ts >= _RARITY_ODDS_CACHE_TTL
+        ]:
+            del _RARITY_ODDS_CACHE[k]
+        _RARITY_ODDS_CACHE[cache_key] = (now_mono, payload)
+
+    return web.json_response(payload)
+
+
 _SHARE_CONVERSIONS_TTL_SECONDS = 60
 _share_conversions_cache: dict[str, tuple[float, list[dict[str, int | str]]]] = {}
 
@@ -11760,6 +11817,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/wallet/link/{payload_uuid}", handle_wallet_link_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
+    app.router.add_get("/api/rarity", handle_rarity_odds)
     app.router.add_get("/api/brix", handle_brix_status)
     app.router.add_post("/api/brix/claim", handle_brix_claim)
     # /claim/all must register before the /claim/{claim_id} wildcard, or a

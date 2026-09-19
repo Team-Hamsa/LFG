@@ -655,3 +655,83 @@ def get_odds(
         status = "disabled" if not enabled else boost_status(bi, bs, bsa, now)
         out.append((trait, count, share, weight, status))
     return sorted(out, key=lambda r: -r[3])
+
+
+def mint_odds(
+    conn: sqlite3.Connection,
+    network: str,
+    body: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Read-only mint-odds transparency table (#494 Option A): for every
+    TRAIT_ORDER slot with data, each trait's actual pick probability next to
+    its live collection share.
+
+    odds_pct is weighted_pick's own weight, normalized -- the exact candidate
+    set (enabled ∩ layer-store available, same auto-resolution get_odds uses)
+    and the exact effective_weight math, just divided by the slot's weight
+    total and turned into a percentage. Parked (enabled=0) traits, and any
+    enabled row weighted_pick could never actually draw (no resolvable art),
+    get odds_pct=0 -- the normalization over the remaining candidates IS the
+    "shared out proportionally" redistribution; there is no separate step.
+
+    Pure: no writes (no _ensure_rows, no recalculate_rarity — unlike
+    weighted_pick, this never mutates trait_rarity), no randomness, and no
+    target-reconciliation model (Option B is a separate, not-yet-decided
+    owner call this function doesn't prejudge — odds here are always today's
+    smoothed live share, a martingale, never pulled toward a fixed target).
+
+    Does not call weighted_pick itself; tests/test_rarity_odds.py pins this
+    to weighted_pick's own captured weights so the two can't silently drift
+    apart."""
+    from lfg_core.swap_meta import TRAIT_ORDER
+
+    now = now or utcnow()
+    slots: dict[str, list[dict[str, Any]]] = {}
+    for category in TRAIT_ORDER:
+        rows = conn.execute(
+            """SELECT trait, live_count, floor_weight, boost_initial,
+                      boost_step_hours, boost_started_at, enabled
+               FROM trait_rarity WHERE network=? AND body=? AND category=?""",
+            (network, body, category),
+        ).fetchall()
+        if not rows:
+            continue
+        available = available_values(body, category)
+        avail_set = set(available) if available is not None else None
+        total = sum(r[1] for r in rows)
+        population = len(rows)
+        candidate_count = sum(1 for r in rows if r[6] and (avail_set is None or r[0] in avail_set))
+        weights: dict[str, float] = {}
+        for trait, count, floor, bi, bs, bsa, enabled in rows:
+            if enabled and (avail_set is None or trait in avail_set):
+                weights[trait] = effective_weight(
+                    count,
+                    total,
+                    floor,
+                    bi,
+                    bs,
+                    bsa,
+                    now,
+                    population_size=population,
+                    candidate_count=candidate_count,
+                )
+        weight_total = sum(weights.values())
+        out: list[dict[str, Any]] = []
+        for trait, count, _floor, _bi, _bs, _bsa, enabled in rows:
+            share_pct = (count / total * 100) if total else 0.0
+            w = weights.get(trait, 0.0)
+            odds_pct = (w / weight_total * 100) if weight_total else 0.0
+            out.append(
+                {
+                    "value": trait,
+                    "odds_pct": odds_pct,
+                    "share_pct": share_pct,
+                    "live_count": count,
+                    "enabled": bool(enabled),
+                }
+            )
+        out.sort(key=lambda r: (-r["odds_pct"], r["value"]))
+        slots[category] = out
+    return slots
