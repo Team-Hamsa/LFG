@@ -43,6 +43,7 @@ from lfg_core.market_store import (  # noqa: E402
     BuyOffer,  # noqa: E402
     MarketListing,  # noqa: E402
     init_bid_schema,
+    mark_settled,
     upsert_bid,
     upsert_listing,  # noqa: E402
 )
@@ -364,6 +365,147 @@ def test_browse_trait_kind_rows_have_slot_value_and_image(onchain_env, layer_art
     assert row["slot"] == "Hat"
     assert row["value"] == "Wizard Hat"
     _assert_layer_url_resolves(row["image"])  # a layer-proxy URL that serves art
+
+
+# #483: "None" (empty-slot) trait tokens are real, buyable listings but read
+# as a data bug next to priced art -- hidden from browse by default.
+_NONE1 = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C7000000b1"
+_NONE2 = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C7000000b2"
+
+
+def _seed_hide_none_fixture(conn):
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(
+        conn,
+        offer_index="C" * 64,
+        nft_id=TRAIT1,
+        kind="trait",
+        slot="Hat",
+        value="Wizard Hat",
+        amount_drops=500_000,
+    )
+    upsert_trait_token(conn, _NONE1, SELLER, "Back", "None")
+    _seed_listing(
+        conn,
+        offer_index="D" * 64,
+        nft_id=_NONE1,
+        kind="trait",
+        slot="Back",
+        value="None",
+        amount_drops=100_000,
+    )
+    upsert_trait_token(conn, _NONE2, SELLER, "Accessory", "None")
+    _seed_listing(
+        conn,
+        offer_index="E" * 64,
+        nft_id=_NONE2,
+        kind="trait",
+        slot="Accessory",
+        value="None",
+        amount_drops=100_000,
+    )
+
+
+def test_browse_trait_hides_none_value_by_default(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_hide_none_fixture(conn)
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/listings?kind=trait")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    # total drops by the 2 None rows -- only the real Wizard Hat listing remains.
+    assert body["total"] == 1
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["value"] == "Wizard Hat"
+
+
+def test_browse_trait_hide_none_0_includes_them(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_hide_none_fixture(conn)
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/listings?kind=trait&hide_none=0")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["total"] == 3
+    values = sorted(r["value"] for r in body["rows"])
+    assert values == ["None", "None", "Wizard Hat"]
+
+
+def test_browse_character_kind_unaffected_by_hide_none(onchain_env):
+    """hide_none is gated on `kind == "trait"`, not merely on the value
+    string never matching -- so this seeds a character row whose `value`
+    IS the literal string "None" (market_listings' slot/value columns carry
+    no kind constraint; a plain character listing's value is always SQL
+    NULL/Python None, which `!= "None"` would happen to pass regardless of
+    the kind guard -- that shape can't tell a deleted guard apart from a
+    working one). If the `kind == "trait"` guard were ever removed, this row
+    would vanish from a plain character browse; with the guard intact it
+    must always survive, hide_none=0 or not."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, slot="Head", value="None")
+    conn.commit()
+    conn.close()
+
+    for qs in ("/api/market/listings", "/api/market/listings?hide_none=0"):
+        resp = _run(server.handle_market_listings(_mocked_request("GET", qs)))
+        assert resp.status == 200
+        body = _run(_read_json(resp))
+        assert body["total"] == 1
+        assert body["rows"][0]["kind"] == "character"
+
+
+def test_browse_mock_path_hides_none_value_by_default(monkeypatch):
+    """Greptile #566 P2: handle_market_listings' WEBAPP_DEV_MODE branch
+    returns mock_market.INSTANCE.browse(...) BEFORE the real path's filters
+    ever run, so it needs its own hide_none application -- otherwise the
+    offline QA harness shows removable-slot rows and disagrees with what
+    production serves, misleading manual testing. Swaps in a throwaway
+    MockMarket (monkeypatch-reverted) rather than mutating the shared
+    singleton, so this can never leak a seeded row into another test."""
+    from webapp import mock_market
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    fresh = mock_market.MockMarket()
+    fresh._listings.append(
+        {
+            "nft_id": "MOCKTRAIT-NONE-TEST",
+            "kind": "trait",
+            "nft_number": None,
+            "image": None,
+            "attributes": None,
+            "amount_drops": None,
+            "amount_brix": "3",
+            "seller": mock_market.OTHER_SELLER_1,
+            "offer_index": "MOCKOFFER-NONE-TEST",
+            "is_live": True,
+            "slot": "Back",
+            "value": "None",
+        }
+    )
+    monkeypatch.setattr(server.mock_market, "INSTANCE", fresh)
+
+    resp = _run(
+        server.handle_market_listings(_mocked_request("GET", "/api/market/listings?kind=trait"))
+    )
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert all(r["offer_index"] != "MOCKOFFER-NONE-TEST" for r in body["rows"])
+
+    resp2 = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?kind=trait&hide_none=0")
+        )
+    )
+    assert resp2.status == 200
+    body2 = _run(_read_json(resp2))
+    assert any(r["offer_index"] == "MOCKOFFER-NONE-TEST" for r in body2["rows"])
 
 
 def test_browse_pagination_limit_offset(onchain_env):
@@ -1602,6 +1744,8 @@ def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, 
         "offer_index": "A" * 64,
         "pay_with": None,
         "price_xrp_quote": None,
+        "settled": None,
+        "settlement_abandoned": None,
     }
 
     conn = _reopen(onchain_env)
@@ -1668,6 +1812,132 @@ def test_buy_status_character_purchase_does_not_trigger_settlement(
     monkeypatch.setattr(server, "_settle_trait_sale", boom)
     resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
     assert resp.status == 200
+
+
+def test_buy_status_character_purchase_settled_is_null(onchain_env, market_wallet, monkeypatch):
+    """#488: `settled` is a trait-only lifecycle -- null for a character buy,
+    matching market_listings' own settled column contract."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+    assert body["settled"] is None
+    assert body["settlement_abandoned"] is None
+
+
+def test_buy_status_trait_purchase_settled_false_then_true(onchain_env, market_wallet, monkeypatch):
+    """#488: the buy-status poll reports live settlement progress -- False
+    while market_listings.settled = 0 (burn-back pending, set by
+    close_listing's sold transition), True once mark_settled runs (the
+    settlement seam or its sweep backstop) -- so the buy screen knows to
+    keep polling instead of declaring victory the moment the ledger accept
+    lands."""
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session(nft_id=TRAIT1, listing_kind="trait")
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    async def fake_settle(buyer, nft_id, offer_index, network):
+        # The real seam (mocked here) is what would call mark_settled; this
+        # poll only pins the settled=false moment before that has happened.
+        return True
+
+    monkeypatch.setattr(server, "_settle_trait_sale", fake_settle)
+
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+    assert body["settled"] is False
+    # No sweep give-up has been recorded -- still genuinely in flight.
+    assert body["settlement_abandoned"] is False
+
+    # The settlement sweep (or a retried seam call) later flips it.
+    conn = _reopen(onchain_env)
+    assert mark_settled(conn, "A" * 64) is True
+    conn.commit()
+    conn.close()
+
+    resp2 = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body2 = _run(_read_json(resp2))
+    assert body2["state"] == "done"
+    assert body2["settled"] is True
+    assert body2["settlement_abandoned"] is False
+
+
+def test_buy_status_trait_purchase_settlement_abandoned_when_sweep_gave_up(
+    onchain_env, market_wallet, monkeypatch
+):
+    """#566 review: once the settlement sweep has durably given up
+    (_write_sweep_giveup_record -- the same record `settle_pending_trait_sales`
+    itself writes after exhausting _SWEEP_MAX_ATTEMPTS, and checks via
+    _sweep_giveup_recorded before ever re-attempting a row), the buy-status
+    poll must report that on its OWN field -- never inferred from a client
+    poll count, and never folded into `settled`, which stays false forever
+    once abandoned (nothing ever flips it again automatically)."""
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session(nft_id=TRAIT1, listing_kind="trait")
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    async def fake_settle(buyer, nft_id, offer_index, network):
+        # Simulates every settlement attempt failing -- the sweep (not
+        # exercised here; see test_market_trait_flow.py for its own attempt
+        # counting) would eventually write the giveup record this test
+        # writes directly.
+        return False
+
+    monkeypatch.setattr(server, "_settle_trait_sale", fake_settle)
+    server._write_sweep_giveup_record("A" * 64, TRAIT1, s.wallet_address)
+
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+    assert body["settled"] is False
+    assert body["settlement_abandoned"] is True
+
+    # Durable across repeated polls -- the client is expected to stop
+    # polling once it sees this, but the server must keep answering
+    # truthfully if asked again (a stray poll, a second tab, ...).
+    resp2 = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body2 = _run(_read_json(resp2))
+    assert body2["settled"] is False
+    assert body2["settlement_abandoned"] is True
 
 
 def test_buy_status_insufficient_funds_fails_session_leaves_row_live(

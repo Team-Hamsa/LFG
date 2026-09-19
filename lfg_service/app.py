@@ -3000,6 +3000,17 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         # Same broad guard as the XRP bounds above.
         return web.json_response({"error": f"bad BRIX amount: {e}"}, status=400)
 
+    # #483: a "None" trait value (Back/None, Accessory/None, ...) is a real,
+    # buyable token -- equipping it clears the slot -- but has no art and
+    # reads as a data bug next to priced listings, so the default browse
+    # hides it. hide_none=0 opts back in (e.g. a future "browse removable
+    # slots" view); characters carry no `value` at all, so the kind guard is
+    # what keeps this a trait-only filter rather than the value happening to
+    # never match "None" on a character row. Computed here (before the mock
+    # branch below) so the dev-mode path applies the identical filter instead
+    # of silently diverging from production (Greptile #566 P2).
+    hide_none = kind == "trait" and request.query.get("hide_none", "1") not in ("0", "false")
+
     limit = _parse_market_int_param(
         request, "limit", _MARKET_DEFAULT_LIMIT, max_value=_MARKET_MAX_LIMIT
     )
@@ -3047,6 +3058,11 @@ async def handle_market_listings(request: web.Request) -> web.Response:
                 for r in rows
                 if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) <= ceiling
             ]
+        # #483 parity: the mock path must hide "None" rows by default too, or
+        # dev-mode browse shows removable-slot rows and diverges from prod
+        # totals/pages (Greptile #566 P2).
+        if hide_none:
+            rows = [r for r in rows if r.get("value") != "None"]
         if group:  # #481 parity: mock rows are already serialized; grouping is shape-agnostic
             rows = market_store.group_trait_rows(rows)
         page = rows[offset : offset + limit]
@@ -3144,6 +3160,10 @@ async def handle_market_listings(request: web.Request) -> web.Response:
                 market_store._row_attrs(cast(sqlite3.Row, r), kind), trait_filters
             )
         ]
+    # #483: computed above (before the mock-path early return) so both
+    # browse implementations apply the identical filter.
+    if hide_none:
+        filtered = [r for r in filtered if r.get("value") != "None"]
 
     if sort == "price_asc":
         filtered = sorted(filtered, key=lambda r: (sort_price(r), listing_key(r)))
@@ -4058,6 +4078,29 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
             # BRIX. Re-verify the (unchanged) sell offer on-ledger, then build
             # the normal accept payload and resume the standard buy flow.
             await _continue_buy_after_onramp(session, loop)
+        # #488: live settlement status for a trait buy, EVERY poll while
+        # DONE (not just the poll `outcome` first became "sold") -- the
+        # burn-back can complete asynchronously via the settlement sweep
+        # well after this session object last advanced, and the buy screen
+        # polls specifically to learn when that happens. Mirrors
+        # _bid_fill_state's same-shaped live-read-on-DONE pattern. Always
+        # None for a character buy (no Closet settlement step).
+        if session.listing_kind == "trait" and session.state == market_flow.DONE:
+            session.settled = await loop.run_in_executor(
+                None, _trait_buy_settled_state, session.network, session.offer_index
+            )
+            # Greptile #566 P1: a client-side "how long have we been
+            # unsettled" guess can never distinguish "still retrying" from
+            # "the sweep exhausted _SWEEP_MAX_ATTEMPTS and gave up" -- and
+            # once abandoned, `settled` stays 0 forever (no automatic path
+            # ever flips it), so a guess-based screen would poll and
+            # reassure indefinitely. _sweep_giveup_recorded is the real,
+            # durable signal (same os.path.exists check the sweep itself
+            # uses to never re-arm a dead row) -- a plain sync stat call,
+            # called inline exactly like the sweep's own use of it a few
+            # hundred lines down, not worth an executor hop.
+            if not session.settled:
+                session.settlement_abandoned = _sweep_giveup_recorded(session.offer_index)
 
 
 async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
@@ -4138,6 +4181,24 @@ def _bid_fill_state(network: str, offer_index: str) -> str | None:
     if row.get("is_live"):
         return "live"
     return str(row.get("closed_reason") or "closed")
+
+
+def _trait_buy_settled_state(network: str, offer_index: str) -> bool | None:
+    """#488: live read of a trait buy's `market_listings.settled` column for
+    the buy-status poll -- None until the row has closed 'sold' (close_listing
+    sets settled=0 in that same statement, per the column's own contract),
+    False while the Closet burn-back is pending, True once mark_settled has
+    run. Same shape as _bid_fill_state, one column instead of a derived
+    live/closed label."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        row = market_store.get_listing(conn, offer_index)
+    finally:
+        conn.close()
+    if row is None or row.get("settled") is None:
+        return None
+    return bool(row["settled"])
 
 
 def _close_bid_sync(network: str, offer_index: str, reason: str) -> None:

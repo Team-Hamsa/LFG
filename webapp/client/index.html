@@ -372,6 +372,11 @@
         <div class="flow-copy">
           <h2 id="flow-title"></h2>
           <p id="flow-text" class="card-sub"></p>
+          <!-- #486: shown only for the trait-buy XRP on-ramp (marketBuyRender
+               passes explainer: true on its awaiting_onramp/awaiting_signature
+               states when pay_with === 'XRP'); every other flow leaves it
+               hidden. -->
+          <p id="flow-onramp-explainer" class="card-sub" hidden>Traits are priced in BRIX. You don't hold enough, so step 1 swaps XRP for exactly the BRIX needed through the AMM, and step 2 buys the trait. If you stop after step 1 you keep the BRIX.</p>
           <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
           <div id="flow-qty" class="qty-stepper" hidden>
             <span class="qty-lbl">Quantity</span>

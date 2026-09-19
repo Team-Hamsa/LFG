@@ -291,6 +291,78 @@ def test_trait_wizard_step_labels():
     assert run_js("M.traitWizardStepLabel('nonsense')") == ""
 
 
+# --- #486: trait-buy XRP on-ramp step labels ---
+
+
+def test_onramp_step_label_xrp_path():
+    assert (
+        run_js('M.onrampStepLabel({state: "awaiting_onramp", pay_with: "XRP"})')
+        == "Step 1 of 2 — buy BRIX with XRP"
+    )
+    assert (
+        run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: "XRP"})')
+        == "Step 2 of 2 — accept the trait"
+    )
+
+
+def test_onramp_step_label_brix_holder_path_is_empty():
+    # A BRIX holder never on-ramps — a single signature, no step indicator.
+    assert run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: "BRIX"})') == ""
+
+
+def test_onramp_step_label_unknown_state_is_empty():
+    assert run_js('M.onrampStepLabel({state: "pending", pay_with: "XRP"})') == ""
+    assert run_js('M.onrampStepLabel({state: "awaiting_signature", pay_with: null})') == ""
+
+
+# --- #488: trait-buy DONE-state settlement copy ---
+
+
+def test_buy_done_copy_unsettled():
+    assert run_js("M.buyDoneCopy({settled: false})") == "Bought — settling into your Closet…"
+
+
+def test_buy_done_copy_settled():
+    assert run_js("M.buyDoneCopy({settled: true})") == "Added to your Closet."
+
+
+def test_buy_done_copy_abandoned_names_the_manual_recovery_without_implying_loss():
+    """#566 review: `abandoned` mirrors a REAL backend signal
+    (settlement_abandoned, the durable settlement-sweep give-up record) --
+    not a client-side poll-count guess. The copy must say what is actually
+    true (the trait is in the wallet, a manual Deposit is needed) and must
+    not claim the trait is lost or that this will resolve on its own."""
+    text = run_js("M.buyDoneCopy({settled: false, abandoned: true})")
+    assert text == (
+        "Bought — the trait is in your wallet. Automatic settlement into your "
+        "Closet didn't finish; deposit it from your wallet to add it there."
+    )
+    assert "lost" not in text.lower()
+    assert "closet" in text.lower() and "wallet" in text.lower()
+    # `abandoned` is irrelevant once actually settled -- the sweep can never
+    # set both, but the copy function itself must still prioritize the
+    # settled outcome if ever handed a (settled: true, abandoned: true) pair.
+    assert run_js("M.buyDoneCopy({settled: true, abandoned: true})") == "Added to your Closet."
+
+
+# --- #483: "None" (empty-slot) trait tokens read as removal, not blank art ---
+
+
+def test_map_listing_row_trait_none_value_title():
+    row = {
+        "nft_id": "T9",
+        "kind": "trait",
+        "slot": "Back",
+        "value": "None",
+        "image": None,
+        "amount_brix": "5",
+        "seller": "rSeller",
+        "offer_index": "OFF9",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["title"] == "Remove Back"
+
+
 # --- marketFlow terminal-state check ---
 
 

@@ -1989,7 +1989,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, push, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
+function showFlow({ title, text, qrData, link, push, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper, explainer }) {
   flowRenderGen++;
   showPanel('flow-panel');
   renderSteps(stage);
@@ -2000,6 +2000,10 @@ function showFlow({ title, text, qrData, link, push, image, video, done, stage, 
   }
   el('flow-title').textContent = title;
   el('flow-text').textContent = text || '';
+  // #486: the two-step XRP-on-ramp explainer -- shown only by the buy flow's
+  // XRP on-ramp states (marketBuyRender), hidden by every other caller that
+  // never passes it.
+  el('flow-onramp-explainer').hidden = !explainer;
   el('flow-spinner').hidden = !spinner;
   // #142: deep-link-primary on touch devices (auto-open once per payload),
   // QR-primary on desktop — one decision path for every sign screen.
@@ -5040,6 +5044,37 @@ let marketFlowTimer = null;
 // by invalidateFlowPolls().
 let marketFlowGen = 0;
 
+// #488: a trait buy's session state reaches DONE once the accept tx
+// validates -- that only means the buyer now controls the token, not that
+// the settlement burn-back into their Closet (_settle_trait_sale, normally
+// triggered inline with the same poll that discovers the sale) has landed.
+// Recognizing this sub-state lets the poller keep going past DONE instead of
+// declaring victory the moment the ledger accept lands. Stops -- and stays
+// stopped -- the moment either REAL backend signal resolves the sale:
+// `settled` (burned back into the Closet) or `settlement_abandoned` (the
+// settlement sweep durably gave up after exhausting its retry budget, #566
+// review). Once abandoned, `settled` never flips on its own, so further
+// polling would just repeat a stale answer forever; always false for a
+// character buy (no Closet settlement step).
+function buyUnsettled(kind, s) {
+  return (
+    kind === 'buy' &&
+    s.listing_kind === 'trait' &&
+    s.state === 'done' &&
+    s.settled !== true &&
+    s.settlement_abandoned !== true
+  );
+}
+
+// The one continuation decision all three "keep polling" call sites share
+// (pollMarketFlow's own tick, marketFlow's initial dispatch,
+// attachMarketResume's resume dispatch): a session already terminal by the
+// generic list/cancel/bid/etc. vocabulary still needs one more lap while a
+// trait buy is DONE-but-unsettled.
+function shouldKeepPolling(kind, s) {
+  return buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state);
+}
+
 function highlightTabs(containerId, dataKey, activeValue) {
   for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
     const active = btn.dataset[dataKey] === activeValue;
@@ -5609,7 +5644,7 @@ function pollMarketFlow(kind, sessionId, render) {
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
     showFlow(render(s));
     ownerGen = flowRenderGen; // our own render; keep ownership current
-    if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
+    if (shouldKeepPolling(kind, s)) marketFlowTimer = setTimeout(tick, 3000);
   };
   marketFlowTimer = setTimeout(tick, 3000);
 }
@@ -5637,7 +5672,7 @@ function attachMarketResume(session) {
   clearTimeout(marketFlowTimer);
   showPanel('flow-panel');
   showFlow(render(session));
-  if (!marketPure.isMarketTerminal(session.state)) {
+  if (shouldKeepPolling(session.kind, session)) {
     pollMarketFlow(session.kind, session.id, render);
   }
   return true;
@@ -5726,7 +5761,7 @@ async function marketFlow(kind, startPath, body, render) {
     return;
   }
   showFlow(render(s));
-  if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
+  if (shouldKeepPolling(kind, s)) pollMarketFlow(kind, s.id, render);
 }
 
 // qrData is the string re-encoded into the branded QR by qrUrl()/`/api/qr.png`.
@@ -5769,19 +5804,37 @@ function marketBuyRender(listingKind) {
       return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
     }
     if (s.state === 'done') {
-      return {
-        title: '🎉 Purchase complete!',
-        text: listingKind === 'trait' ? 'Sold — added to your Closet.' : 'The NFT is on its way to your wallet.',
-        done: true,
-      };
+      // #488: the accept tx validating doesn't mean the trait has landed in
+      // the buyer's Closet yet -- buyDoneCopy is honest about the gap, and
+      // about the sweep durably giving up (`settlement_abandoned`, a real
+      // backend signal, #566 review) -- instead of unconditionally
+      // declaring "added to your Closet".
+      const text = listingKind === 'trait'
+        ? marketPure.buyDoneCopy({ settled: s.settled, abandoned: s.settlement_abandoned === true })
+        : 'The NFT is on its way to your wallet.';
+      return { title: '🎉 Purchase complete!', text, done: true };
     }
+    // #486: step indicator + explainer for the two-signature XRP on-ramp
+    // (empty for a BRIX holder's single-signature path, and for characters,
+    // which never on-ramp).
+    const step = listingKind === 'trait' ? marketPure.onrampStepLabel(s) : '';
     if (s.state === 'awaiting_signature') {
-      return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+      return {
+        title: step ? `💳 ${step}` : '💳 Confirm purchase',
+        text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'),
+        qrData: s.xumm_url, link: s.xumm_url, push: s.push,
+        explainer: Boolean(step),
+      };
     }
     // #239 two-step on-ramp: sign the XRP→BRIX top-up first, then the accept.
     if (s.state === 'awaiting_onramp') {
       const quote = s.price_xrp_quote ? ` (~${s.price_xrp_quote} XRP)` : '';
-      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
+      return {
+        title: step ? `💱 ${step}${quote}` : `💱 Get BRIX${quote}`,
+        text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'),
+        qrData: s.xumm_url, link: s.xumm_url, push: s.push,
+        explainer: Boolean(step),
+      };
     }
     if (s.state === 'onramp_confirmed') {
       return { title: '⏳ BRIX acquired', text: 'Preparing your purchase…', spinner: true };
