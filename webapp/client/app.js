@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=31';
+import * as marketPure from './market_pure.js?v=32';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
 import * as closetPure from './closet_market_pure.js?v=3';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
@@ -21,7 +21,7 @@ import * as buildPure from './build_pure.js?v=32';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
-import * as resumePure from './resume_pure.js?v=2';
+import * as resumePure from './resume_pure.js?v=3';
 // Animated-art strategy (#298): grid-vs-detail asset decisions are pure and
 // Node-testable (tests/test_media_pure_js.py) — grids always render the
 // static image (badged when animated); only detail/focused views upgrade to
