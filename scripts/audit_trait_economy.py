@@ -89,13 +89,19 @@ def build_alert_body(
     benign swap substitution separately from real conservation drift. The
     final remediation commands and report path are a fixed trailer guaranteed
     to survive however many finding rows there are (review round 1: this is
-    the same flaw #560 shipped with — see scripts/_alerts.assemble_alert_body)."""
+    the same flaw #560 shipped with — see scripts/_alerts.assemble_alert_body).
+    Review round 2: the Closet remediation command is ALSO promoted into that
+    trailer whenever Closet ownership violations are present — it was
+    previously the last (and so first-elided) row, meaning a busy night with
+    both conservation drift and Closet anomalies could lose its only
+    Closet-specific instruction while keeping the generic supply one."""
     classes = classify_drift(conservation)
     header = (
         f"**Trait economy audit: "
         f"{'DRIFT' if not conservation_clean(conservation) else 'VIOLATIONS'}** "
         f"({network}, {live_count} live characters)"
     )
+    closet_bad = closet_ownership is not None and not closet_ownership.ok
     rows: list[str] = []
     if classes["real"]:
         rows.append("Real conservation drift — investigate (do NOT re-freeze genesis):")
@@ -112,19 +118,27 @@ def build_alert_body(
             f"Completeness violations: orphan bodies {completeness.orphan_bodies or '—'}, "
             f"slot anomalies in editions {sorted(completeness.slot_anomalies) or '—'}"
         )
-    if closet_ownership is not None and not closet_ownership.ok:
+    if closet_bad:
+        assert closet_ownership is not None  # closet_bad already implies this
         for row in closet_ownership.project_rows:
             rows.append(f"- Closet keyed to project account {row.owner} -> {row.nft_id} (#383)")
         for nft_id, owners in sorted(closet_ownership.unresolved_duplicates.items()):
             rows.append(
                 f"- Closet {nft_id} claimed by {', '.join(owners)} — needs clio arbitration"
             )
-        rows.append("Run scripts/reconcile_closet_tokens.py (dry-run first) for the above.")
     trailer = [
         "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
         "(dry-run first), then re-audit.",
         f"Report: {report_path}",
     ]
+    if closet_bad:
+        # Self-contained wording (not "...for the above"): the rows it refers
+        # to can themselves be elided while this trailer line always survives.
+        trailer.insert(
+            0,
+            "Closet ownership anomalies detected — run scripts/reconcile_closet_tokens.py "
+            "(dry-run first).",
+        )
     return assemble_alert_body(header, rows, trailer)
 
 

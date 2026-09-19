@@ -21,8 +21,12 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 import audit_trait_economy as ate  # noqa: E402
 
+from lfg_core import (  # noqa: E402
+    closet_reconcile,  # noqa: E402
+    nft_index,
+    trait_economy,
+)
 from lfg_core import economy_store as es  # noqa: E402
-from lfg_core import nft_index, trait_economy  # noqa: E402
 
 NON_BODY = trait_economy.NON_BODY_SLOTS
 
@@ -253,6 +257,37 @@ def test_build_alert_body_many_rows_still_ends_with_the_report_path():
         "Report: reports/big.md"
     )
     assert re.search(r"\.\.\. and \d+ more", body)
+
+
+def test_build_alert_body_keeps_closet_guidance_when_drift_elides_alongside_it():
+    """#560 review round 2 (Greptile): conservation drift with enough rows to
+    force elision, together with Closet ownership anomalies, is exactly the
+    busy night where the Closet-specific remediation command used to be the
+    first thing dropped (it was the last, and so first-elided, row). It must
+    now survive in the protected trailer alongside the generic supply one —
+    even though the Closet ownership ROWS it used to sit next to do not."""
+    trait_drift = {(f"Slot{i}", "Value"): -1 for i in range(300)}
+    report = trait_economy.ConservationReport(trait_drift=trait_drift, ok=False)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    closet_ownership = closet_reconcile.ClosetOwnershipReport(
+        project_rows=[
+            closet_reconcile.ClosetRow(owner="rIssuer", nft_id="CLOSET1", status="active")
+        ]
+    )
+    body = ate.build_alert_body(
+        "mainnet", 5000, report, completeness, "reports/big.md", closet_ownership
+    )
+    assert len(body) <= 1900
+    assert re.search(r"\.\.\. and \d+ more", body)  # elision really happened
+    assert "run scripts/reconcile_closet_tokens.py (dry-run first)." in body
+    assert body.endswith(
+        "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
+        "(dry-run first), then re-audit.\n"
+        "Report: reports/big.md"
+    )
+    # the specific Closet-ownership finding row is exactly what got elided —
+    # the point of the fix is that the instruction survives without it
+    assert "Closet keyed to project account rIssuer" not in body
 
 
 def test_benign_drift_with_a_completeness_violation_alerts_as_violations():
