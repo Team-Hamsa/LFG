@@ -115,6 +115,21 @@ def _resume_mocks(monkeypatch):
         captured["offer_kwargs"] = kwargs
         return "OFFER1"
 
+    async def fake_get_nft_sell_offers(*args, **kwargs):
+        # offer_delivery.ensure_offer's adopt check (#466): nothing to adopt.
+        return []
+
+    async def fake_nft_info(*args, **kwargs):
+        # offer_delivery.ensure_offer's delivered check (#466): unknown ->
+        # fails closed, falls through to create.
+        return None
+
+    async def _no_sleep(*args, **kwargs):
+        # ensure_offer's inter-attempt backoff (default base_delay=2.0) would
+        # otherwise add real wall-clock seconds to a create-fails-every-time
+        # scenario (see test_resume_offer_creation_failure_reports_the_minted_nft).
+        return None
+
     async def fake_accept_payload(*args, **kwargs):
         captured["accept_args"] = args
         captured["accept_kwargs"] = kwargs
@@ -138,6 +153,9 @@ def _resume_mocks(monkeypatch):
 
     monkeypatch.setattr(mint_flow.xrpl_ops, "submit_sponsored_mint", fake_submit)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_create_nft_offer)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", fake_get_nft_sell_offers)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", fake_nft_info)
+    monkeypatch.setattr(mint_flow.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_accept_offer_payload", fake_accept_payload)
     monkeypatch.setattr(mint_flow, "record_nft_mint", fake_record_nft_mint)
     monkeypatch.setattr(mint_flow, "rarity", fake_rarity)
@@ -336,8 +354,17 @@ def test_resume_indeterminate_submission_never_sets_definitive_failure(_resume_m
     assert 4000 in mint_flow._reserved_numbers
 
 
-def test_resume_offer_creation_failure_reports_the_minted_nft(_resume_mocks, monkeypatch):
+def test_resume_offer_creation_failure_reports_the_minted_nft(_resume_mocks, monkeypatch, tmp_path):
+    """#466: exhausting ensure_offer's retries on a resumed (sponsored) mint
+    lands the same recovery-state contract as a fresh single mint -- a
+    reassuring "minted, will be delivered" message (never "contact an
+    administrator"), plus a minted_no_offer recovery record."""
+    monkeypatch.chdir(tmp_path)  # _save_recovery_record writes a CWD-relative path
+
+    calls = {"n": 0}
+
     async def no_offer(*args, **kwargs):
+        calls["n"] += 1
         return None
 
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", no_offer)
@@ -348,11 +375,31 @@ def test_resume_offer_creation_failure_reports_the_minted_nft(_resume_mocks, mon
     assert res.nft_id == "NFTID1"
     assert res.offer_id is None
     assert res.accept is None
-    assert res.error is not None and "offer creation failed" in res.error
+    assert calls["n"] == 3  # ensure_offer's default attempts, exhausted
+    assert res.error is not None
+    lowered = res.error.lower()
+    assert "contact an administrator" not in lowered
+    assert "minted" in lowered
+    # #571 review (Greptile P1 "Message Promises Missing Automation"): this
+    # path only ever writes a recovery record for a HUMAN to act on -- no
+    # automatic re-offer sweep exists (that is #518, explicitly deferred).
+    # The message must never claim otherwise, and must say the NFT is safe
+    # (held by the issuer, not lost).
+    assert "automatically" not in lowered
+    assert "no action needed" not in lowered
+    assert "issuer" in lowered
+    assert "not been lost" in lowered or "not lost" in lowered
     assert res.traits == {"Body": "Alien", "Hat": "Crown"}
     assert res.mint_tx_hash == "A" * 64
     # on_offer_created is told about the failure so it can be persisted.
     assert cb.offers == [(None, res.error)]
+
+    record_path = tmp_path / "failed_db_records" / "nft_4000_minted_no_offer.json"
+    assert record_path.exists()
+    record = json.loads(record_path.read_text())
+    assert record["state"] == "minted_no_offer"
+    assert record["nft_id"] == "NFTID1"
+    assert record["wallet"] == "rNEW"
 
 
 def test_resume_exception_after_confirmation_keeps_derived_data_and_reservation(
@@ -458,6 +505,31 @@ def _run_session(monkeypatch, claim, offers=None):
         )
     )
     return session
+
+
+def test_run_mint_session_delivered_result_reaches_done_not_failed(_resume_mocks, monkeypatch):
+    """#571 review (Greptile P1 "Delivered Mints Become Failures"): when the
+    resumed mint discovers the NFT was already delivered -- an earlier
+    attempt's offer landed and was accepted before this call ever ran --
+    run_mint_session must report the real outcome (DONE, no error), never
+    the generic offer-missing FAILED branch with a false "mint failed"."""
+
+    async def _owner_is_destination(nft_id, **kw):
+        return {"nft_id": nft_id, "owner": "rNEW", "is_burned": False}
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", _owner_is_destination)
+
+    offers: list[tuple] = []
+    session = _run_session(monkeypatch, _claim(), offers)
+
+    assert session.state == mint_flow.DONE
+    assert session.error is None
+    assert session.nft_id == "NFTID1"
+    assert session.accept_qr_url is None  # nothing left to sign
+    assert session.accept_deeplink is None
+    # on_offer_created is still told (offer_id=None, no error) so the
+    # durable sponsored claim can be updated by the caller.
+    assert offers == [(None, None)]
 
 
 def test_run_mint_session_resumes_a_fully_journaled_claim(_resume_mocks, monkeypatch):

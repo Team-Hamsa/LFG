@@ -25,6 +25,7 @@ from lfg_core import (
     image_archive,
     layer_store,
     memos,
+    offer_delivery,
     rarity,
     sponsored_mint,
     swap_compose,
@@ -463,14 +464,20 @@ def release_sponsored_reservation(session: MintSession, reason: str) -> bool:
 
 
 def _save_recovery_record(record: dict[str, Any]) -> None:
-    """If the DB insert fails after an on-chain mint, persist the record to
-    disk so an administrator can backfill the LFG table."""
+    """Persist a record to disk for administrator recovery when an on-chain
+    mint outran the app's ability to fully process it: either the LFG-table
+    insert failed (state "db_insert_failed") or the delivery offer could not
+    be created after every retry (state "minted_no_offer", #466). The state
+    is folded into the filename (not just the nft_number) so the rare case
+    of BOTH failing for the same mint writes two distinct files instead of
+    the second clobbering the first."""
     try:
         os.makedirs("failed_db_records", exist_ok=True)
-        path = os.path.join("failed_db_records", f"nft_{record['nft_number']}.json")
+        state = record.get("state", "db_insert_failed")
+        path = os.path.join("failed_db_records", f"nft_{record['nft_number']}_{state}.json")
         with open(path, "w") as f:
             json.dump(record, f, indent=2)
-        logging.error(f"DB insert failed; recovery record written to {path}")
+        logging.error(f"Recovery record written to {path}")
     except Exception:
         logging.error(f"Failed to write recovery record: {traceback.format_exc()}")
 
@@ -503,6 +510,15 @@ class UnitResult:
     # True only for an explicit validated non-success result. Indeterminate
     # submission errors must never set this or restore/release the promise.
     mint_definitively_failed: bool = False
+    # #571 review (Greptile P1 "Delivered Mints Become Failures"): set only
+    # when offer_delivery.ensure_offer found the NFT already delivered to
+    # the intended recipient (error/offer_id/accept all stay None -- there
+    # is nothing left to sign). This is a genuine SUCCESS, not a failure;
+    # callers must branch on it before falling into generic
+    # error-or-no-offer failure handling, or a completed mint gets reported
+    # as failed. Defaulted so every existing UnitResult(...) call site stays
+    # valid unchanged.
+    delivered: bool = False
 
 
 async def _finalize_minted_unit(
@@ -570,19 +586,42 @@ async def _finalize_minted_unit(
             logging.error(f"rarity update failed: {traceback.format_exc()}")
     else:
         # Keep the number reserved so it can't be reused this process,
-        # and persist the record for manual recovery.
-        _save_recovery_record(record)
+        # and persist the record for manual recovery. Copy rather than
+        # mutate `record`: it is also the exact kwargs record_nft_mint(**record)
+        # was just called with, which has no `state` parameter.
+        _save_recovery_record({**record, "state": "db_insert_failed"})
 
-    # Create the transfer offer and the XUMM accept payload
+    # Create the transfer offer and the XUMM accept payload. #466: retries a
+    # failed NFTokenCreateOffer (e.g. JSON-RPC tooBusy) instead of stranding
+    # the token at the issuer, and self-heals across a crash/resume by
+    # adopting a live offer or detecting an already-accepted one rather than
+    # blindly re-creating (mirrors bulk_mint_flow._ensure_offer, #227).
     if on_state:
         on_state(CREATING_OFFER)
-    offer_id = await xrpl_ops.create_nft_offer(
+    offer_result = await offer_delivery.ensure_offer(
         nft_id, wallet_address, platform=memos.platform_for_surface(platform)
     )
-    offer_error = (
-        f"NFT minted (ID: {nft_id}) but offer creation failed. Please contact an administrator."
-    )
-    if not offer_id:
+    if offer_result.status == "failed":
+        # The mint is safely on-chain; only delivery is stuck after every
+        # retry. Persist a recovery record so an administrator can re-offer
+        # it by hand (an automatic re-offer sweep is #518, not this path)
+        # and tell the user the truth: their NFT minted, it is not lost.
+        _save_recovery_record(
+            {
+                "state": "minted_no_offer",
+                "nft_id": nft_id,
+                "wallet": wallet_address,
+                "nft_number": nft_number,
+                "reason": offer_result.reason,
+            }
+        )
+        offer_error = (
+            f"NFT minted (ID: {nft_id}) but the delivery offer could not be "
+            "created. It is safely held by the issuer wallet -- it has not "
+            "been lost. An operator will need to send it to your wallet "
+            "manually; please check back or contact support if it hasn't "
+            "arrived soon."
+        )
         if on_offer_created is not None:
             await on_offer_created(None, offer_error)
         return UnitResult(
@@ -597,9 +636,45 @@ async def _finalize_minted_unit(
             body_type=body,
             mint_tx_hash=mint_tx_hash,
         )
+
+    offer_id = offer_result.offer_index
     if on_offer_created is not None:
         # Persist before an acceptance payload can be exposed or pushed.
         await on_offer_created(offer_id, None)
+
+    if offer_result.status == "delivered":
+        # Already accepted -- an earlier attempt's (or an earlier crashed
+        # process's) offer landed and was signed before this call ever ran.
+        # Nothing left to sign: a genuine SUCCESS with no offer/accept
+        # payload. `delivered=True` tells the caller (run_mint_session) to
+        # treat this as done, not as the generic offer-missing FAILED case
+        # (#571 review) -- unreachable on a fresh mint's first pass; only a
+        # sponsored-mint resume (_resume_prepared_mint_one_unit) can reach
+        # it in practice.
+        return UnitResult(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            image_url=image_url,
+            video_url=video_url,
+            offer_id=None,
+            accept=None,
+            error=None,
+            traits=traits_dict,
+            body_type=body,
+            mint_tx_hash=mint_tx_hash,
+            delivered=True,
+        )
+
+    if offer_id is None:
+        # offer_delivery.ensure_offer only ever returns "offered"/"adopted"
+        # (the only statuses left at this point) with a real offer_index --
+        # mypy can't see that invariant through the Literal status field, so
+        # this is an explicit, should-be-unreachable guard, not a real
+        # failure mode. The caller's existing except block turns it into a
+        # UnitResult.
+        raise RuntimeError(
+            f"ensure_offer returned status={offer_result.status!r} with no offer_index"
+        )
 
     accept = await xumm_ops.create_accept_offer_payload(
         offer_id,
@@ -1445,6 +1520,21 @@ async def run_mint_session(
             # an irreversible/uncertain submission.
             session.sponsorship_irreversible = False
             sponsored_promise_restored = True
+        if res.delivered:
+            # #571 review (Greptile P1 "Delivered Mints Become Failures"):
+            # the offer landed and was accepted before this resume ever ran
+            # -- a genuine success with nothing left to sign, not the
+            # generic offer-missing failure below. DONE is an existing
+            # terminal MintSession state (TERMINAL_STATES; the client's
+            # mint_pure.js and the firehose's _publish_mint_terminal already
+            # treat it as a non-FAILED terminal outcome) that a fresh mint
+            # never reaches -- only this resume path can. res.nft_id is
+            # always set here (the mint validated), so
+            # _release_unused_number's nft_id-is-None guard would be a
+            # no-op; skipped rather than called for clarity.
+            session.state = DONE
+            session.error = None
+            return
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED

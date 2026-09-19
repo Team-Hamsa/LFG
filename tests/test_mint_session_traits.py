@@ -80,6 +80,15 @@ def test_run_mint_session_populates_traits_and_body_type(monkeypatch):
     async def fake_create_nft_offer(*args, **kwargs):
         return "OFFER100"
 
+    async def fake_get_nft_sell_offers(*args, **kwargs):
+        # offer_delivery.ensure_offer's adopt check (#466): nothing to adopt.
+        return []
+
+    async def fake_nft_info(*args, **kwargs):
+        # offer_delivery.ensure_offer's delivered check (#466): unknown ->
+        # fails closed, falls through to create.
+        return None
+
     async def fake_create_accept_offer_payload(*args, **kwargs):
         return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
 
@@ -96,6 +105,8 @@ def test_run_mint_session_populates_traits_and_body_type(monkeypatch):
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
     monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_create_nft_offer)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", fake_get_nft_sell_offers)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", fake_nft_info)
     monkeypatch.setattr(
         mint_flow.xumm_ops, "create_accept_offer_payload", fake_create_accept_offer_payload
     )
