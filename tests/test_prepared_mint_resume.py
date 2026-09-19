@@ -380,6 +380,15 @@ def test_resume_offer_creation_failure_reports_the_minted_nft(_resume_mocks, mon
     lowered = res.error.lower()
     assert "contact an administrator" not in lowered
     assert "minted" in lowered
+    # #571 review (Greptile P1 "Message Promises Missing Automation"): this
+    # path only ever writes a recovery record for a HUMAN to act on -- no
+    # automatic re-offer sweep exists (that is #518, explicitly deferred).
+    # The message must never claim otherwise, and must say the NFT is safe
+    # (held by the issuer, not lost).
+    assert "automatically" not in lowered
+    assert "no action needed" not in lowered
+    assert "issuer" in lowered
+    assert "not been lost" in lowered or "not lost" in lowered
     assert res.traits == {"Body": "Alien", "Hat": "Crown"}
     assert res.mint_tx_hash == "A" * 64
     # on_offer_created is told about the failure so it can be persisted.
@@ -496,6 +505,31 @@ def _run_session(monkeypatch, claim, offers=None):
         )
     )
     return session
+
+
+def test_run_mint_session_delivered_result_reaches_done_not_failed(_resume_mocks, monkeypatch):
+    """#571 review (Greptile P1 "Delivered Mints Become Failures"): when the
+    resumed mint discovers the NFT was already delivered -- an earlier
+    attempt's offer landed and was accepted before this call ever ran --
+    run_mint_session must report the real outcome (DONE, no error), never
+    the generic offer-missing FAILED branch with a false "mint failed"."""
+
+    async def _owner_is_destination(nft_id, **kw):
+        return {"nft_id": nft_id, "owner": "rNEW", "is_burned": False}
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", _owner_is_destination)
+
+    offers: list[tuple] = []
+    session = _run_session(monkeypatch, _claim(), offers)
+
+    assert session.state == mint_flow.DONE
+    assert session.error is None
+    assert session.nft_id == "NFTID1"
+    assert session.accept_qr_url is None  # nothing left to sign
+    assert session.accept_deeplink is None
+    # on_offer_created is still told (offer_id=None, no error) so the
+    # durable sponsored claim can be updated by the caller.
+    assert offers == [(None, None)]
 
 
 def test_run_mint_session_resumes_a_fully_journaled_claim(_resume_mocks, monkeypatch):

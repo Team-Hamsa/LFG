@@ -145,6 +145,59 @@ def test_ensure_offer_detects_already_delivered(monkeypatch):
     assert create_calls["n"] == 0
 
 
+def test_ensure_offer_third_party_owner_is_not_treated_as_delivered(monkeypatch):
+    """#571 review (Greptile P1, "Wrong Owner Counts As Delivered"): the
+    delivered check must require the owner to be the INTENDED destination,
+    not merely "someone other than us". A token that ended up with a third
+    party (transferred elsewhere some other way) must NOT be reported
+    delivered -- that would return success with no recovery record while the
+    intended recipient never received anything."""
+    create_calls = {"n": 0}
+
+    async def _count_create(*a, **kw):
+        create_calls["n"] += 1
+        return "FRESH"
+
+    monkeypatch.setattr(offer_delivery.xrpl_ops, "get_nft_sell_offers", _async_return([]))
+    monkeypatch.setattr(
+        offer_delivery.xrpl_ops,
+        "nft_info",
+        _async_return({"nft_id": NFT_ID, "owner": "rSOMEONE_ELSE_ENTIRELY", "is_burned": False}),
+    )
+    monkeypatch.setattr(offer_delivery.xrpl_ops, "create_nft_offer", _count_create)
+
+    result = _run(offer_delivery.ensure_offer(NFT_ID, DESTINATION, attempts=1, base_delay=0))
+
+    assert result.status != "delivered"
+    assert result.status == "offered"  # fell through to create instead
+    assert create_calls["n"] == 1
+
+
+def test_ensure_offer_burned_token_is_not_delivered(monkeypatch):
+    """#571 review (Greptile P1): a burned token must never read as
+    "delivered" even if its last recorded owner happens to equal the
+    intended destination -- the recipient does not have a burned NFT."""
+    create_calls = {"n": 0}
+
+    async def _count_create(*a, **kw):
+        create_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(offer_delivery.xrpl_ops, "get_nft_sell_offers", _async_return([]))
+    monkeypatch.setattr(
+        offer_delivery.xrpl_ops,
+        "nft_info",
+        _async_return({"nft_id": NFT_ID, "owner": DESTINATION, "is_burned": True}),
+    )
+    monkeypatch.setattr(offer_delivery.xrpl_ops, "create_nft_offer", _count_create)
+
+    result = _run(offer_delivery.ensure_offer(NFT_ID, DESTINATION, attempts=1, base_delay=0))
+
+    assert result.status != "delivered"
+    assert result.status == "failed"  # fell through to create, which then failed
+    assert create_calls["n"] == 1
+
+
 def test_ensure_offer_fails_after_exhausting_attempts(monkeypatch):
     """create_nft_offer fails on every attempt -- failed, with a reason, and
     create_nft_offer was tried exactly `attempts` times."""

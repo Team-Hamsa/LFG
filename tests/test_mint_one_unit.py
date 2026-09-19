@@ -264,6 +264,15 @@ def test_mint_one_unit_offer_permanently_fails_lands_recovery_state(
     lowered = res.error.lower()
     assert "contact an administrator" not in lowered
     assert "minted" in lowered
+    # #571 review (Greptile P1 "Message Promises Missing Automation"): this
+    # path only ever writes a recovery record for a HUMAN to act on -- no
+    # automatic re-offer sweep exists (that is #518, explicitly deferred).
+    # The message must never claim otherwise, and must say the NFT is safe
+    # (held by the issuer, not lost).
+    assert "automatically" not in lowered
+    assert "no action needed" not in lowered
+    assert "issuer" in lowered
+    assert "not been lost" in lowered or "not lost" in lowered
 
     record_path = tmp_path / "failed_db_records" / "nft_4021_minted_no_offer.json"
     assert record_path.exists(), "expected a minted_no_offer recovery record on disk"

@@ -83,20 +83,44 @@ async def ensure_offer(
        INDETERMINATE (a live offer may be hiding behind the blip, and
        creating blind risks a duplicate), so it counts as a failed attempt
        and moves on to the next retry rather than falling through to create.
-    2. Delivered: if the token's on-ledger owner is no longer us, there is
-       nothing to offer -- either our own offer from an earlier attempt (or
-       an earlier crashed process) already landed and was accepted, or the
-       token left our wallet some other way. status "delivered",
+    2. Delivered: if the token's on-ledger owner is exactly `destination`
+       (the intended recipient) and it is not burned, there is nothing to
+       offer -- our own offer from an earlier attempt (or an earlier crashed
+       process) already landed and was accepted. status "delivered",
        `offer_index` stays None (the accept consumed the offer object;
-       there is nothing left to point at). An indeterminate owner lookup
-       (nft_info returns None) fails closed by falling through to create --
-       never mark an undelivered token "delivered" on a transient clio blip.
+       there is nothing left to point at). Any other owner (a third party,
+       or still us) and a burned token both fail this check and fall through
+       to create -- "owner is merely not us" is NOT delivered (#571 review:
+       a token transferred, burned, or otherwise gone missing must never be
+       reported as a success with no recovery record; only the intended
+       recipient actually holding it counts). An indeterminate owner lookup
+       (nft_info returns None) fails closed the same way -- falls through to
+       create, never marks an undelivered token "delivered" on a transient
+       clio blip.
     3. Create: `xrpl_ops.create_nft_offer` (its return-None contract, #211,
        is untouched). A falsy result or a raised exception counts as a
        failed attempt.
 
     Returns "failed" with the most recent attempt's `reason` once `attempts`
     is exhausted.
+
+    KNOWN RACE (#571 review, not closed here by explicit decision -- see the
+    PR thread): two concurrent callers for the SAME `nft_id` can each pass
+    the adopt and delivered checks before either has created an offer, and
+    both then call create_nft_offer -- yielding two live sell offers for one
+    token. This function does not serialize across callers (only
+    xrpl_ops.create_nft_offer's own per-SIGNING_ACCOUNT submission_coordinator
+    lock applies, and it protects sequence-number safety, not this decision);
+    a multi-attempt retry loop with backoff widens the exposure window
+    versus a single-pass call, though it does not create a NEW race (bulk
+    mint's original single-pass _ensure_offer already had it). The
+    consequence is a stray extra offer, never a lost or double-minted NFT.
+    Closing it for real needs mutual exclusion per nft_id (e.g. re-checking
+    adopt while already holding xrpl_ops.submission_coordinator, immediately
+    before create) -- deliberately not built here; local reordering cannot
+    shrink the window, since it is bounded by create_nft_offer's own
+    multi-second ledger round trip, not by anything between two awaits in
+    this function.
     """
     reason: str | None = None
     for attempt in range(attempts):
@@ -116,7 +140,7 @@ async def ensure_offer(
                 return OfferResult(status="adopted", offer_index=offer_index, reason=None)
 
         info = await xrpl_ops.nft_info(nft_id)
-        if info is not None and info.get("owner") != xrpl_ops.bot_wallet_address():
+        if info is not None and not info.get("is_burned") and info.get("owner") == destination:
             return OfferResult(status="delivered", offer_index=None, reason=None)
 
         try:
