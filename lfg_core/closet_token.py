@@ -24,6 +24,15 @@ CLOSET_MIRROR_BEHIND = "closet_mirror_behind"
 CLOSET_MIRROR_PENDING = "closet_mirror_pending"
 # ...and of a required stale-mirror check the history archive can't answer (#530).
 CLOSET_MIRROR_UNVERIFIED = "closet_mirror_unverified"
+# All three are TEMPORARY refusals -- the listener catches up, a prior op's
+# mirror write lands, or the archive becomes reachable again -- never a real
+# settlement failure. Defined once here, next to the codes themselves, so
+# every caller that must wait-not-fail on any of them (the Closet Market fill
+# mirror, #530/#540; the trait-sale and Shop settlement sweeps, #542 item 3)
+# shares one set instead of repeating a literal tuple.
+MIRROR_WAIT_CODES = frozenset(
+    {CLOSET_MIRROR_BEHIND, CLOSET_MIRROR_PENDING, CLOSET_MIRROR_UNVERIFIED}
+)
 MIRROR_BEHIND_MESSAGE = (
     "Your Closet is still catching up with a recent change on the ledger. "
     "Nothing was changed — please try again shortly."

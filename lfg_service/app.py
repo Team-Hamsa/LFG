@@ -5134,30 +5134,64 @@ def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> Non
 
 
 def _closet_mirror_behind(network: str, owner: str) -> bool:
-    """True while `owner`'s Closet mirror is behind the chain (#522).
+    """True while `owner`'s Closet mirror is temporarily unusable for a
+    deposit, so both settlement sweeps must DEFER a pass instead of spending
+    one of their `_SWEEP_MAX_ATTEMPTS` attempts. Checks two independent
+    signals -- the refusal does not travel as one kind of error:
 
-    A deposit run now would refuse (`closet_mirror_behind`) — and that refusal is
-    TEMPORARY: the listener catches up, or an operator rebuilds the mirror. Both
-    settlement sweeps must therefore DEFER such a pass instead of spending an
-    attempt: a spent budget journals a durable give-up (and the Shop marks the
-    paid order `failed`), and nothing re-arms it when the mirror is repaired.
-    Same treatment the sweeps already give an unresolvable buyer.
+    1. `economy_store.get_mirror_pending(conn, owner)` (#184): a prior Closet
+       op committed on-chain but its local mirror write failed. This is the
+       actual #542 item 3 scenario -- what a buyer can be stuck behind for
+       the ~35-minute post-deploy listener catch-up -- and it is a plain
+       boolean flag, not an exception: `run_deposit` observes the identical
+       flag via `economy_flow._mirror_pending_error` and fails the session
+       with a STRING message, never raising. Without checking the flag
+       directly here, no code-based check on a raised error could ever see
+       it.
+    2. `closet_token.ensure_mirror_current(...)` (#522): may raise a plain
+       ClosetError coded `CLOSET_MIRROR_BEHIND` when the mirror is provably
+       behind the ledger history archive.
 
-    Any other error answers False: only this refusal is deferrable, everything
-    else is a real settlement failure the budget exists for. A check that fails
-    unexpectedly (locked DB, malformed archive) also answers False — it is a
-    convenience, not a gate, and must never abort a sweep pass for every
-    remaining row; the flow's own guard still refuses if the mirror is behind."""
+    Both are TEMPORARY: the listener catches up, or a prior op's mirror
+    write lands. A spent attempt budget journals a durable give-up (and the
+    Shop marks the paid order `failed`), and nothing re-arms it once the
+    mirror recovers — same treatment the sweeps already give an unresolvable
+    buyer.
+
+    The `except` below also accepts `CLOSET_MIRROR_PENDING` and
+    `CLOSET_MIRROR_UNVERIFIED` via `closet_token.MIRROR_WAIT_CODES` (shared
+    with #530/#540's Closet Market fill mirror), but NEITHER is reachable
+    from this function today: `CLOSET_MIRROR_PENDING` is raised only inside
+    `_closet_market_mirror`'s own, separate `get_mirror_pending` call (this
+    function's check above is its equivalent), and `CLOSET_MIRROR_UNVERIFIED`
+    needs `ensure_mirror_current(require_archive=True)`, deliberately NOT
+    passed here: `history_db_path=None` (an unwired archive) is a PERMANENT
+    config state, so treating it as deferrable would make a sweep defer
+    forever instead of ever giving up — worse than the bug this function
+    exists to prevent. The membership check is kept anyway: harmless today,
+    and correct if this call is ever changed to raise those codes.
+
+    Any other error answers False: only the two signals above are
+    deferrable, everything else is a real settlement failure the budget
+    exists for. A check that fails unexpectedly (locked DB, malformed
+    archive) also answers False — it is a convenience, not a gate, and must
+    never abort a sweep pass for every remaining row; the flow's own guard
+    still refuses if the mirror really is behind or pending."""
     conn = None
     try:
         conn = nft_index.init_db(nft_index.index_db_path(network))
         economy_store.init_economy_schema(conn)
+        if economy_store.get_mirror_pending(conn, owner):
+            return True
         closet_token.ensure_mirror_current(
             conn, owner, history_db_path=history_store.history_db_path(network)
         )
         return False
     except closet_token.ClosetError as e:
-        return bool(e.code == closet_token.CLOSET_MIRROR_BEHIND)
+        # See the docstring: CLOSET_MIRROR_PENDING and CLOSET_MIRROR_UNVERIFIED
+        # cannot actually come out of the ensure_mirror_current call above
+        # today. Kept for forward compatibility only.
+        return e.code in closet_token.MIRROR_WAIT_CODES
     except Exception:
         logging.warning(
             f"stale-mirror check failed for {owner}; settling as usual: {traceback.format_exc()}"

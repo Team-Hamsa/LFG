@@ -60,14 +60,9 @@ MAX_STEPS = 8
 MIRROR_WAIT_ERROR = (
     "Closet update is waiting for a Closet to catch up with the ledger; will retry automatically"
 )
-# The not-committed ClosetError codes of those refusals (see _mirror).
-_MIRROR_WAIT_CODES = frozenset(
-    {
-        closet_token.CLOSET_MIRROR_BEHIND,
-        closet_token.CLOSET_MIRROR_PENDING,
-        closet_token.CLOSET_MIRROR_UNVERIFIED,
-    }
-)
+# The not-committed ClosetError codes of those refusals (see _mirror) live in
+# closet_token.MIRROR_WAIT_CODES, next to the codes themselves -- the trait-sale
+# and Shop settlement sweeps (lfg_service/app.py) share the same set (#542 item 3).
 
 
 @dataclass
@@ -1084,7 +1079,7 @@ async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMa
     overwrite from current DB state is idempotent, so every error — including
     an indeterminate modify — is simply retried.
 
-    A refusal with a `_MIRROR_WAIT_CODES` code (#530) means that owner's mirror
+    A refusal with a `closet_token.MIRROR_WAIT_CODES` code (#530) means that owner's mirror
     may lack a version already on-chain, which the overwrite would erase. It is
     a wait, not a failure: the side stays unmirrored for the sweep to retry, and
     no attempt is counted (the audit reads attempts as a failing payout).
@@ -1102,7 +1097,10 @@ async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMa
         except closet_token.ClosetMirrorError:
             pass  # the modify committed; only the token-record mirror write failed
         except Exception as exc:
-            if isinstance(exc, closet_token.ClosetError) and exc.code in _MIRROR_WAIT_CODES:
+            if (
+                isinstance(exc, closet_token.ClosetError)
+                and exc.code in closet_token.MIRROR_WAIT_CODES
+            ):
                 logging.warning(
                     f"closet fill {fill['id']}: Closet update for {owner} ({side}) is waiting "
                     f"({exc.code}): its mirror may lack a version already on-chain; the "
