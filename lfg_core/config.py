@@ -2,6 +2,8 @@
 # Centralized environment configuration for the webapp/core modules.
 # main.py keeps its own loading for backwards compatibility.
 
+import logging
+import math
 import os
 
 from lfg_core.db_path import app_db_path
@@ -108,6 +110,21 @@ TESTNET_JSON_RPC_FALLBACK_URLS = (
 )
 
 
+# Websocket failover, same rules as the JSON-RPC list above: after
+# XRPL_WS_URL, these same-chain endpoints are tried when one is
+# busy/unsynced/unreachable. XRPL_WS_FALLBACK_URLS replaces the defaults.
+# Not used for clio-only methods (CLIO_WS_URL).
+MAINNET_WS_FALLBACK_URLS = (
+    "wss://xrplcluster.com",
+    "wss://s2.ripple.com",
+    "wss://s1.ripple.com",
+)
+TESTNET_WS_FALLBACK_URLS = (
+    "wss://s.altnet.rippletest.net:51233",
+    "wss://testnet.xrpl-labs.com",
+)
+
+
 def json_rpc_urls(primary: str, fallbacks: str | None, *, network: str) -> tuple[str, ...]:
     """Ordered, de-duplicated JSON-RPC URL list: `primary` first, then the
     comma-separated `fallbacks` or — when that is unset/blank — the network's
@@ -115,14 +132,27 @@ def json_rpc_urls(primary: str, fallbacks: str | None, *, network: str) -> tuple
     the first spelling wins. A network without known defaults gets none:
     failing over onto another chain's endpoint would be worse than no failover.
     Pure (no env reads) so a test can assert the shipped defaults (#323)."""
+    defaults = {
+        "mainnet": MAINNET_JSON_RPC_FALLBACK_URLS,
+        "testnet": TESTNET_JSON_RPC_FALLBACK_URLS,
+    }
+    return _ordered_urls(primary, fallbacks, defaults.get(network, ()))
+
+
+def ws_urls(primary: str, fallbacks: str | None, *, network: str) -> tuple[str, ...]:
+    """The websocket counterpart of json_rpc_urls (same ordering, dedup and
+    unknown-network rules), over the per-network WS defaults."""
+    defaults = {"mainnet": MAINNET_WS_FALLBACK_URLS, "testnet": TESTNET_WS_FALLBACK_URLS}
+    return _ordered_urls(primary, fallbacks, defaults.get(network, ()))
+
+
+def _ordered_urls(
+    primary: str, fallbacks: str | None, defaults: tuple[str, ...]
+) -> tuple[str, ...]:
     if fallbacks is not None and fallbacks.strip():
         extra: tuple[str, ...] = tuple(fallbacks.split(","))
-    elif network == "mainnet":
-        extra = MAINNET_JSON_RPC_FALLBACK_URLS
-    elif network == "testnet":
-        extra = TESTNET_JSON_RPC_FALLBACK_URLS
     else:
-        extra = ()
+        extra = defaults
     urls: list[str] = []
     seen: set[str] = set()
     for raw in (primary, *extra):
@@ -139,6 +169,7 @@ JSON_RPC_URLS = json_rpc_urls(
     JSON_RPC_URL, os.getenv("XRPL_JSON_RPC_FALLBACK_URLS"), network=XRPL_NETWORK
 )
 WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
+WS_URLS = ws_urls(WS_URL, os.getenv("XRPL_WS_FALLBACK_URLS"), network=XRPL_NETWORK)
 # clio (XLS-46) endpoint. nft_info / nft_exists are clio-only methods — the
 # plain rippled WS (WS_URL) answers them with `unknownCmd` -> None, which the
 # fail-closed Closet on-ledger verify gate reads as "not owned" and refuses the
@@ -349,6 +380,31 @@ PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 # history once — a payment signed in time can validate seconds past the
 # deadline and must not be silently kept (issue #196).
 PAYMENT_GRACE_SECONDS = int(os.getenv("PAYMENT_GRACE_SECONDS", "15"))
+# How often a payment wait re-checks account history while it also listens to
+# the subscription stream. The stream alone can silently miss a payment (a
+# busy or lagging server), which stranded a paid bulk mint on 2026-09-19.
+PAYMENT_REPOLL_DEFAULT = 10.0
+
+
+def payment_repoll_seconds(raw: str | None, default: float = PAYMENT_REPOLL_DEFAULT) -> float:
+    """Parse PAYMENT_REPOLL_SECONDS, falling back to `default` for anything
+    unusable. A non-positive value would make every stream wait time out at
+    once and spin on account_tx; NaN/inf would swallow the whole remaining
+    deadline and disable the re-poll — the bug this knob exists to prevent.
+    Pure (no env reads) so a test can assert the boundaries (#323)."""
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value) or value <= 0:
+        logging.warning(
+            "PAYMENT_REPOLL_SECONDS=%r is not a positive finite number; using %s", raw, default
+        )
+        return default
+    return value
+
+
+PAYMENT_REPOLL_SECONDS = payment_repoll_seconds(os.getenv("PAYMENT_REPOLL_SECONDS"))
 # How long an unconsumed mint payment stays spendable as a credit. This is
 # what bounds the credit backfill scan (a fixed floor would make the scan
 # depth grow with issuer history forever, #197 review); older overpayments

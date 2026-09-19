@@ -148,6 +148,8 @@ LISTENER_AUTO_CATCHUP=1                                     # optional (#402); d
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 XRPL_JSON_RPC_FALLBACK_URLS=<url,url>                       # optional (#493); comma-separated JSON-RPC failover endpoints tried after XRPL_JSON_RPC_URL on busy/unsynced/unreachable servers (never on tx results) — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
+XRPL_WS_FALLBACK_URLS=<wss-url,wss-url>                     # optional; websocket failover for the payment watcher, tried after XRPL_WS_URL — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
+PAYMENT_REPOLL_SECONDS=10                                   # optional; how often a payment wait re-checks account history while listening (the stream alone can miss a payment)
 XRPL_RPC_BUSY_RETRY_BACKOFF=1,2.5                           # optional; when EVERY JSON-RPC endpoint answers busy (tooBusy/slowDown/5xx), wait each delay (s) and re-walk the pool — empty = no retry rounds; transport failures never retry
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
@@ -607,7 +609,15 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
   one can validate). Never construct a JSON-RPC client class directly
   (`JsonRpcClient(...)` or the failover classes) — pass `urls=[url]` to the
   factory when a single endpoint is needed (e.g. `brix_drip`'s per-endpoint
-  chain check). WS / clio endpoints have no failover.
+  chain check). The payment watcher's websocket (`wait_for_payment`, its
+  grace check and `find_unclaimed_payment`) walks `config.WS_URLS`
+  (`XRPL_WS_URL`, then `XRPL_WS_FALLBACK_URLS` or the per-network defaults),
+  one endpoint per reconnect, and re-checks history every
+  `PAYMENT_REPOLL_SECONDS` (default 10) while it listens: on 2026-09-19 a busy
+  server's stream never delivered a paid bulk mint. Mint and bulk-mint cancel
+  refuse (409 `payment_received`, or 503 when history can't be read) while a
+  matching unclaimed payment is on-ledger. The AMM quote and `account_nfts`
+  use the JSON-RPC pool. clio (`CLIO_WS_URL`) has no failover.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).

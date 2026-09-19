@@ -61,6 +61,9 @@ def _backfill_ws(entries):
 
         async def request(self, req):
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 result = {"transactions": entries}
 
             return R()
@@ -235,6 +238,9 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
             page = 1 if marker is None else marker["p"] + 1
 
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 # 7 pages of unrelated traffic, the credit on page 8.
                 result = (
                     {"transactions": filler_page(page), "marker": {"p": page}}
@@ -312,6 +318,9 @@ def test_credit_scan_aborts_when_pages_stop_progressing(ledger_db, monkeypatch):
             assert self.requests < 10, "progress guard failed to stop the scan"
 
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 result = {"transactions": filler, "marker": {"p": 1}}
 
             return R()

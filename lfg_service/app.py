@@ -7789,6 +7789,41 @@ async def handle_bulk_mint_active(request):
     return web.json_response({"session": job.to_dict() if job else None})
 
 
+async def _refuse_cancel_if_paid(session: Any) -> web.Response | None:
+    """A 409/503 response when a mint or bulk-mint cancel must be refused
+    because the payment may already be on-ledger, else None.
+
+    The payment wait can miss a payment for a while (on 2026-09-19 a busy
+    server's stream never delivered a paid 30 XRP bulk mint, and the user
+    cancelled the job with the money taken). So before cancelling, read
+    history once: a matching unclaimed payment means the session's own wait
+    will pick it up, and the cancel is refused (409 payment_received — the
+    client keeps polling). If history can't be read, "unpaid" is unprovable,
+    so refuse with 503 and let the user retry. Sessions that never showed a
+    payment request (sponsored, or no payload yet) skip the read."""
+    if getattr(session, "sponsored", False) or session.pay_amount is None:
+        return None
+    if not session.payment_uuid and not getattr(session, "stale_payment_uuids", None):
+        return None
+    p = session._payment_params()
+    landed = await xrpl_ops.find_unclaimed_payment(
+        destination=p["destination"],
+        expected_sender=session.wallet_address,
+        expected_amount=p["value"],
+        not_before=session.created_at - 10,
+        currency=p["currency"],
+        issuer=p["issuer"],
+    )
+    if landed:
+        logging.warning(
+            "cancel refused for %s: a matching payment is already on-ledger", session.id
+        )
+        return web.json_response({"error": "payment_received"}, status=409)
+    if landed is None:
+        return web.json_response({"error": "payment_check_unavailable"}, status=503)
+    return None
+
+
 @require_auth
 async def handle_bulk_mint_cancel(request):
     """Back out of the bulk pay screen (mirrors handle_mint_cancel/#141): only
@@ -7803,6 +7838,9 @@ async def handle_bulk_mint_cancel(request):
         return web.json_response({"error": "not found"}, status=404)
     if job.state in bulk_mint_flow.TERMINAL_STATES:
         return web.json_response(job.to_dict())  # already over — no-op
+    refused = await _refuse_cancel_if_paid(job)
+    if refused is not None:
+        return refused
     if not job.cancel():
         return web.json_response({"error": "job is past payment"}, status=409)
     # #152: best-effort cancel of the open XUMM payment payload.
@@ -9366,6 +9404,9 @@ async def handle_mint_cancel(request):
         return web.json_response({"error": "not found"}, status=404)
     if session.state in mint_flow.TERMINAL_STATES:
         return web.json_response(session.to_dict())  # already over — no-op
+    refused = await _refuse_cancel_if_paid(session)
+    if refused is not None:
+        return refused
     if not session.cancel():
         return web.json_response({"error": "session is past payment"}, status=409)
     # #152: best-effort cancel of the open XUMM payment payload so the stale

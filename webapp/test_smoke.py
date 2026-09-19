@@ -662,6 +662,9 @@ def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
 
         async def request(self, req):
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 result = {"transactions": []}
 
             return R()
@@ -702,6 +705,9 @@ def test_wait_for_payment_backfills_missed_payment(monkeypatch):
 
         async def request(self, req):
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 result = {"transactions": [entry]}
 
             return R()
@@ -755,6 +761,9 @@ def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
         async def request(self, req):
             # The payment "lands" while the first connection is down
             class R:
+                def is_successful(self):  # real xrpl Responses carry this
+                    return True
+
                 result = {"transactions": [entry] if len(connections) > 1 else []}
 
             return R()

@@ -1111,30 +1111,42 @@ def swap_offer_amount() -> IssuedCurrencyAmount:
     )
 
 
+def _ws_endpoints() -> tuple[str, ...]:
+    """Websocket endpoints in failover order: config.WS_URLS (XRPL_WS_URL
+    first), or XRPL_WS_URL alone if the list is empty."""
+    return tuple(config.WS_URLS) or (config.WS_URL,)
+
+
 async def get_account_nfts(address: str, issuer: str) -> list[dict[str, Any]]:
     """List NFTs held by `address` that were issued by `issuer`.
     Returns a list of {"nft_id", "uri_hex", "flags"} dicts."""
     nfts = []
     marker = None
-    async with AsyncWebsocketClient(config.WS_URL) as websocket:
-        while True:
-            response = await websocket.request(
-                AccountNFTs(account=address, marker=marker, limit=400)
+    # JSON-RPC failover pool (#493), not the single WS endpoint.
+    client = async_rpc_client()
+    while True:
+        response = await client.request(AccountNFTs(account=address, marker=marker, limit=400))
+        result = response.result
+        if not response.is_successful():
+            # An error body (every endpoint tooBusy, ...) has no
+            # `account_nfts`; reading it as an empty page would report an
+            # empty wallet instead of XRPL unavailability (Greptile P1).
+            raise RuntimeError(
+                f"account_nfts for {address} failed: {result.get('error', 'unknown error')}"
             )
-            result = response.result
-            for nft in result.get("account_nfts", []):
-                if nft.get("Issuer") != issuer:
-                    continue
-                nfts.append(
-                    {
-                        "nft_id": nft["NFTokenID"],
-                        "uri_hex": nft.get("URI", ""),
-                        "flags": nft.get("Flags", 0),
-                    }
-                )
-            marker = result.get("marker")
-            if not marker:
-                break
+        for nft in result.get("account_nfts", []):
+            if nft.get("Issuer") != issuer:
+                continue
+            nfts.append(
+                {
+                    "nft_id": nft["NFTokenID"],
+                    "uri_hex": nft.get("URI", ""),
+                    "flags": nft.get("Flags", 0),
+                }
+            )
+        marker = result.get("marker")
+        if not marker:
+            break
     return nfts
 
 
@@ -1575,11 +1587,20 @@ async def get_amm_xrp_cost(currency: str, issuer: str, token_amount: Decimal) ->
     quote). Returns the XRP value as a Decimal, or None if the pool cannot
     cover the amount or the lookup failed."""
     try:
-        async with AsyncWebsocketClient(config.WS_URL) as websocket:
-            response = await websocket.request(
-                AMMInfo(asset=XRP(), asset2=IssuedCurrency(currency=currency, issuer=issuer))
+        # JSON-RPC failover pool (#493), like get_trustline_state: on
+        # 2026-09-19 one busy WS node failed every swap-fee quote.
+        response = await async_rpc_client().request(
+            AMMInfo(asset=XRP(), asset2=IssuedCurrency(currency=currency, issuer=issuer))
+        )
+        if not response.is_successful():
+            # An error answer has no `amm` key; report it rather than
+            # crashing on the lookup below.
+            logging.error(
+                f"AMM quote unavailable for {currency}.{issuer}: "
+                f"{response.result.get('error', 'amm_info failed')}"
             )
-            amm = response.result["amm"]
+            return None
+        amm = response.result["amm"]
         xrp_pool = Decimal(amm["amount"]) / 1_000_000  # drops -> XRP
         token_pool = Decimal(amm["amount2"]["value"])
         dy = Decimal(token_amount)
@@ -2635,6 +2656,43 @@ def _tx_hash(entry: dict[str, Any], tx: dict[str, Any]) -> str | None:
     return h if isinstance(h, str) else None
 
 
+class HistoryScanIncomplete(RuntimeError):
+    """An account history scan could not be completed, so its "no matching
+    payment" result proves nothing. Never let this read as "unpaid"."""
+
+
+async def _scan_endpoints_for_payment(
+    account: str,
+    claim: Callable[[dict[str, Any], Any, dict[str, Any]], bool],
+    not_before: float,
+    *,
+    label: str,
+) -> bool | None:
+    """Run `claim` over `account`'s recent history on EVERY websocket
+    endpoint until one matches.
+
+    True as soon as an endpoint matches; False when at least one endpoint
+    completed a scan and none matched; None when no endpoint could finish
+    one. A responsive but LAGGING endpoint answers "no" for a payment
+    another endpoint already sees (Greptile P1), so a single False is not
+    taken as the verdict."""
+    answered = False
+    for url in _ws_endpoints():
+        try:
+            async with AsyncWebsocketClient(url) as websocket:
+                found = await asyncio.wait_for(
+                    _recent_payment_exists(websocket, account, claim, not_before),
+                    timeout=15,
+                )
+        except Exception as e:
+            logging.warning(f"{label} failed on {url}: {e!r}")
+            continue
+        if found:
+            return True
+        answered = True
+    return False if answered else None
+
+
 async def _recent_payment_exists(
     websocket: Any,
     account: str,
@@ -2660,6 +2718,13 @@ async def _recent_payment_exists(
     while True:
         request = AccountTx(account=account, limit=200, marker=marker)
         response = await websocket.request(request)
+        if not response.is_successful():
+            # An error answer (tooBusy, ...) has no `transactions`; reading it
+            # as an empty page would report "no payment" for a payment that
+            # landed. Raise so the caller retries on another endpoint.
+            raise RuntimeError(
+                f"account_tx for {account} failed: {response.result.get('error', 'unknown error')}"
+            )
         oldest: float | None = None
         for entry in response.result.get("transactions", []):
             if not entry.get("validated", True):
@@ -2681,13 +2746,15 @@ async def _recent_payment_exists(
         if not marker:
             return False
         if oldest is None or (prev_oldest is not None and oldest >= prev_oldest):
-            logging.warning(
-                f"Payment history scan for {account} aborted: page made no "
-                f"progress toward the not_before floor (oldest {oldest}, "
-                f"previous {prev_oldest}); an unconsumed payment may exist "
-                f"beyond it"
+            # "Scan aborted" is not "nothing was paid": an unconsumed payment
+            # may exist beyond this page, and the cancel guard would read a
+            # False here as proof of non-payment (CodeRabbit). Raise so the
+            # caller retries on another endpoint and, failing that, answers
+            # "unknown".
+            raise HistoryScanIncomplete(
+                f"payment history scan for {account} made no progress toward "
+                f"the not_before floor (oldest {oldest}, previous {prev_oldest})"
             )
-            return False
         prev_oldest = oldest
 
 
@@ -2773,21 +2840,24 @@ async def wait_for_payment(
         if not allow_credit:
             return False
         await asyncio.sleep(config.PAYMENT_GRACE_SECONDS)
-        try:
-            async with AsyncWebsocketClient(config.WS_URL) as websocket:
-                if await asyncio.wait_for(
-                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
-                    timeout=15,
-                ):
-                    logging.info(f"✅ Payment found in post-timeout grace check ({context})")
-                    return True
-        except Exception as e:
-            logging.error(f"Post-timeout grace check failed ({context}): {e}")
-        return False
+        found = await _scan_endpoints_for_payment(
+            destination, claim, backfill_not_before, label=f"Post-timeout grace check ({context})"
+        )
+        if found:
+            logging.info(f"✅ Payment found in post-timeout grace check ({context})")
+        return bool(found)
 
     # A dropped websocket must not look like "payment never arrived": keep
     # reconnecting until the deadline, re-checking recent history each time
-    # to catch a payment that validated while the connection was down.
+    # to catch a payment that validated while the connection was down. Each
+    # reconnect moves to the next endpoint in config.WS_URLS, so one busy
+    # server can't hold the whole wait.
+    #
+    # History is also re-checked every PAYMENT_REPOLL_SECONDS while the
+    # stream is open. The stream alone is not trusted: on 2026-09-19 a busy
+    # server's subscription never delivered a paid 30 XRP bulk mint, and the
+    # job sat "awaiting payment" with the money on-ledger.
+    endpoints = _ws_endpoints()
     reconnects = 0
     while True:
         remaining = deadline - time.time()
@@ -2799,22 +2869,36 @@ async def wait_for_payment(
                 f"({context}; {reconnects} reconnects)"
             )
             return False
+        url = endpoints[reconnects % len(endpoints)]
         try:
-            async with AsyncWebsocketClient(config.WS_URL) as websocket:
+            async with AsyncWebsocketClient(url) as websocket:
                 await websocket.send(Subscribe(accounts=[destination]))
                 logging.info(
-                    f"Subscribed to {destination}; waiting up to {int(remaining)}s for {context}"
+                    f"Subscribed to {destination} on {url}; "
+                    f"waiting up to {int(remaining)}s for {context}"
                 )
 
-                if await asyncio.wait_for(
-                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
-                    timeout=max(1, min(remaining, 15)),
-                ):
-                    logging.info(f"✅ Payment found in recent history ({context})")
-                    return True
-
-                if await asyncio.wait_for(watch(websocket), timeout=remaining):
-                    return True
+                stream_closed = False
+                while not stream_closed:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    if await asyncio.wait_for(
+                        _recent_payment_exists(websocket, destination, claim, backfill_not_before),
+                        timeout=max(1, min(remaining, 15)),
+                    ):
+                        logging.info(f"✅ Payment found in recent history ({context})")
+                        return True
+                    remaining = deadline - time.time()
+                    try:
+                        if await asyncio.wait_for(
+                            watch(websocket),
+                            timeout=max(0, min(remaining, config.PAYMENT_REPOLL_SECONDS)),
+                        ):
+                            return True
+                        stream_closed = True
+                    except asyncio.TimeoutError:
+                        continue  # quiet stream: re-check history, keep listening
                 logging.warning(f"Payment subscription stream closed; reconnecting ({context})")
         except asyncio.TimeoutError:
             # Only terminal once the overall deadline is spent — a stalled
@@ -2833,6 +2917,37 @@ async def wait_for_payment(
             logging.error(traceback.format_exc())
         await asyncio.sleep(min(2**reconnects, 15))
         reconnects += 1
+
+
+async def find_unclaimed_payment(
+    destination: str,
+    expected_sender: str,
+    expected_amount: str,
+    not_before: float,
+    currency: str | None = None,
+    issuer: str | None = None,
+) -> bool | None:
+    """Read-only check: has a matching payment (same rules as
+    wait_for_payment) validated since `not_before` that no flow has claimed?
+
+    True when one is on-ledger and unclaimed, False when history shows none,
+    None when no endpoint could answer. Nothing is claimed. A mint cancel uses
+    this to refuse backing out of a session whose money already landed; the
+    session's own payment wait then picks the payment up."""
+    currency = currency or config.TOKEN_CURRENCY_HEX
+    issuer = issuer or config.TOKEN_ISSUER_ADDRESS
+
+    def unclaimed(tx: dict[str, Any], meta: Any, entry: dict[str, Any]) -> bool:
+        if not _payment_matches(
+            tx, meta, destination, expected_sender, expected_amount, currency, issuer
+        ):
+            return False
+        tx_hash = _tx_hash(entry, tx)
+        return tx_hash is not None and payment_ledger.consumed_payment(tx_hash) is None
+
+    return await _scan_endpoints_for_payment(
+        destination, unclaimed, not_before, label=f"Unclaimed-payment check for {destination}"
+    )
 
 
 class ClaimNotSubmitted(RuntimeError):
