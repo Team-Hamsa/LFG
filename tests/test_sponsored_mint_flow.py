@@ -1830,6 +1830,44 @@ def test_non_admission_uses_existing_paid_preparation_path(monkeypatch, outcome)
     assert session.payment_uuid == "paid"
 
 
+def test_pending_eligibility_refuses_instead_of_quoting_paid_mint(monkeypatch):
+    """2026-09-19: a campaign started while the archive caught up after a
+    restart handed eligible users a 10 XRP request. A pending verdict must
+    refuse with a check-back 409 and never build a payment."""
+    calls = []
+
+    def reserve(*args, **kwargs):
+        calls.append("reserve")
+        return _not_admitted("eligibility_pending")
+
+    async def prepare(self, _snapshot=None):
+        calls.append("prepare")
+
+    async def fake_wrapper(session):
+        calls.append("launch")
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", reserve)
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", prepare)
+    monkeypatch.setattr(server, "_run_mint_session_and_publish", fake_wrapper)
+
+    async def scenario():
+        response = await server.handle_mint_start(_post_request())
+        session = next(iter(server.mint_sessions.values()))
+        return response, session
+
+    response, session = _run(scenario())
+    body = json.loads(response.body)
+
+    assert response.status == 409
+    assert body["code"] == "sponsored_pending"
+    assert "eligible" in body["error"] and "Check back" in body["error"]
+    assert calls == ["reserve"]
+    assert session.state == mint_flow.FAILED
+    assert session.error == "sponsored_pending"
+    assert session.task is None
+    assert session.payment_uuid is None
+
+
 def test_bulk_mint_never_consults_sponsorship(monkeypatch):
     async def prepare(self, _snapshot=None):
         self.pay_with = "XRP"

@@ -7296,6 +7296,11 @@ _PREFLIGHT_TIMEOUT_SECONDS = 5
 # makes delivery impossible and the single thing the user can do about it. These
 # strings reach every surface: the web client keys off `code`, and Discord and
 # Telegram render `error` verbatim through `friendly_error`.
+_SPONSORED_PENDING_MESSAGE = (
+    "You're eligible for a free mint, but it isn't ready yet — we're finishing a "
+    "sync with the ledger. Check back in a few minutes and tap Mint again."
+)
+
 _PREFLIGHT_REFUSALS: dict[str, str] = {
     "wallet_unfunded": (
         "Your wallet isn't activated on the XRP Ledger yet, so an NFT can't be sent to "
@@ -7521,6 +7526,20 @@ async def handle_mint_start(request):
             "sponsored admission unavailable until startup recovery succeeds; "
             "using paid path for mint session %s",
             session.id,
+        )
+    if reservation is not None and reservation.reason == "eligibility_pending":
+        # The campaign is live and this wallet clears every gate that can be
+        # answered, but the eligibility archive is still catching up (a restart
+        # opened a continuity gap). Falling through would hand a free-mint
+        # user a paid request mid-campaign (2026-09-19) — refuse with a
+        # "check back" instead. No claim was written; headroom goes back.
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            session.state = mint_flow.FAILED
+            session.error = "sponsored_pending"
+        mint_flow.settle_headroom(session)
+        session.mark_published()  # a deliberate refusal, not a pipeline failure
+        return web.json_response(
+            {"error": _SPONSORED_PENDING_MESSAGE, "code": "sponsored_pending"}, status=409
         )
     if reservation is not None and reservation.sponsored:
         session.sponsored = True

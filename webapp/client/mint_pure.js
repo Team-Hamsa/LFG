@@ -87,6 +87,9 @@ export function freeMintBadge(resp) {
     return { show: true, text: '🎁 A free mint is reserved for this wallet' };
   }
   if (resp.eligible) return { show: true, text: '🎁 Free mint available for this wallet' };
+  if (resp.reason === 'eligibility_pending') {
+    return { show: true, text: '🎁 You’re eligible for a free mint — it’s warming up. Check back in a few minutes.' };
+  }
   if (resp.reason === 'already_consumed') return { show: true, text: '🎁 You’ve already claimed your free mint' };
   if (resp.reason === 'at_capacity') return { show: true, text: '🎁 Free mints are all gone for this campaign' };
   return hidden;

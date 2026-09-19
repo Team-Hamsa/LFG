@@ -48,6 +48,12 @@ ReservationReason = Literal[
     "wrong_network",
     "invalid_topology",
     "eligibility_unavailable",
+    # The certified archive is catching up (a continuity gap after a listener
+    # restart, or a lagging heartbeat) and every OTHER gate passed: the wallet
+    # is very likely eligible, but "never tagged" is unprovable until the
+    # catch-up lands. No claim is written; the service refuses the mint start
+    # instead of silently falling through to the paid path.
+    "eligibility_pending",
     "ineligible",
     "campaign_off",
     "campaign_expired",
@@ -930,6 +936,9 @@ def _baseline_coverage_is_bound(row: Mapping[str, Any]) -> bool:
     )
 
 
+ArchiveState = Literal["usable", "catching_up", "unusable"]
+
+
 def _archive_connection_is_usable(
     conn: sqlite3.Connection,
     *,
@@ -939,8 +948,29 @@ def _archive_connection_is_usable(
 ) -> bool:
     """Validate provenance in an existing SQLite read snapshot."""
 
+    return (
+        _archive_connection_state(conn, schema=schema, network=network, timestamp=timestamp)
+        == "usable"
+    )
+
+
+def _archive_connection_state(
+    conn: sqlite3.Connection,
+    *,
+    schema: str,
+    network: str,
+    timestamp: int,
+) -> ArchiveState:
+    """Classify the archive's provenance in an existing SQLite read snapshot.
+
+    "catching_up" is a certified archive (right chain, right tag, complete
+    audited baseline) whose continuity is broken or whose freshness has lapsed
+    — the #402 auto catch-up heals that on its own. Its rows are still real
+    ledger history, so a tagged row is conclusive; only ABSENCE is unproven.
+    Anything short of a certified baseline is "unusable"."""
+
     if schema not in {"main", "eligibility"} or network not in SUPPORTED_NETWORKS:
-        return False
+        return "unusable"
     table = conn.execute(
         f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = 'xrpl_txs'"
     ).fetchone()
@@ -948,13 +978,13 @@ def _archive_connection_is_usable(
         f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = 'archive_state'"
     ).fetchone()
     if table is None or state_table is None:
-        return False
+        return "unusable"
     columns = {row[1] for row in conn.execute(f"PRAGMA {schema}.table_info(xrpl_txs)")}
     if not {"account", "source_tag"}.issubset(columns):
-        return False
+        return "unusable"
     conn.execute(f"SELECT account, source_tag FROM {schema}.xrpl_txs LIMIT 1").fetchall()
     if conn.execute(f"SELECT COUNT(*) FROM {schema}.archive_state").fetchone()[0] != 1:
-        return False
+        return "unusable"
     row = conn.execute(
         f"""
         SELECT genesis_hash, source_tag, baseline_complete, baseline_ledger_min,
@@ -967,33 +997,48 @@ def _archive_connection_is_usable(
         (network,),
     ).fetchone()
     if row is None:
-        return False
+        return "unusable"
     expected_genesis = config.SPONSORED_MINT_ARCHIVE_GENESIS_HASHES.get(network, "")
     if not row["genesis_hash"] or (expected_genesis and row["genesis_hash"] != expected_genesis):
-        return False
+        return "unusable"
     if (
         row["source_tag"] != config.SOURCE_TAG
-        or row["continuity_gap_at"] is not None
-        or row["continuity_gap_after"] is not None
-        or row["continuity_gap_before"] is not None
-        or row["continuity_gap_reason"] is not None
         or not _baseline_coverage_is_bound(row)
-        or row["baseline_complete"] != 1
         or row["baseline_ledger_min"] is None
         or row["baseline_ledger_max"] is None
         or row["baseline_ledger_max"] < row["baseline_ledger_min"]
         or not row["baseline_provenance"]
         or row["baseline_completed_at"] is None
+    ):
+        return "unusable"
+    gapped = (
+        row["continuity_gap_at"] is not None
+        or row["continuity_gap_after"] is not None
+        or row["continuity_gap_before"] is not None
+        or row["continuity_gap_reason"] is not None
+    )
+    if row["baseline_complete"] != 1:
+        # invalidate_archive_continuity drops baseline_complete to 0 alongside
+        # the gap marker. Only a BOUNDED gap is one the catch-up can clear
+        # (record_archive_baseline refuses to clear an unbounded one), so only
+        # that is "catching up"; anything else needs an operator.
+        bounded_gap = row["continuity_gap_at"] is not None and (
+            row["continuity_gap_before"] is not None or row["continuity_gap_after"] is not None
+        )
+        return "catching_up" if bounded_gap else "unusable"
+    if (
+        gapped
         or row["validated_ledger_index"] is None
         or row["validated_ledger_index"] < row["baseline_ledger_max"]
         or row["validated_close_time"] is None
         or row["heartbeat_at"] is None
     ):
-        return False
+        return "catching_up"
     max_lag = config.SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS
     heartbeat_age = timestamp - row["heartbeat_at"]
     close_age = timestamp - row["validated_close_time"]
-    return bool(-60 <= heartbeat_age <= max_lag and -60 <= close_age <= max_lag)
+    fresh = -60 <= heartbeat_age <= max_lag and -60 <= close_age <= max_lag
+    return "usable" if fresh else "catching_up"
 
 
 def _archive_eligibility_snapshot(
@@ -1002,13 +1047,17 @@ def _archive_eligibility_snapshot(
     network: str,
     wallet: str,
     timestamp: int,
-) -> tuple[bool, bool]:
-    """Return (usable, tagged) from the attached, transaction-locked archive."""
+) -> tuple[ArchiveState, bool]:
+    """Return (state, tagged) from the attached, transaction-locked archive.
 
-    if not _archive_connection_is_usable(
+    `tagged` is meaningful for "usable" and "catching_up" alike (a tagged row
+    is real history either way); only a "usable" archive proves its absence."""
+
+    state = _archive_connection_state(
         conn, schema="eligibility", network=network, timestamp=timestamp
-    ):
-        return False, False
+    )
+    if state == "unusable":
+        return state, False
     tagged = (
         conn.execute(
             """
@@ -1019,11 +1068,14 @@ def _archive_eligibility_snapshot(
         ).fetchone()
         is not None
     )
-    # Keep a second explicit health check adjacent to the app-DB mutation.
-    usable = _archive_connection_is_usable(
+    # Keep a second explicit health check adjacent to the app-DB mutation; the
+    # weaker of the two readings wins.
+    recheck = _archive_connection_state(
         conn, schema="eligibility", network=network, timestamp=timestamp
     )
-    return usable, tagged
+    if recheck != "usable":
+        state = recheck
+    return state, tagged
 
 
 def archive_is_usable(
@@ -1313,13 +1365,13 @@ def reserve_if_eligible(
             final_conn.close()
         return ReservationResult(False, "eligibility_unavailable", None)
     with final_conn as conn:
-        usable, ineligible = _archive_eligibility_snapshot(
+        archive_state, ineligible = _archive_eligibility_snapshot(
             conn,
             network=network,
             wallet=wallet,
             timestamp=timestamp,
         )
-        if not usable:
+        if archive_state == "unusable":
             return ReservationResult(False, "eligibility_unavailable", None)
         if ineligible:
             return ReservationResult(False, "ineligible", None)
@@ -1389,6 +1441,14 @@ def reserve_if_eligible(
 
         if state == "at_capacity" or sum(counts.values()) >= campaign["cap"]:
             return ReservationResult(False, "at_capacity", None)
+
+        if archive_state == "catching_up":
+            # Every gate that CAN be answered passed; only the archive's proof
+            # of absence is outstanding. Never admit on it — and never write a
+            # claim — but say so, so the caller can tell the user to come back
+            # rather than quietly quoting the paid mint.
+            conn.rollback()
+            return ReservationResult(False, "eligibility_pending", None)
 
         if preview:
             # Every gate passed. Roll back the IMMEDIATE transaction without
