@@ -26,6 +26,7 @@ from lfg_core import (  # noqa: E402
     headroom,
     mint_credits,
     mint_flow,
+    offer_delivery,
     supply,
     xrpl_ops,
 )
@@ -233,6 +234,91 @@ def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_pa
     assert j.state == bulk_mint_flow.DONE
     assert j.units[0].state == bulk_mint_flow.OFFERED
     assert j.units[0].offer_id == "OFFER-RETRY"
+
+
+# --- _ensure_offer delegates to the shared offer_delivery helper (#466) ----
+# Bulk's own fulfillment loop (the main pass + the bounded final re-offer
+# pass, see test_offer_permanently_failing_leaves_job_fulfilling_not_done /
+# test_offer_fail_then_succeed_ends_done_with_unit_offered above, and the
+# resume tests in test_bulk_mint_durability.py) already provides the retry
+# cadence across MULTIPLE persisted invocations of _ensure_offer, so the
+# delegation must use attempts=1 -- otherwise every pass would ALSO retry
+# internally, duplicating the cadence and slowing every pass by
+# offer_delivery's own backoff. These tests pin the plumbing directly
+# (spying on offer_delivery.ensure_offer) rather than the RPC fakes the
+# tests above use, so a change to either side's contract fails loudly here
+# instead of silently at the xrpl_ops boundary.
+
+
+def test_ensure_offer_delegates_to_offer_delivery_with_attempts_one(monkeypatch):
+    seen: dict = {}
+
+    async def _fake_ensure_offer(nft_id, destination, **kw):
+        seen["nft_id"] = nft_id
+        seen["destination"] = destination
+        seen.update(kw)
+        return offer_delivery.OfferResult(status="offered", offer_index="OFFER-X", reason=None)
+
+    monkeypatch.setattr(bulk_mint_flow.offer_delivery, "ensure_offer", _fake_ensure_offer)
+
+    j = _job(1)
+    u = bulk_mint_flow.Unit(index=0, state=bulk_mint_flow.MINTED, nft_id="NFT1")
+    asyncio.run(bulk_mint_flow._ensure_offer(j, u))
+
+    assert seen["nft_id"] == "NFT1"
+    assert seen["destination"] == "rUSER"
+    assert seen["attempts"] == 1
+    assert seen["platform"] == mint_flow.memos.platform_for_surface("discord")
+    assert u.state == bulk_mint_flow.OFFERED
+    assert u.offer_id == "OFFER-X"
+    assert u.error is None
+
+
+@pytest.mark.parametrize(
+    "status,offer_index,expected_offer_id",
+    [
+        ("offered", "OFFER-X", "OFFER-X"),
+        ("adopted", "ADOPTME", "ADOPTME"),
+        ("delivered", None, None),
+    ],
+)
+def test_ensure_offer_maps_success_statuses_to_offered(
+    monkeypatch, status, offer_index, expected_offer_id
+):
+    async def _fake_ensure_offer(nft_id, destination, **kw):
+        return offer_delivery.OfferResult(status=status, offer_index=offer_index, reason=None)
+
+    monkeypatch.setattr(bulk_mint_flow.offer_delivery, "ensure_offer", _fake_ensure_offer)
+
+    j = _job(1)
+    # A stale error from an earlier failed pass must be cleared on success --
+    # including via the "create finally succeeded" path, which the original
+    # inline _ensure_offer never explicitly cleared (harmless there since no
+    # existing test observes it, but worth pinning now that both success
+    # branches share one mapping).
+    u = bulk_mint_flow.Unit(
+        index=0, state=bulk_mint_flow.MINTED, nft_id="NFT1", error="stale error"
+    )
+    asyncio.run(bulk_mint_flow._ensure_offer(j, u))
+
+    assert u.state == bulk_mint_flow.OFFERED
+    assert u.offer_id == expected_offer_id
+    assert u.error is None
+
+
+def test_ensure_offer_maps_failed_status_to_minted_with_reason(monkeypatch):
+    async def _fake_ensure_offer(nft_id, destination, **kw):
+        return offer_delivery.OfferResult(status="failed", offer_index=None, reason="boom")
+
+    monkeypatch.setattr(bulk_mint_flow.offer_delivery, "ensure_offer", _fake_ensure_offer)
+
+    j = _job(1)
+    u = bulk_mint_flow.Unit(index=0, state=bulk_mint_flow.MINTED, nft_id="NFT1")
+    asyncio.run(bulk_mint_flow._ensure_offer(j, u))
+
+    assert u.state == bulk_mint_flow.MINTED
+    assert u.error == "boom"
+    assert u.offer_id is None
 
 
 def test_prepare_payment_multiplies_price_xrp(monkeypatch):

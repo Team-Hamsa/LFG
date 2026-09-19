@@ -223,6 +223,11 @@ _STORE_NAMES = frozenset(
         ".layer_cache",
         "reports",
         ".layer_dimensions_cache.json",
+        # mint_flow._save_recovery_record's admin-recovery dir (#466):
+        # written relative to the CWD like the dirs above it, and became
+        # reachable from ordinary test runs once ensure_offer's exhausted-
+        # retries path started writing "minted_no_offer" records.
+        "failed_db_records",
     }
 )
 _STORE_DIR_PREFIX = "images_"  # image_archive.archive_dir: images_<network>

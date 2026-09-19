@@ -30,6 +30,7 @@ from lfg_core import (
     memos,
     mint_credits,
     mint_flow,
+    offer_delivery,
     payment_ledger,
     xrpl_ops,
     xumm_ops,
@@ -531,73 +532,34 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
     """Re-offer-only path for a unit that already minted (unit.nft_id set)
     but never reached OFFERED — the crash window between the on-chain mint
     and the offer/XUMM steps landing. NEVER mints; only (re-)creates the sell
-    offer for the existing nft_id. On success -> OFFERED. On failure, leave
-    the unit MINTED with .error set so a later resume/backfill can retry the
-    offer again without ever re-minting.
+    offer for the existing nft_id. On success -> OFFERED (unit.offer_id set
+    for "offered"/"adopted", left None for "delivered" — see
+    offer_delivery.OfferResult). On failure, leave the unit MINTED with
+    .error set so a later resume/backfill can retry the offer again without
+    ever re-minting.
 
-    Idempotent (#227): in the crash window where the original offer DID land
-    on-chain but OFFERED was never persisted, creating again would leave two
-    live offers for one unit — so an existing offer is adopted first. The
-    match is exactly what create_nft_offer emits (our wallet as owner, the
-    buyer as Destination, amount "0", no Expiration); anything looser risks
-    adopting a foreign offer, and market_ops.verify_sell_offer is NOT
-    reusable here because it rejects any Destination-carrying offer — which
-    the gift offer always is. A lookup RPC failure is INDETERMINATE — a live
-    offer may be hiding behind the blip, so creating blind could duplicate
-    it; the unit stays MINTED and a later resume retries.
-
-    The other half of the #227 window is the offer landing AND the buyer
-    accepting it while we were down: the accept consumed the offer object, so
-    there is nothing to adopt, and creating again can only tec-fail forever
-    (we no longer own the token) — wedging the job FULFILLING and the user's
-    bulk slot. A destination-locked amount-0 offer can only be taken by the
-    destination, so current owner == buyer is proof of delivery: mark the
-    unit OFFERED. Fail closed on an indeterminate owner lookup (nft_info
-    returns None) — fall through to create, never mark an undelivered unit
-    delivered on a transient clio blip."""
+    Delegates to the shared lfg_core.offer_delivery.ensure_offer (#466),
+    extracted verbatim from this function's original inline adopt/delivered/
+    create logic (#227 — see that module's docstring for the full ordering
+    and reasoning). attempts=1: THIS function's own callers already retry
+    across multiple persisted invocations (the fulfillment loop's main pass,
+    its bounded final re-offer pass, and a resumed job's startup sweep), so
+    one call here is exactly one attempt at the sequence, matching the
+    original single-pass behavior unchanged."""
     assert unit.nft_id is not None, "_ensure_offer requires an already-minted unit"
-    try:
-        offers = await xrpl_ops.get_nft_sell_offers(unit.nft_id, raise_on_error=True)
-    except Exception as e:
+    result = await offer_delivery.ensure_offer(
+        unit.nft_id,
+        job.wallet_address,
+        attempts=1,
+        platform=memos.platform_for_surface(job.platform),
+    )
+    if result.status == "failed":
         unit.state = MINTED
-        unit.error = f"offer lookup failed: {e}"
+        unit.error = result.reason
         return
-    for offer in offers:
-        if (
-            offer.get("owner") == xrpl_ops.bot_wallet_address()
-            and offer.get("destination") == job.wallet_address
-            and offer.get("amount") == "0"
-            and offer.get("expiration") is None
-            and offer.get("offer_index")
-        ):
-            unit.offer_id = offer["offer_index"]
-            unit.state = OFFERED
-            unit.error = None
-            return
-    info = await xrpl_ops.nft_info(unit.nft_id)
-    if info is not None and info.get("owner") == job.wallet_address:
-        # Gift offer already accepted (see docstring): delivered. offer_id
-        # stays None — the accept consumed the offer object, so there is
-        # nothing left to accept (to_dict documents offered+null offer_id).
-        unit.state = OFFERED
-        unit.error = None
-        return
-    try:
-        offer_id = await xrpl_ops.create_nft_offer(
-            unit.nft_id,
-            job.wallet_address,
-            platform=memos.platform_for_surface(job.platform),
-        )
-    except Exception as e:
-        unit.state = MINTED
-        unit.error = str(e)
-        return
-    if not offer_id:
-        unit.state = MINTED
-        unit.error = "offer creation failed"
-        return
-    unit.offer_id = offer_id
+    unit.offer_id = result.offer_index
     unit.state = OFFERED
+    unit.error = None
 
 
 async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
