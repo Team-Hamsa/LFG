@@ -778,11 +778,13 @@ def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_behind(
 def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_pending(
     onchain_env, monkeypatch, tmp_path
 ):
-    """#542 item 3: `closet_mirror_pending` (#184/#530) is just as TEMPORARY as
-    `closet_mirror_behind` above -- the Shop sweep must defer on it too, not
-    just on `closet_mirror_behind`, or the order gets marked `failed` after
-    `_SHOP_SWEEP_MAX_ATTEMPTS` even though the refusal would have cleared on
-    its own."""
+    """Forward-compatibility coverage for the `closet_token.MIRROR_WAIT_CODES`
+    membership check in `_closet_mirror_behind` (see the trait-sale sweep's
+    twin test for the full reasoning): IF `ensure_mirror_current` ever raised
+    `CLOSET_MIRROR_PENDING` the Shop sweep must defer on it too. It does NOT
+    today, so this does NOT exercise #542 item 3's real production path; see
+    test_sweep_defers_settlement_while_the_buyers_closet_mirror_pending_flag_is_set
+    below for that."""
     conn = _reopen(onchain_env)
     _seed_order(conn, "X10", status="accepted", created_ts=int(time.time()))
     conn.close()
@@ -808,3 +810,33 @@ def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_pending(
     assert server._shop_settle_attempts.get("X10", 0) == 0
     conn = _reopen(onchain_env)
     assert shop_store.get_order(conn, "X10")["status"] == "accepted"  # still retryable
+
+
+def test_sweep_defers_settlement_while_the_buyers_closet_mirror_pending_flag_is_set(
+    onchain_env, monkeypatch, tmp_path
+):
+    """#542 item 3, the REAL production path (see the trait-sale sweep's twin
+    test for why the code-based tests above prove nothing about reachability).
+    A genuine `mirror_pending=1` row, no monkeypatching of the mirror check
+    itself: proves the Shop sweep defers instead of eventually marking the
+    order `failed` during the ~35-minute post-deploy listener catch-up."""
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    es.set_mirror_pending(conn, BUYER, True)
+    _seed_order(conn, "X11", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    settle_calls = []
+
+    def recording_deps(c):
+        settle_calls.append(1)
+        return _settle_deps(c, _FakeSettleDeps(), tmp_path)
+
+    monkeypatch.setattr(server.economy_api, "build_settlement_deps", recording_deps)
+
+    _run(server.sweep_shop_orders())
+
+    assert settle_calls == []  # deferred before any settlement work
+    assert server._shop_settle_attempts.get("X11", 0) == 0
+    conn = _reopen(onchain_env)
+    assert shop_store.get_order(conn, "X11")["status"] == "accepted"  # still retryable

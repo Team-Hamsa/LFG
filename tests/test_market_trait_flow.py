@@ -1054,11 +1054,14 @@ def test_sweep_defers_while_the_buyers_closet_mirror_is_behind(onchain_env, monk
 
 
 def test_sweep_defers_while_the_buyers_closet_mirror_is_pending(onchain_env, monkeypatch, tmp_path):
-    """#542 item 3: `closet_mirror_pending` (a committed Closet modify whose
-    mirror write hasn't landed yet, #184/#530) is just as TEMPORARY as
-    `closet_mirror_behind` -- the sweep must defer on it too, not just on
-    `closet_mirror_behind`, or a buyer behind one of the OTHER two refusal
-    codes still gets given up on after `_SWEEP_MAX_ATTEMPTS`."""
+    """Forward-compatibility coverage for the `closet_token.MIRROR_WAIT_CODES`
+    membership check in `_closet_mirror_behind`: IF `ensure_mirror_current`
+    ever raised `CLOSET_MIRROR_PENDING`, the sweep must defer on it. It does
+    NOT today -- that code is raised only by `_closet_market_mirror`'s own,
+    separate `get_mirror_pending` check (#530) -- so this does NOT exercise
+    #542 item 3's real production path; see
+    test_sweep_defers_while_the_buyers_closet_mirror_pending_flag_is_set below
+    for that."""
     conn = _reopen(onchain_env)
     _seed_unsettled_trait_sale(conn, "N" * 64)
     conn.commit()
@@ -1083,13 +1086,47 @@ def test_sweep_defers_while_the_buyers_closet_mirror_is_pending(onchain_env, mon
     assert not (tmp_path / f"trait-settlement-giveup-{'N' * 64}.json").exists()
 
 
+def test_sweep_defers_while_the_buyers_closet_mirror_pending_flag_is_set(
+    onchain_env, monkeypatch, tmp_path
+):
+    """#542 item 3, the REAL production path. `economy_store.set_mirror_pending`
+    (#184) is a plain DB flag, not a ClosetError: `run_deposit` observes the
+    identical flag via `economy_flow._mirror_pending_error` and fails the
+    session with a STRING message, never raising -- so no code-based check on
+    a raised error (the test above) can ever see it. This test does NOT
+    monkeypatch `ensure_mirror_current` or the predicate itself: it sets a
+    genuine `mirror_pending=1` row and proves the sweep actually defers on the
+    real signal instead of burning all `_SWEEP_MAX_ATTEMPTS` during the
+    ~35-minute post-deploy listener catch-up that #542 item 3 is about."""
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "S" * 64)
+    es.set_closet_token(conn, BUYER, "CLOSETS2", "AA", status="active")
+    es.set_mirror_pending(conn, BUYER, True)
+    conn.commit()
+    conn.close()
+
+    async def unexpected(*a, **k):
+        raise AssertionError("settlement must not be attempted while mirror_pending is set")
+
+    monkeypatch.setattr(server, "_settle_trait_sale", unexpected)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    _run(server.settle_pending_trait_sales())
+
+    assert server._sweep_attempts.get("S" * 64, 0) == 0
+    assert not (tmp_path / f"trait-settlement-giveup-{'S' * 64}.json").exists()
+
+
 def test_sweep_defers_while_the_buyers_closet_mirror_is_unverified(
     onchain_env, monkeypatch, tmp_path
 ):
-    """#542 item 3: `closet_mirror_unverified` (the history archive can't
-    answer a required stale-mirror check, #530) is the third temporary
-    refusal code -- same deferral, same reasoning as `closet_mirror_pending`
-    above."""
+    """Forward-compatibility coverage for the `closet_token.MIRROR_WAIT_CODES`
+    membership check, same reasoning as `..._is_pending` above.
+    `CLOSET_MIRROR_UNVERIFIED` is never reachable from `_closet_mirror_behind`
+    today: it requires `ensure_mirror_current(require_archive=True)`, which is
+    deliberately NOT passed there -- an unwired archive is a PERMANENT config
+    state, so deferring on it would mean never giving up (see
+    `_closet_mirror_behind`'s docstring for the full reasoning)."""
     conn = _reopen(onchain_env)
     _seed_unsettled_trait_sale(conn, "O" * 64)
     conn.commit()
@@ -1146,16 +1183,36 @@ def test_sweep_does_not_defer_for_an_unrelated_closet_error_code(
     assert server._sweep_attempts.get("P" * 64, 0) == 1
 
 
-def test_mirror_behind_check_failure_answers_false(onchain_env, monkeypatch):
+def test_sweep_spends_attempt_and_continues_when_mirror_check_fails_unexpectedly(
+    onchain_env, monkeypatch, tmp_path
+):
     """The sweeps' deferral check is a convenience, not a gate: if it fails
-    unexpectedly (locked DB, malformed archive) it must answer "not behind" so
-    the pass carries on for every remaining row, instead of raising out of the
-    sweep loop. The flow's own guard still refuses if the mirror really is
-    behind."""
+    unexpectedly (locked DB, malformed archive) the sweep must carry on and
+    attempt settlement for that row -- spending an attempt like any other
+    failure -- instead of deferring it forever or raising out of the loop and
+    abandoning every remaining row. Asserts the sweep's observable behaviour
+    (settlement WAS attempted, an attempt WAS spent), not the predicate's raw
+    return value."""
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "R" * 64)
+    conn.commit()
+    conn.close()
 
     def boom(*a, **k):
         raise RuntimeError("history archive is a directory")
 
     monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
 
-    assert server._closet_mirror_behind("testnet", BUYER) is False
+    settle_calls = []
+
+    async def fake_settle(buyer, nft_id, offer_index, network):
+        settle_calls.append(offer_index)
+        return False
+
+    monkeypatch.setattr(server, "_settle_trait_sale", fake_settle)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    _run(server.settle_pending_trait_sales())
+
+    assert settle_calls == ["R" * 64]  # the sweep continued, not stuck deferring forever
+    assert server._sweep_attempts.get("R" * 64, 0) == 1
