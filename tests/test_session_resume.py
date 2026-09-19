@@ -322,28 +322,33 @@ def test_swap_payload_carries_payment_link(dev_auth):
 
 CLOSET_OWNER = mock_economy.DEV_OWNER  # what dev-mode require_wallet resolves
 CLOSET_SELLER = "rClosetResumeSeller000000000000000"
+CLOSET_BUYER = "rClosetResumeBuyer0000000000000000"  # buys FROM CLOSET_OWNER (fix round 2)
 
 
 @pytest.fixture
 def closet_resume_env(dev_auth, tmp_path, monkeypatch):
     """Fresh per-test onchain.db (mirrors tests/test_closet_market_api.py's
-    closet_env) with CLOSET_OWNER and CLOSET_SELLER both holding an active
-    Closet, so the store-level create_pending_bid/create_ask/create_take_fill
-    calls below (no HTTP handler involved) don't refuse on closet_required.
-    CLOSET_SELLER holds two DIFFERENT traits so a test can put two concurrent
-    fills in flight at once (fix round 1, #503) without colliding on
-    (owner, slot, value). CLOSET_MARKET_ENC_KEY is patched truthy so
-    config.closet_market_settleable() -- which now gates the closet DB
+    closet_env) with CLOSET_OWNER, CLOSET_SELLER and CLOSET_BUYER all holding
+    an active Closet, so the store-level create_pending_bid/create_ask/
+    create_take_fill calls below (no HTTP handler involved) don't refuse on
+    closet_required. CLOSET_SELLER holds two DIFFERENT traits so a test can
+    put two concurrent fills in flight at once (fix round 1, #503) without
+    colliding on (owner, slot, value); CLOSET_OWNER holds one too so a test
+    can put CLOSET_OWNER on the SELLER side of a fill (fix round 2 -- the
+    role-aware tests need CLOSET_OWNER, the dev-mode wallet, playing both
+    roles across different tests). CLOSET_MARKET_ENC_KEY is patched truthy
+    so config.closet_market_settleable() -- which now gates the closet DB
     lookup in handle_sessions_active -- doesn't skip it (unset by default;
     see test_closet_market_api.py's own closet_env fixture)."""
     path = str(tmp_path / "onchain_testnet.db")
     conn = init_onchain_db(path)
     economy_store.init_economy_schema(conn)
-    for owner in (CLOSET_OWNER, CLOSET_SELLER):
+    for owner in (CLOSET_OWNER, CLOSET_SELLER, CLOSET_BUYER):
         economy_store.set_closet_token(conn, owner, f"C-{owner}", "00", status=closet_token.ACTIVE)
     economy_store.set_closet_contents(
         conn, CLOSET_SELLER, [("Hat", "Wizard Hat", 1), ("Eyes", "Laser Eyes", 1)], []
     )
+    economy_store.set_closet_contents(conn, CLOSET_OWNER, [("Mouth", "Grin", 1)], [])
     conn.commit()
     conn.close()
     monkeypatch.setenv("ONCHAIN_DB_PATH", path)
@@ -506,3 +511,98 @@ def test_fill_outranks_bid_when_both_eligible(dev_auth, closet_resume_env):
     body = _active(dev_auth)
     assert body["closet"]["kind"] == "closet_fill"
     assert body["closet"]["id"] == fill["id"]
+
+
+# --- Closet Market resume: role-aware actionability (fix round 2) ---------
+# _closet_pick_view (fix round 1) ranks candidates by whether they need the
+# wallet's signature, but that only works if every candidate is genuinely
+# actionable for THIS wallet first. Two related bugs the bots found:
+# (Greptile P1) _closet_fill_view's awaiting_signature branch didn't check
+# role, so a seller could be shown "you need to pay" for the buyer's own
+# payment; (CodeRabbit Major) a role-terminal fill (done for this wallet,
+# but not yet in the persisted TERMINAL_FILL_STATES) could win the pick or
+# be the only fill row, silently swallowing a live bid that should have
+# resumed instead.
+
+
+def test_seller_not_shown_awaiting_signature_for_buyer_owed_payment(dev_auth, closet_resume_env):
+    """Greptile P1: the seller side of a fill still awaiting the BUYER's
+    Payment signature must never read as awaiting_signature -- that's not a
+    bill the seller can pay."""
+    conn = _closet_conn(closet_resume_env)
+    ask = closet_market_store.create_ask(
+        conn, owner=CLOSET_OWNER, slot="Mouth", value="Grin", price_brix="10", platform=None
+    )
+    closet_market_store.create_take_fill(conn, ask["id"], CLOSET_BUYER, fee_bps=0, platform=None)
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["kind"] == "closet_fill"
+    assert body["closet"]["role"] == "seller"
+    assert body["closet"]["state"] != "awaiting_signature"
+    assert body["closet"]["state"] == "pending"
+
+
+def test_role_terminal_fill_does_not_suppress_bid_fallback(dev_auth, closet_resume_env):
+    """CodeRabbit Major: unfinished_fills_for_wallet excludes the PERSISTED
+    TERMINAL_FILL_STATES (mirrored/refunded/failed) but not the raw 'paid'
+    state, which _closet_fill_view reads as done for either role. Before the
+    fix, a wallet with ONLY this fill got it back as `closet` (the client's
+    own TERMINAL.closet would then reject it as non-resumable) and the
+    function returned before ever checking for a live bid -- so a perfectly
+    resumable bid was silently lost. This proves the fallback runs."""
+    conn = _closet_conn(closet_resume_env)
+    ask = closet_market_store.create_ask(
+        conn, owner=CLOSET_OWNER, slot="Mouth", value="Grin", price_brix="10", platform=None
+    )
+    done_fill = closet_market_store.create_take_fill(
+        conn, ask["id"], CLOSET_BUYER, fee_bps=0, platform=None, now=int(time.time()) - 300
+    )
+    closet_market_store.update_fill(conn, done_fill["id"], state=closet_market_store.PAID)
+    bid = closet_market_store.create_pending_bid(
+        conn,
+        owner=CLOSET_OWNER,
+        slot="Hat",
+        value="Wizard Hat",
+        price_brix="10",
+        platform=None,
+        condition="COND",
+        fulfillment_enc="SEALED",
+        cancel_after=9_999_999_999,
+        payload_uuid="U1",
+        xumm_url="https://xumm.app/sign/u1",
+        qr_url="https://xumm.app/qr/u1",
+        push=None,
+    )
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["kind"] == "closet_bid"
+    assert body["closet"]["id"] == bid["id"]
+
+
+def test_role_terminal_fill_does_not_outrank_active_fill(dev_auth, closet_resume_env):
+    """CodeRabbit Major, narrower form: with a genuinely active fill also in
+    play, an OLDER role-terminal 'done' fill must not win _closet_pick_view's
+    age tiebreak just for being older -- it has to be dropped before ranking
+    even starts, not merely placed in the same tier and out-aged."""
+    conn = _closet_conn(closet_resume_env)
+    ask1 = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Hat", value="Wizard Hat", price_brix="10", platform=None
+    )
+    done_fill = closet_market_store.create_take_fill(
+        conn, ask1["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 600
+    )
+    closet_market_store.update_fill(conn, done_fill["id"], state=closet_market_store.PAID)
+    ask2 = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Eyes", value="Laser Eyes", price_brix="10", platform=None
+    )
+    active_fill = closet_market_store.create_take_fill(
+        conn, ask2["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 120
+    )
+    closet_market_store.update_fill(conn, active_fill["id"], state=closet_market_store.FUNDED)
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["id"] == active_fill["id"]
+    assert body["closet"]["state"] == "pending"

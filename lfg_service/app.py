@@ -5835,7 +5835,15 @@ def _closet_fill_view(fill: dict[str, Any], wallet: str) -> dict[str, Any]:
         s == closet_market_store.FUNDS_PENDING
         and fill["funds_source"] == closet_market_store.FUNDS_PAYMENT
         and not fill["signed_txid"]
+        and wallet == fill["buyer"]
     ):
+        # (#503 fix round 2, Greptile P1) Only the buyer ever signs this
+        # Payment -- without the role check a SELLER polling/resuming the
+        # SAME fill (their own ask, someone else's still-unsigned buy) also
+        # read as "awaiting_signature" and was shown a QR to pay a bill that
+        # isn't theirs. The seller's view of this exact state now falls
+        # through to the general "pending" bucket below (unchanged
+        # vocabulary -- the client already renders that as "Settling").
         state = "awaiting_signature"
     elif s in (closet_market_store.PAID, closet_market_store.MIRRORED) or (
         s == closet_market_store.ASSET_MOVED and wallet == fill["buyer"]
@@ -8975,9 +8983,30 @@ async def handle_mint_active(request):
 _CLOSET_FILL_RESUME_WINDOW_SECONDS = 1800
 
 
-def _closet_pick_view(
-    candidates: list[tuple[dict[str, Any], dict[str, Any]]],
-) -> dict[str, Any]:
+_ClosetCandidate = tuple[dict[str, Any], dict[str, Any]]
+
+
+def _closet_actionable_candidates(candidates: list[_ClosetCandidate]) -> list[_ClosetCandidate]:
+    """#503 (fix round 2, CodeRabbit): drop any candidate whose view state is
+    terminal FOR THIS WALLET (done/failed -- the same two values app.js's own
+    TERMINAL.closet treats as terminal) before ranking. `state` here is
+    already read off the SAME _closet_bid_view/_closet_fill_view mapping
+    every other closet endpoint uses, never a second copy of it.
+
+    This matters beyond just "don't show a dead screen": unfinished_fills_
+    for_wallet only excludes the PERSISTED TERMINAL_FILL_STATES (mirrored/
+    refunded/failed), but a fill can be role-terminal earlier than that --
+    e.g. `paid` reads as `done` for both sides, `asset_moved` reads as `done`
+    only for the buyer. Left unfiltered, a role-terminal row could win
+    _closet_pick_view's ranking (or just be the only fill row) and get
+    returned as `closet` -- which the client's TERMINAL.closet would then
+    reject as non-resumable, silently losing the turn to check for a live
+    bid entirely. Filtering here, before the caller decides whether to fall
+    through to the bid query, is what keeps that fallback reachable."""
+    return [pair for pair in candidates if pair[1]["state"] not in ("done", "failed")]
+
+
+def _closet_pick_view(candidates: list[_ClosetCandidate]) -> dict[str, Any]:
     """#503 (fix round 1): `has_live_bid`/a take-fill's ask scope uniqueness
     per (owner, slot, value), so a wallet can hold several concurrent
     non-terminal bids or fills at once -- the envelope has only one `closet`
@@ -8987,7 +9016,8 @@ def _closet_pick_view(
     endpoint uses, never a second copy of that logic) ahead of one that's
     merely settling/verifying; among equals (same tier) prefer the OLDEST
     row -- it's closest to expiring, while the newest is likely still on the
-    user's own screen anyway. `candidates` is non-empty."""
+    user's own screen anyway. `candidates` must already be actionable (see
+    _closet_actionable_candidates) and non-empty."""
     _, view = min(
         candidates,
         key=lambda pair: (
@@ -9006,18 +9036,27 @@ def _closet_resume_view(conn: sqlite3.Connection, wallet: str) -> dict[str, Any]
     _closet_bid_view/_closet_fill_view unchanged, so app.js's existing
     attachMarketResume (which already dispatches on kind closet_bid/
     closet_fill via MARKET_RESUME_RENDER/MARKET_STATUS_PATH) renders and
-    polls a resumed entry exactly like the dedicated status endpoints do."""
+    polls a resumed entry exactly like the dedicated status endpoints do.
+
+    Every candidate list is filtered to what's still actionable for THIS
+    wallet before ranking (fix round 2) -- a role-terminal fill (or, in
+    principle, a role-terminal bid) must never win the pick, and must never
+    suppress the bid fallback by being the only fill row returned."""
     now = int(time.time())
     fills = closet_market_store.unfinished_fills_for_wallet(
         conn, wallet, since_ts=now - _CLOSET_FILL_RESUME_WINDOW_SECONDS
     )
-    if fills:
-        return _closet_pick_view([(f, _closet_fill_view(f, wallet)) for f in fills])
+    fill_candidates = _closet_actionable_candidates(
+        [(f, _closet_fill_view(f, wallet)) for f in fills]
+    )
+    if fill_candidates:
+        return _closet_pick_view(fill_candidates)
     orders = closet_market_store.pending_bids_for_owner(
         conn, wallet, since_ts=now - xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
     )
-    if orders:
-        return _closet_pick_view([(o, _closet_bid_view(o)) for o in orders])
+    bid_candidates = _closet_actionable_candidates([(o, _closet_bid_view(o)) for o in orders])
+    if bid_candidates:
+        return _closet_pick_view(bid_candidates)
     return None
 
 
