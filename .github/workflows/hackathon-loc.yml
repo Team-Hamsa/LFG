@@ -65,5 +65,19 @@ jobs:
             # won't re-trigger itself (guarded by the github-actions[bot] actor
             # check above).
             git commit -m "docs(README): refresh hackathon LoC stats"
-            git push
+            # Rebase-and-retry: this job races every other push to main, and a
+            # plain `git push` fails outright ("cannot lock ref ... is at X but
+            # expected Y") whenever anything else lands first -- 7 of the last
+            # 15 runs failed that way, purely from merges landing close
+            # together, leaving a red X on a green branch. The regenerated
+            # stats are a pure function of the tree, so rebasing and retrying
+            # is always safe: there is nothing to reconcile, only a newer base
+            # to recompute against.
+            for attempt in 1 2 3 4 5; do
+              if git push; then exit 0; fi
+              echo "push rejected (attempt $attempt); rebasing onto the new main"
+              git pull --rebase --autostash origin main || exit 1
+            done
+            echo "::error::could not push refreshed stats after 5 attempts"
+            exit 1
           fi
