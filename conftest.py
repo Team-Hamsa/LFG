@@ -130,8 +130,9 @@ os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 # an inherited "1" would make the stubbed suites hit the network.
 os.environ["PRESUBMIT_SIMULATE"] = "0"
 # No busy-retry rounds suite-wide (real sleeps between failover passes);
-# tests/test_xrpl_rpc_failover.py drives them explicitly.
-os.environ.setdefault("XRPL_RPC_BUSY_RETRY_BACKOFF", "")
+# tests/test_xrpl_rpc_failover.py drives them explicitly. Assigned
+# unconditionally: an inherited prod value would make unrelated tests sleep.
+os.environ["XRPL_RPC_BUSY_RETRY_BACKOFF"] = ""
 os.environ.setdefault("XUMM_WS_WATCH", "0")
 os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
 # Same hazard, tuned knobs: test_bulk_mint_ui_flag / test_shop_config /

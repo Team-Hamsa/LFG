@@ -794,6 +794,24 @@ def test_http_503_counts_as_busy(monkeypatch, _busy_rounds):
     assert _busy_rounds == [1.0]
 
 
+@pytest.mark.parametrize("status", [401, 403, 404, 301])
+def test_http_config_failure_is_not_retried(monkeypatch, _busy_rounds, status):
+    bad = xrpl_rpc.HTTPStatusFailure(status, "endpoint problem", None)
+    t = _install(monkeypatch, {A: [_err("tooBusy")], B: [bad]})
+    with pytest.raises(xrpl_rpc.HTTPStatusFailure):
+        _run(xrpl_rpc.failover_request([A, B], Ledger(ledger_index="validated")))
+    assert _busy_rounds == []
+    assert t.urls == [A, B]
+
+
+def test_http_429_counts_as_busy(monkeypatch, _busy_rounds):
+    busy = xrpl_rpc.HTTPStatusFailure(429, "Too Many Requests", None)
+    _install(monkeypatch, {A: [busy, _ok({"ledger_index": 4})]})
+    resp = _run(xrpl_rpc.failover_request([A], Ledger(ledger_index="validated")))
+    assert resp.result == {"ledger_index": 4}
+    assert _busy_rounds == [1.0]
+
+
 def test_busy_rounds_are_bounded_and_surface_the_last_answer(monkeypatch, _busy_rounds):
     t = _install(monkeypatch, {A: [_err("tooBusy")], B: [_err("slowDown")]})
     resp = _run(xrpl_rpc.failover_request([A, B], Ledger(ledger_index="validated")))
@@ -825,6 +843,8 @@ def test_real_answer_is_never_retried(monkeypatch, _busy_rounds):
         ("0.5, 2", (0.5, 2.0)),
         ("abc", (1.0, 2.5)),
         ("-1", (1.0, 2.5)),
+        ("inf", (1.0, 2.5)),
+        ("1, nan", (1.0, 2.5)),
     ],
 )
 def test_parse_busy_backoff(raw, expected):

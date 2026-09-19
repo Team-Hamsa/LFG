@@ -146,6 +146,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading
 import time
@@ -222,7 +223,8 @@ _DEFAULT_BUSY_BACKOFF = (1.0, 2.5)
 
 def parse_busy_backoff(raw: str | None) -> tuple[float, ...]:
     """`XRPL_RPC_BUSY_RETRY_BACKOFF` -> delays. Unset = default; empty = no
-    retry rounds; anything unparseable or negative falls back to the default."""
+    retry rounds; anything unparseable, non-finite or negative falls back to
+    the default (an `inf` delay would stall the caller forever)."""
     if raw is None:
         return _DEFAULT_BUSY_BACKOFF
     parts = [p.strip() for p in raw.split(",") if p.strip()]
@@ -231,8 +233,10 @@ def parse_busy_backoff(raw: str | None) -> tuple[float, ...]:
     except ValueError:
         logger.warning("XRPL_RPC_BUSY_RETRY_BACKOFF=%r is invalid; using the default", raw)
         return _DEFAULT_BUSY_BACKOFF
-    if any(d < 0 for d in delays):
-        logger.warning("XRPL_RPC_BUSY_RETRY_BACKOFF=%r is negative; using the default", raw)
+    if any(not math.isfinite(d) or d < 0 for d in delays):
+        logger.warning(
+            "XRPL_RPC_BUSY_RETRY_BACKOFF=%r is negative or non-finite; using the default", raw
+        )
         return _DEFAULT_BUSY_BACKOFF
     return delays
 
@@ -240,6 +244,13 @@ def parse_busy_backoff(raw: str | None) -> tuple[float, ...]:
 BUSY_RETRY_BACKOFF_SECONDS: tuple[float, ...] = parse_busy_backoff(
     os.getenv("XRPL_RPC_BUSY_RETRY_BACKOFF")
 )
+
+
+def _http_status_is_busy(status: int) -> bool:
+    """Overload statuses justify another pass; 401/403/404/3xx describe a
+    misconfigured endpoint and would answer the same after any wait."""
+    return status in (408, 429) or status >= 500
+
 
 # Test seam: the wait between busy passes.
 _sleep = asyncio.sleep
@@ -385,6 +396,8 @@ async def failover_request(
                 raise
             except HTTPStatusFailure as exc:
                 reason = f"HTTP {exc.status}"
+                if not _http_status_is_busy(exc.status):
+                    all_busy = False
                 if exc.response is not None:
                     last_exc, last_response = None, exc.response
                 else:
