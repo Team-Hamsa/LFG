@@ -773,3 +773,38 @@ def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_behind(
     assert server._shop_settle_attempts.get("X9", 0) == 0
     conn = _reopen(onchain_env)
     assert shop_store.get_order(conn, "X9")["status"] == "accepted"  # still retryable
+
+
+def test_sweep_defers_settlement_while_the_buyers_closet_mirror_is_pending(
+    onchain_env, monkeypatch, tmp_path
+):
+    """#542 item 3: `closet_mirror_pending` (#184/#530) is just as TEMPORARY as
+    `closet_mirror_behind` above -- the Shop sweep must defer on it too, not
+    just on `closet_mirror_behind`, or the order gets marked `failed` after
+    `_SHOP_SWEEP_MAX_ATTEMPTS` even though the refusal would have cleared on
+    its own."""
+    conn = _reopen(onchain_env)
+    _seed_order(conn, "X10", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    def boom(*a, **k):
+        raise server.closet_token.ClosetError(
+            "mirror pending", code=server.closet_token.CLOSET_MIRROR_PENDING
+        )
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    settle_calls = []
+
+    def recording_deps(c):
+        settle_calls.append(1)
+        return _settle_deps(c, _FakeSettleDeps(), tmp_path)
+
+    monkeypatch.setattr(server.economy_api, "build_settlement_deps", recording_deps)
+
+    _run(server.sweep_shop_orders())
+
+    assert settle_calls == []  # deferred before any settlement work
+    assert server._shop_settle_attempts.get("X10", 0) == 0
+    conn = _reopen(onchain_env)
+    assert shop_store.get_order(conn, "X10")["status"] == "accepted"  # still retryable

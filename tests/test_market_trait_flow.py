@@ -1053,6 +1053,99 @@ def test_sweep_defers_while_the_buyers_closet_mirror_is_behind(onchain_env, monk
     assert not (tmp_path / f"trait-settlement-giveup-{'K' * 64}.json").exists()
 
 
+def test_sweep_defers_while_the_buyers_closet_mirror_is_pending(onchain_env, monkeypatch, tmp_path):
+    """#542 item 3: `closet_mirror_pending` (a committed Closet modify whose
+    mirror write hasn't landed yet, #184/#530) is just as TEMPORARY as
+    `closet_mirror_behind` -- the sweep must defer on it too, not just on
+    `closet_mirror_behind`, or a buyer behind one of the OTHER two refusal
+    codes still gets given up on after `_SWEEP_MAX_ATTEMPTS`."""
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "N" * 64)
+    conn.commit()
+    conn.close()
+
+    def boom(*a, **k):
+        raise server.closet_token.ClosetError(
+            "mirror pending", code=server.closet_token.CLOSET_MIRROR_PENDING
+        )
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    async def unexpected(*a, **k):
+        raise AssertionError("settlement must not be attempted while the mirror is pending")
+
+    monkeypatch.setattr(server, "_settle_trait_sale", unexpected)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    _run(server.settle_pending_trait_sales())
+
+    assert server._sweep_attempts.get("N" * 64, 0) == 0
+    assert not (tmp_path / f"trait-settlement-giveup-{'N' * 64}.json").exists()
+
+
+def test_sweep_defers_while_the_buyers_closet_mirror_is_unverified(
+    onchain_env, monkeypatch, tmp_path
+):
+    """#542 item 3: `closet_mirror_unverified` (the history archive can't
+    answer a required stale-mirror check, #530) is the third temporary
+    refusal code -- same deferral, same reasoning as `closet_mirror_pending`
+    above."""
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "O" * 64)
+    conn.commit()
+    conn.close()
+
+    def boom(*a, **k):
+        raise server.closet_token.ClosetError(
+            "mirror unverified", code=server.closet_token.CLOSET_MIRROR_UNVERIFIED
+        )
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    async def unexpected(*a, **k):
+        raise AssertionError("settlement must not be attempted while the mirror is unverified")
+
+    monkeypatch.setattr(server, "_settle_trait_sale", unexpected)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    _run(server.settle_pending_trait_sales())
+
+    assert server._sweep_attempts.get("O" * 64, 0) == 0
+    assert not (tmp_path / f"trait-settlement-giveup-{'O' * 64}.json").exists()
+
+
+def test_sweep_does_not_defer_for_an_unrelated_closet_error_code(
+    onchain_env, monkeypatch, tmp_path
+):
+    """Fail-open regression guard: a ClosetError code outside the deferrable
+    set is a REAL settlement failure -- the budget it exists for. It must
+    still spend an attempt, never defer forever like the three mirror-wait
+    codes."""
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "P" * 64)
+    conn.commit()
+    conn.close()
+
+    def boom(*a, **k):
+        raise server.closet_token.ClosetError("closet not found", code="closet_not_found")
+
+    monkeypatch.setattr(server.closet_token, "ensure_mirror_current", boom)
+
+    settle_calls = []
+
+    async def fake_settle(buyer, nft_id, offer_index, network):
+        settle_calls.append(offer_index)
+        return False
+
+    monkeypatch.setattr(server, "_settle_trait_sale", fake_settle)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    _run(server.settle_pending_trait_sales())
+
+    assert settle_calls == ["P" * 64]  # settlement WAS attempted -- not deferred
+    assert server._sweep_attempts.get("P" * 64, 0) == 1
+
+
 def test_mirror_behind_check_failure_answers_false(onchain_env, monkeypatch):
     """The sweeps' deferral check is a convenience, not a gate: if it fails
     unexpectedly (locked DB, malformed archive) it must answer "not behind" so

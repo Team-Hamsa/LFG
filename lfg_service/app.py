@@ -5134,20 +5134,26 @@ def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> Non
 
 
 def _closet_mirror_behind(network: str, owner: str) -> bool:
-    """True while `owner`'s Closet mirror is behind the chain (#522).
+    """True while `owner`'s Closet mirror may be temporarily unusable for a
+    deposit: behind the chain (#522), still catching up on a previous op's
+    own mirror write (#184), or unverifiable against the history archive
+    (#530) -- any code in `closet_token.MIRROR_WAIT_CODES`.
 
-    A deposit run now would refuse (`closet_mirror_behind`) — and that refusal is
-    TEMPORARY: the listener catches up, or an operator rebuilds the mirror. Both
-    settlement sweeps must therefore DEFER such a pass instead of spending an
-    attempt: a spent budget journals a durable give-up (and the Shop marks the
-    paid order `failed`), and nothing re-arms it when the mirror is repaired.
-    Same treatment the sweeps already give an unresolvable buyer.
+    A deposit run now would refuse with one of those codes — and every one of
+    them is TEMPORARY: the listener catches up, a prior op's mirror write
+    lands, or the archive becomes reachable again. Both settlement sweeps must
+    therefore DEFER such a pass instead of spending an attempt: a spent budget
+    journals a durable give-up (and the Shop marks the paid order `failed`),
+    and nothing re-arms it when the mirror is repaired. Same treatment the
+    sweeps already give an unresolvable buyer, and the same set of codes
+    #530/#540 already wait on for the Closet Market fill mirror (#542 item 3).
 
-    Any other error answers False: only this refusal is deferrable, everything
-    else is a real settlement failure the budget exists for. A check that fails
-    unexpectedly (locked DB, malformed archive) also answers False — it is a
-    convenience, not a gate, and must never abort a sweep pass for every
-    remaining row; the flow's own guard still refuses if the mirror is behind."""
+    Any other error answers False: only these three refusals are deferrable,
+    everything else is a real settlement failure the budget exists for. A
+    check that fails unexpectedly (locked DB, malformed archive) also answers
+    False — it is a convenience, not a gate, and must never abort a sweep pass
+    for every remaining row; the flow's own guard still refuses if the mirror
+    really is behind."""
     conn = None
     try:
         conn = nft_index.init_db(nft_index.index_db_path(network))
@@ -5157,7 +5163,7 @@ def _closet_mirror_behind(network: str, owner: str) -> bool:
         )
         return False
     except closet_token.ClosetError as e:
-        return bool(e.code == closet_token.CLOSET_MIRROR_BEHIND)
+        return e.code in closet_token.MIRROR_WAIT_CODES
     except Exception:
         logging.warning(
             f"stale-mirror check failed for {owner}; settling as usual: {traceback.format_exc()}"
