@@ -471,7 +471,6 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#489 — Trait marketplace: mobile layout — collapse filters behind a drawer](../../issues/489)
 - [ ] [#494 — feat: rarity transparency — show per-trait mint odds vs collection share, drift, and how the engine works](../../issues/494)
 - [ ] [#498 — Marketplace: batch cross-listing of external listings onto LFG (blocked on #219)](../../issues/498)
-- [ ] [#503 — Closet Market: resume in-flight bid/buy/fill screens after reload (#443 follow-up)](../../issues/503)
 - [ ] [#520 — Trait market: one browse for Closet asks and token listings, plus a seller record for project inventory (follow-up to #470)](../../issues/520)
 - [ ] [#548 — Move legacy NFT trait listings into the Closet market](../../issues/548)
 - [ ] [#552 — feat: bounties for app activities (admin-controlled; BRIX/NFT/trait/XRP payouts)](../../issues/552)
@@ -481,6 +480,7 @@ collection (not a general tool). Full rationale per row in
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#503 — Closet Market: resume in-flight bid/buy/fill screens after reload (#443 follow-up)](../../issues/503) (closed 2026-09-19)
 - [x] [#488 — Trait marketplace: post-buy 'settling into your Closet' state](../../issues/488) (closed 2026-09-19)
 - [x] [#486 — Trait marketplace: explain the two-signature XRP on-ramp in the buy flow](../../issues/486) (closed 2026-09-19)
 - [x] [#483 — Trait marketplace: hide or restyle empty-slot (None) trait tokens](../../issues/483) (closed 2026-09-19)
@@ -490,7 +490,6 @@ collection (not a general tool). Full rationale per row in
 - [x] [#443 — Closet Market: zero-signature trait asks + escrow-backed bids (replace Extract→List→Accept for Closet assets)](../../issues/443) (closed 2026-09-16)
 - [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
 - [x] [#496 — feat(marketplace): buy offers / bids on traits in the trait marketplace](../../issues/496) (closed 2026-09-14)
-- [x] [#490 — SourceTag badge: publish a funder-deduped unique_actors count](../../issues/490) (closed 2026-09-13)
 <!-- roadmap:end -->
 
 <details>
