@@ -233,6 +233,19 @@ class BuySession:
     # state==DONE, since settlement can complete asynchronously (the sweep)
     # after this session object last touched the DB.
     settled: bool | None = None
+    # #566 review: whether the settlement SWEEP has durably given up on this
+    # sale (lfg_service.app._sweep_giveup_recorded, exhausted
+    # _SWEEP_MAX_ATTEMPTS) -- a DISTINCT terminal outcome from `settled`,
+    # never overloaded onto it: `settled` staying False forever after a
+    # give-up is exactly the state a give-up leaves behind, so conflating
+    # the two would make "still trying" and "permanently abandoned"
+    # indistinguishable on the wire. None for a character buy or before the
+    # row has closed 'sold'; False while genuinely still in flight; True
+    # once the sweep's durable record exists -- at which point automatic
+    # settlement will never complete and the buyer needs a manual Deposit
+    # (the trait token itself is not lost; it is an ordinary token in their
+    # wallet).
+    settlement_abandoned: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -251,6 +264,7 @@ class BuySession:
             "pay_with": self.pay_with,
             "price_xrp_quote": self.price_xrp_quote,
             "settled": self.settled,
+            "settlement_abandoned": self.settlement_abandoned,
         }
 
 

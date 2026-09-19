@@ -579,13 +579,23 @@ export function traitWizardStepLabel(state) {
 // has been burned back into their Closet yet (_settle_trait_sale / the
 // 2-minute settlement sweep does that, normally inline with the same poll
 // that discovers the sale, occasionally left to the sweep on a transient
-// failure). `settled` mirrors the live market_listings.settled column
-// (GET /api/market/buy/{id}); `stuck` is set by the poller once a buyer has
-// been waiting past the sweep's normal window -- the backend keeps retrying
-// regardless, this only changes what the buyer is told.
-export function buyDoneCopy({ settled, stuck = false }) {
+// failure). Both `settled` and `abandoned` mirror REAL backend signals (GET
+// /api/market/buy/{id}'s `settled` / `settlement_abandoned`) -- never a
+// client-side guess: once the settlement sweep exhausts its retry budget and
+// journals a durable give-up, `settled` stays false forever (nothing ever
+// flips it automatically again), so only a signal the backend actually
+// recorded can tell "still working" apart from "stopped, needs a manual
+// Deposit". `abandoned` is honest about that stop and tells the buyer what
+// to do; it never claims the trait is lost (it is an ordinary token sitting
+// in their wallet) and never implies this will resolve on its own.
+export function buyDoneCopy({ settled, abandoned = false }) {
   if (settled === true) return 'Added to your Closet.';
-  if (stuck) return 'Still settling — it will land in your Closet shortly.';
+  if (abandoned) {
+    return (
+      'Bought — the trait is in your wallet. Automatic settlement into your ' +
+      "Closet didn't finish; deposit it from your wallet to add it there."
+    );
+  }
   return 'Bought — settling into your Closet…';
 }
 

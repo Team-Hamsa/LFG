@@ -607,23 +607,19 @@ def test_standalone_card_inputs_are_capped_not_full_bleed():
 
 
 def _run_market_buy_render(cases: list) -> list:
-    """Execute app.js's real marketBuyRender + its signText/threshold-constant
-    dependencies under Node against the real market_pure.js, once per
-    [listingKind, sessionDict] case. Returns each call's view-model object."""
+    """Execute app.js's real marketBuyRender + its signText dependency under
+    Node against the real market_pure.js, once per [listingKind, sessionDict]
+    case. Returns each call's view-model object."""
     if _NODE is None:
         pytest.skip("node is not installed on this host")
     js = _read("app.js")
     sign_start = js.index("function signText(")
     sign_src = js[sign_start : js.index("\n}\n", sign_start) + 3]
-    const_start = js.index("const BUY_SETTLING_REASSURE_POLLS")
-    const_src = js[const_start : js.index("\n", const_start) + 1]
     render_start = js.index("function marketBuyRender(listingKind) {")
     render_src = js[render_start : js.index("\n}\n", render_start) + 3]
     script = (
         "import * as marketPure from './webapp/client/market_pure.js';\n"
         + sign_src
-        + "\n"
-        + const_src
         + "\n"
         + render_src
         + """
@@ -674,9 +670,9 @@ _BRIX_HOLDER_SIGN = [
         "xumm_url": "https://xumm.app/sign/U3",
     },
 ]
-_DONE_UNSETTLED = ["trait", {"state": "done", "settled": False, "_settlingPolls": 0}]
-_DONE_SETTLED = ["trait", {"state": "done", "settled": True, "_settlingPolls": 0}]
-_DONE_STUCK = ["trait", {"state": "done", "settled": False, "_settlingPolls": 10}]
+_DONE_UNSETTLED = ["trait", {"state": "done", "settled": False, "settlement_abandoned": False}]
+_DONE_SETTLED = ["trait", {"state": "done", "settled": True, "settlement_abandoned": False}]
+_DONE_ABANDONED = ["trait", {"state": "done", "settled": False, "settlement_abandoned": True}]
 _DONE_CHARACTER = ["character", {"state": "done"}]
 
 
@@ -697,39 +693,35 @@ def test_market_buy_render_onramp_explainer_and_step_labels():
 
 def test_market_buy_render_done_copy_honesty():
     """#488: the DONE-state copy tells the truth about settlement progress
-    instead of unconditionally declaring the trait already in the Closet;
-    characters (no settlement step) are untouched."""
-    unsettled, settled, stuck, character_done = _run_market_buy_render(
-        [_DONE_UNSETTLED, _DONE_SETTLED, _DONE_STUCK, _DONE_CHARACTER]
+    from REAL backend signals (settled / settlement_abandoned) instead of
+    unconditionally declaring the trait already in the Closet, and instead
+    of a client-side poll-count guess that could never tell "still trying"
+    apart from "the sweep gave up forever" (#566 review). Give-up copy names
+    what actually happened (wallet, not Closet; needs a manual Deposit) and
+    never implies loss or self-resolution. Characters (no settlement step)
+    are untouched."""
+    unsettled, settled, abandoned, character_done = _run_market_buy_render(
+        [_DONE_UNSETTLED, _DONE_SETTLED, _DONE_ABANDONED, _DONE_CHARACTER]
     )
     assert unsettled["text"] == "Bought \u2014 settling into your Closet\u2026"
     assert settled["text"] == "Added to your Closet."
-    assert stuck["text"] == "Still settling \u2014 it will land in your Closet shortly."
+    assert abandoned["text"] == (
+        "Bought \u2014 the trait is in your wallet. Automatic settlement into your "
+        "Closet didn't finish; deposit it from your wallet to add it there."
+    )
     assert character_done["text"] == "The NFT is on its way to your wallet."
 
 
-def test_buy_unsettled_gates_continued_polling():
-    """#488: buyUnsettled is what keeps pollMarketFlow / marketFlow /
-    attachMarketResume polling a trait buy past its ledger-terminal DONE
-    state until settlement actually lands -- pin its truth table directly."""
+def _run_js_snippet(js_src: str, script_tail: str):
+    """Execute `js_src` (verbatim app.js source, one or more top-level
+    functions) plus `script_tail` (a script that uses them and
+    console.log(JSON.stringify(...))) under Node; returns the parsed result.
+    Shared by the small decision-function tests below -- lighter than
+    _run_market_buy_render/_run_open_listing_detail since these functions
+    take no DOM dependency at all."""
     if _NODE is None:
         pytest.skip("node is not installed on this host")
-    js = _read("app.js")
-    start = js.index("function buyUnsettled(kind, s) {")
-    src = js[start : js.index("\n}\n", start) + 3]
-    script = (
-        src
-        + """
-const out = [
-  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: false}),
-  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: true}),
-  buyUnsettled('buy', {listing_kind: 'character', state: 'done', settled: null}),
-  buyUnsettled('bid', {listing_kind: 'trait', state: 'done', settled: false}),
-  buyUnsettled('buy', {listing_kind: 'trait', state: 'awaiting_signature', settled: null}),
-];
-console.log(JSON.stringify(out));
-"""
-    )
+    script = js_src + script_tail
     proc = subprocess.run(
         [_NODE, "--input-type=module"],
         input=script,
@@ -739,29 +731,98 @@ console.log(JSON.stringify(out));
         timeout=15,
     )
     assert proc.returncode == 0, f"node script failed:\n{script}\n--- stderr ---\n{proc.stderr}"
-    unsettled_done, settled_done, character_done, wrong_kind, not_yet_done = json.loads(proc.stdout)
+    return json.loads(proc.stdout)
+
+
+def _extract_fn(js: str, signature: str) -> str:
+    start = js.index(signature)
+    return js[start : js.index("\n}\n", start) + 3]
+
+
+def test_buy_unsettled_gates_continued_polling():
+    """#488: buyUnsettled is what keeps pollMarketFlow / marketFlow /
+    attachMarketResume polling a trait buy past its ledger-terminal DONE
+    state until settlement actually resolves -- pin its truth table
+    directly, including the #566-review addition: a durable give-up
+    (settlement_abandoned) stops it exactly like settled does, not just an
+    aging poll count."""
+    js = _read("app.js")
+    src = _extract_fn(js, "function buyUnsettled(kind, s) {")
+    out = _run_js_snippet(
+        src,
+        """
+const out = [
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: false, settlement_abandoned: false}),
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: true, settlement_abandoned: false}),
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'done', settled: false, settlement_abandoned: true}),
+  buyUnsettled('buy', {listing_kind: 'character', state: 'done', settled: null, settlement_abandoned: null}),
+  buyUnsettled('bid', {listing_kind: 'trait', state: 'done', settled: false, settlement_abandoned: false}),
+  buyUnsettled('buy', {listing_kind: 'trait', state: 'awaiting_signature', settled: null, settlement_abandoned: null}),
+];
+console.log(JSON.stringify(out));
+""",
+    )
+    unsettled_done, settled_done, abandoned_done, character_done, wrong_kind, not_yet_done = out
     assert unsettled_done is True
     assert settled_done is False
+    assert abandoned_done is False
     assert character_done is False
     assert wrong_kind is False
     assert not_yet_done is False
 
 
-def test_poll_market_flow_and_resume_keep_polling_while_buy_unsettled():
-    """#488: the three call sites that decide whether to keep polling
-    (pollMarketFlow's own continuation, marketFlow's initial dispatch,
-    attachMarketResume's resume dispatch) all route through buyUnsettled
-    rather than isMarketTerminal alone."""
+def test_should_keep_polling_executed():
+    """#488 / #566 review: the three "keep polling" call sites (pollMarketFlow's
+    tick, marketFlow's initial dispatch, attachMarketResume's resume dispatch)
+    all route through the one shared decision, shouldKeepPolling -- executed
+    here against real market_pure.js (not asserted as source text, unlike the
+    now-removed prior version of this test) so a regression in the OR logic
+    itself, not just the wiring, would be caught."""
     js = _read("app.js")
-    assert (
-        "if (unsettled || !marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);"
-        in js
+    src = (
+        "import * as marketPure from './webapp/client/market_pure.js';\n"
+        + _extract_fn(js, "function buyUnsettled(kind, s) {")
+        + "\n"
+        + _extract_fn(js, "function shouldKeepPolling(kind, s) {")
     )
-    assert (
-        "if (buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);"
-        in js
+    out = _run_js_snippet(
+        src,
+        """
+const out = [
+  // trait buy done unsettled: keep polling via buyUnsettled, even though
+  // 'done' is itself in MARKET_TERMINAL_STATES.
+  shouldKeepPolling('buy', {listing_kind: 'trait', state: 'done', settled: false, settlement_abandoned: false}),
+  // trait buy done + settled: both halves of the OR are now false.
+  shouldKeepPolling('buy', {listing_kind: 'trait', state: 'done', settled: true, settlement_abandoned: false}),
+  // trait buy done + abandoned: buyUnsettled is false, 'done' is terminal --
+  // stop, and stay stopped (#566 review).
+  shouldKeepPolling('buy', {listing_kind: 'trait', state: 'done', settled: false, settlement_abandoned: true}),
+  // a non-buy kind (e.g. a listing) still awaiting signature: buyUnsettled
+  // can never fire (kind !== 'buy'), but the plain isMarketTerminal half of
+  // the OR must still say "keep polling".
+  shouldKeepPolling('list', {state: 'awaiting_signature'}),
+  // that same kind once done: both halves false.
+  shouldKeepPolling('list', {state: 'done'}),
+];
+console.log(JSON.stringify(out));
+""",
     )
+    unsettled_trait_done, settled_trait_done, abandoned_trait_done, list_pending, list_done = out
+    assert unsettled_trait_done is True
+    assert settled_trait_done is False
+    assert abandoned_trait_done is False
+    assert list_pending is True
+    assert list_done is False
+
+
+def test_poll_market_flow_and_resume_wired_to_should_keep_polling():
+    """Wiring check complementing test_should_keep_polling_executed above:
+    all three call sites actually call the tested function (not a
+    reimplementation of its logic inline)."""
+    js = _read("app.js")
+    assert "if (shouldKeepPolling(kind, s)) marketFlowTimer = setTimeout(tick, 3000);" in js
+    assert "if (shouldKeepPolling(kind, s)) pollMarketFlow(kind, s.id, render);" in js
     assert (
-        "if (buyUnsettled(session.kind, session) || !marketPure.isMarketTerminal(session.state)) {"
+        "if (shouldKeepPolling(session.kind, session)) {\n    pollMarketFlow(session.kind, session.id, render);"
         in js
     )

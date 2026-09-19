@@ -326,13 +326,23 @@ def test_buy_done_copy_settled():
     assert run_js("M.buyDoneCopy({settled: true})") == "Added to your Closet."
 
 
-def test_buy_done_copy_stuck_reassures_without_claiming_done():
-    assert (
-        run_js("M.buyDoneCopy({settled: false, stuck: true})")
-        == "Still settling — it will land in your Closet shortly."
+def test_buy_done_copy_abandoned_names_the_manual_recovery_without_implying_loss():
+    """#566 review: `abandoned` mirrors a REAL backend signal
+    (settlement_abandoned, the durable settlement-sweep give-up record) --
+    not a client-side poll-count guess. The copy must say what is actually
+    true (the trait is in the wallet, a manual Deposit is needed) and must
+    not claim the trait is lost or that this will resolve on its own."""
+    text = run_js("M.buyDoneCopy({settled: false, abandoned: true})")
+    assert text == (
+        "Bought — the trait is in your wallet. Automatic settlement into your "
+        "Closet didn't finish; deposit it from your wallet to add it there."
     )
-    # `stuck` is irrelevant once actually settled.
-    assert run_js("M.buyDoneCopy({settled: true, stuck: true})") == "Added to your Closet."
+    assert "lost" not in text.lower()
+    assert "closet" in text.lower() and "wallet" in text.lower()
+    # `abandoned` is irrelevant once actually settled -- the sweep can never
+    # set both, but the copy function itself must still prioritize the
+    # settled outcome if ever handed a (settled: true, abandoned: true) pair.
+    assert run_js("M.buyDoneCopy({settled: true, abandoned: true})") == "Added to your Closet."
 
 
 # --- #483: "None" (empty-slot) trait tokens read as removal, not blank art ---

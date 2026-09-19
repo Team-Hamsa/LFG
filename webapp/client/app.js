@@ -5049,21 +5049,31 @@ let marketFlowGen = 0;
 // the settlement burn-back into their Closet (_settle_trait_sale, normally
 // triggered inline with the same poll that discovers the sale) has landed.
 // Recognizing this sub-state lets the poller keep going past DONE instead of
-// declaring victory the moment the ledger accept lands; always false for a
-// character buy (no Closet settlement step) or once `settled` reports true.
+// declaring victory the moment the ledger accept lands. Stops -- and stays
+// stopped -- the moment either REAL backend signal resolves the sale:
+// `settled` (burned back into the Closet) or `settlement_abandoned` (the
+// settlement sweep durably gave up after exhausting its retry budget, #566
+// review). Once abandoned, `settled` never flips on its own, so further
+// polling would just repeat a stale answer forever; always false for a
+// character buy (no Closet settlement step).
 function buyUnsettled(kind, s) {
-  return kind === 'buy' && s.listing_kind === 'trait' && s.state === 'done' && s.settled !== true;
+  return (
+    kind === 'buy' &&
+    s.listing_kind === 'trait' &&
+    s.state === 'done' &&
+    s.settled !== true &&
+    s.settlement_abandoned !== true
+  );
 }
-// Reassurance-only threshold for marketBuyRender's copy: the primary
-// settlement trigger fires inline with the SAME poll that discovers the
-// sale, so this almost never fires in practice -- it exists only so a buyer
-// who hits the rarer sweep-retry path (a transient settlement failure)
-// isn't left staring at "..." with no explanation. The screen keeps polling
-// either way (buyUnsettled above); only the copy changes. Well under the
-// settlement sweep's own ~10 minute budget (_SWEEP_MAX_ATTEMPTS x
-// _SWEEP_PERIOD_SECONDS in lfg_service/app.py) -- a UI reassurance cue, not
-// a claim the backend has actually given up.
-const BUY_SETTLING_REASSURE_POLLS = 10; // ~30s at the 3s poll interval
+
+// The one continuation decision all three "keep polling" call sites share
+// (pollMarketFlow's own tick, marketFlow's initial dispatch,
+// attachMarketResume's resume dispatch): a session already terminal by the
+// generic list/cancel/bid/etc. vocabulary still needs one more lap while a
+// trait buy is DONE-but-unsettled.
+function shouldKeepPolling(kind, s) {
+  return buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state);
+}
 
 function highlightTabs(containerId, dataKey, activeValue) {
   for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
@@ -5619,10 +5629,6 @@ function pollMarketFlow(kind, sessionId, render) {
   // after each render this poller makes itself.
   let ownerGen = flowRenderGen;
   const path = MARKET_STATUS_PATH[kind](sessionId);
-  // #488: consecutive polls this specific loop has seen a trait buy sitting
-  // DONE-but-unsettled — scoped to this poll loop (never a module-level
-  // counter), so it can never leak across sessions or survive a resume.
-  let settlingPolls = 0;
   const tick = async () => {
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
@@ -5636,12 +5642,9 @@ function pollMarketFlow(kind, sessionId, render) {
       return;
     }
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
-    const unsettled = buyUnsettled(kind, s);
-    settlingPolls = unsettled ? settlingPolls + 1 : 0;
-    s._settlingPolls = settlingPolls;
     showFlow(render(s));
     ownerGen = flowRenderGen; // our own render; keep ownership current
-    if (unsettled || !marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
+    if (shouldKeepPolling(kind, s)) marketFlowTimer = setTimeout(tick, 3000);
   };
   marketFlowTimer = setTimeout(tick, 3000);
 }
@@ -5669,7 +5672,7 @@ function attachMarketResume(session) {
   clearTimeout(marketFlowTimer);
   showPanel('flow-panel');
   showFlow(render(session));
-  if (buyUnsettled(session.kind, session) || !marketPure.isMarketTerminal(session.state)) {
+  if (shouldKeepPolling(session.kind, session)) {
     pollMarketFlow(session.kind, session.id, render);
   }
   return true;
@@ -5758,7 +5761,7 @@ async function marketFlow(kind, startPath, body, render) {
     return;
   }
   showFlow(render(s));
-  if (buyUnsettled(kind, s) || !marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
+  if (shouldKeepPolling(kind, s)) pollMarketFlow(kind, s.id, render);
 }
 
 // qrData is the string re-encoded into the branded QR by qrUrl()/`/api/qr.png`.
@@ -5802,11 +5805,12 @@ function marketBuyRender(listingKind) {
     }
     if (s.state === 'done') {
       // #488: the accept tx validating doesn't mean the trait has landed in
-      // the buyer's Closet yet -- buyDoneCopy is honest about the gap (and,
-      // via `stuck`, reassures a buyer on the rare slow-settlement path)
-      // instead of unconditionally declaring "added to your Closet".
+      // the buyer's Closet yet -- buyDoneCopy is honest about the gap, and
+      // about the sweep durably giving up (`settlement_abandoned`, a real
+      // backend signal, #566 review) -- instead of unconditionally
+      // declaring "added to your Closet".
       const text = listingKind === 'trait'
-        ? marketPure.buyDoneCopy({ settled: s.settled, stuck: (s._settlingPolls || 0) >= BUY_SETTLING_REASSURE_POLLS })
+        ? marketPure.buyDoneCopy({ settled: s.settled, abandoned: s.settlement_abandoned === true })
         : 'The NFT is on its way to your wallet.';
       return { title: '🎉 Purchase complete!', text, done: true };
     }
