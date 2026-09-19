@@ -2,6 +2,7 @@
 # legitimately-grown edition pass conservation; remove it and it reads as drift.
 
 import os
+import re
 import sys
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
@@ -221,6 +222,37 @@ def test_post_alert_never_raises_even_when_the_webhook_post_fails(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     assert ate.post_alert("https://discord.invalid/webhook", "body") is False
+
+
+# --- #560 review round 1: a long finding list must never eat the actionable
+# trailer — post_alert's own truncation is blind and cannot be relied on. ---
+
+
+def test_assemble_alert_body_elides_rows_but_keeps_the_trailer():
+    """The shared primitive every build_alert_body() now goes through."""
+    header = "HEADER"
+    trailer = ["TRAILER-1", "TRAILER-2: run this command"]
+    rows = [f"finding {i}: something went wrong here" for i in range(300)]
+    body = ate.assemble_alert_body(header, rows, trailer)
+    assert len(body) <= 1900
+    assert body.startswith(header)
+    assert body.endswith("\n".join(trailer))
+    assert re.search(r"\.\.\. and \d+ more", body)
+    assert "finding 299" not in body  # some rows really were dropped
+
+
+def test_build_alert_body_many_rows_still_ends_with_the_report_path():
+    trait_drift = {(f"Slot{i}", "Value"): -1 for i in range(300)}
+    report = trait_economy.ConservationReport(trait_drift=trait_drift, ok=False)
+    completeness = trait_economy.CompletenessReport(orphan_bodies=[], slot_anomalies={}, ok=True)
+    body = ate.build_alert_body("mainnet", 5000, report, completeness, "reports/big.md")
+    assert len(body) <= 1900
+    assert body.endswith(
+        "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
+        "(dry-run first), then re-audit.\n"
+        "Report: reports/big.md"
+    )
+    assert re.search(r"\.\.\. and \d+ more", body)
 
 
 def test_benign_drift_with_a_completeness_violation_alerts_as_violations():

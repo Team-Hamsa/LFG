@@ -38,7 +38,7 @@ import _economy_deps  # noqa: E402
 
 from lfg_core import closet_market_flow, config, market_ops, xrpl_ops  # noqa: E402
 from lfg_core import closet_market_store as cms  # noqa: E402
-from scripts._alerts import post_alert  # noqa: E402
+from scripts._alerts import assemble_alert_body, post_alert  # noqa: E402
 
 STUCK_SECONDS = 3600
 PAYOUT_FAILING_ATTEMPTS = 10  # e.g. the counterparty removed their BRIX trust line
@@ -172,16 +172,21 @@ def build_alert_body(network: str, problems: list[str], onchain: bool) -> str:
     (#560). Every row is already a human-readable line from audit_rows() /
     audit_onchain() — a stuck fill names its id and how long it has sat, an
     over-encumbered owner names itself — so the alert is actionable without
-    opening a DB."""
+    opening a DB. The reproduction command and docs pointer are a fixed
+    trailer guaranteed to survive however many rows there are (review round
+    1: post_alert's own truncation is a blind body[:1900] that would
+    otherwise cut them first, on exactly the worst nights) — see
+    scripts/_alerts.assemble_alert_body."""
     plural = "" if len(problems) == 1 else "s"
-    lines = [f"**Closet Market audit: FAIL** ({network}, {len(problems)} problem{plural})"]
-    lines.extend(f"- {p}" for p in problems)
+    header = f"**Closet Market audit: FAIL** ({network}, {len(problems)} problem{plural})"
     cmd = f"scripts/audit_closet_market.py --network {network}"
     if onchain:
         cmd += " --onchain"
-    lines.append(f"Report: {cmd}")
-    lines.append("See docs/ops/closet-market.md §5 (Reading a stuck fill) for next steps.")
-    return "\n".join(lines)
+    trailer = [
+        f"Report: {cmd}",
+        "See docs/ops/closet-market.md §5 (Reading a stuck fill) for next steps.",
+    ]
+    return assemble_alert_body(header, problems, trailer)
 
 
 def main(argv: list[str] | None = None) -> int:

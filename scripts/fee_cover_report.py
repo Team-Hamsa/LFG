@@ -18,7 +18,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import db_path, fee_cover, fee_cover_store, market_ops  # noqa: E402
-from scripts._alerts import post_alert  # noqa: E402
+from scripts._alerts import assemble_alert_body, post_alert  # noqa: E402
 
 
 def _xrp(drops: int) -> str:
@@ -50,16 +50,17 @@ def build_alert_body(network: str, violations: list[str]) -> str:
     """Compact Discord-webhook message for a non-clean `--audit` run (#560).
     Every row is already one of `fee_cover.audit_violations()`'s own
     human-readable lines, naming the offending accept hash, so the alert is
-    actionable without opening a DB."""
+    actionable without opening a DB. The reproduction/requeue commands are a
+    fixed trailer guaranteed to survive however many rows there are (review
+    round 1) — see scripts/_alerts.assemble_alert_body."""
     plural = "" if len(violations) == 1 else "s"
-    lines = [f"**Fee-cover audit: FAIL** ({network}, {len(violations)} violation{plural})"]
-    lines.extend(f"- {v}" for v in violations)
-    lines.append(f"Report: scripts/fee_cover_report.py --network {network} --audit")
-    lines.append(
+    header = f"**Fee-cover audit: FAIL** ({network}, {len(violations)} violation{plural})"
+    trailer = [
+        f"Report: scripts/fee_cover_report.py --network {network} --audit",
         "After fixing the cause, requeue with scripts/recover_fee_cover_refunds.py "
-        f"--network {network} --requeue <accept_hash>"
-    )
-    return "\n".join(lines)
+        f"--network {network} --requeue <accept_hash>",
+    ]
+    return assemble_alert_body(header, violations, trailer)
 
 
 def main(argv: list[str] | None = None) -> int:

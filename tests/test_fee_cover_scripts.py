@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import pwd
+import re
 
 import pytest
 
@@ -258,3 +259,18 @@ def test_report_cli_without_audit_posts_nothing_even_with_webhook(app_db, monkey
     )
     assert rc == 0
     assert posted == []
+
+
+def test_build_alert_body_many_rows_keeps_trailer_and_says_how_many_elided():
+    """#560 review round 1: a night with many fee-cover violations must not
+    truncate away the reproduction/requeue commands."""
+    violations = [f"ACC{i}: refund {80000 + i} exceeds promise {70000 + i}" for i in range(200)]
+    body = fee_cover_report.build_alert_body("mainnet", violations)
+    assert len(body) <= 1900
+    assert body.endswith(
+        "Report: scripts/fee_cover_report.py --network mainnet --audit\n"
+        "After fixing the cause, requeue with scripts/recover_fee_cover_refunds.py "
+        "--network mainnet --requeue <accept_hash>"
+    )
+    assert re.search(r"\.\.\. and \d+ more", body)
+    assert "ACC199" not in body

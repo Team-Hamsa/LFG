@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import pathlib
+import re
 import sqlite3
 from decimal import Decimal
 
@@ -266,3 +267,17 @@ def test_main_clean_run_with_webhook_posts_nothing(monkeypatch):
     rc, posted = _run_main(monkeypatch, c, webhook="https://discord.invalid/webhook")
     assert rc == 0
     assert posted == []
+
+
+def test_build_alert_body_many_rows_keeps_trailer_and_says_how_many_elided():
+    """#560 review round 1: a night with many stuck fills must not truncate
+    away the reproduction command / docs pointer."""
+    problems = [f"fill F{i}: stuck in paid for {1000 + i}s" for i in range(200)]
+    body = audit.build_alert_body("mainnet", problems, onchain=True)
+    assert len(body) <= 1900
+    assert body.endswith(
+        "Report: scripts/audit_closet_market.py --network mainnet --onchain\n"
+        "See docs/ops/closet-market.md §5 (Reading a stuck fill) for next steps."
+    )
+    assert re.search(r"\.\.\. and \d+ more", body)
+    assert "F199" not in body  # some rows really were dropped
