@@ -47,10 +47,17 @@ def _async_return(value):
 
 
 @pytest.fixture
-def _mint_mocks(monkeypatch):
+def _mint_mocks(monkeypatch, tmp_path):
     """Model on the mocking approach used by tests/test_mint_cdn_paths.py and
     tests/test_mint_issuer.py: stub every network/CDN/XRPL boundary so the
-    pipeline runs entirely in-process."""
+    pipeline runs entirely in-process.
+
+    Also isolates CWD to tmp_path: mint_flow._save_recovery_record writes a
+    CWD-relative failed_db_records/ path (#466), and every test using this
+    fixture is now able to reach it (a permanently-failing create_nft_offer
+    fake exhausts ensure_offer's retries) -- without this, that write lands
+    in the actual checkout (the #509 conftest guard catches it)."""
+    monkeypatch.chdir(tmp_path)
     captured: dict[str, Any] = {}
 
     async def fake_select(store):
@@ -72,6 +79,22 @@ def _mint_mocks(monkeypatch):
     async def fake_create_nft_offer(*args, **kwargs):
         return "OFFER1"
 
+    async def fake_get_nft_sell_offers(*args, **kwargs):
+        # offer_delivery.ensure_offer's adopt check (#466): no pre-existing
+        # live offer for a freshly minted token.
+        return []
+
+    async def fake_nft_info(*args, **kwargs):
+        # offer_delivery.ensure_offer's delivered check (#466): unknown ->
+        # fails closed, falls through to create (never a real RPC in tests).
+        return None
+
+    async def _no_sleep(*args, **kwargs):
+        # ensure_offer's inter-attempt backoff (#466, default base_delay=2.0)
+        # would otherwise add real wall-clock seconds to every test whose
+        # create_nft_offer fake fails at least once.
+        return None
+
     async def fake_create_accept_offer_payload(*args, **kwargs):
         captured["accept_kwargs"] = kwargs
         return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
@@ -86,6 +109,9 @@ def _mint_mocks(monkeypatch):
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
     monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_create_nft_offer)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", fake_get_nft_sell_offers)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", fake_nft_info)
+    monkeypatch.setattr(mint_flow.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(
         mint_flow.xumm_ops, "create_accept_offer_payload", fake_create_accept_offer_payload
     )
@@ -196,6 +222,64 @@ def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
     # subsequent offer step fails.
     assert res.traits == _expected_traits()
     assert res.body_type == "male"
+
+
+def test_mint_one_unit_offer_permanently_fails_lands_recovery_state(
+    monkeypatch, _mint_mocks, tmp_path
+):
+    """#466: a single mint whose NFTokenCreateOffer fails on every retry must
+    not dead-end with a generic "contact an administrator" message and zero
+    trace of the problem -- the NFT is safely on-chain, only delivery is
+    stuck. ensure_offer's exhausted-attempts path must land a recovery
+    record an administrator can act on, and the user-facing message must
+    say the mint succeeded, not that something needs a human to fix it.
+    (_mint_mocks already chdir'd CWD to this same tmp_path, so
+    failed_db_records/ lands here rather than in the checkout.)"""
+    create_calls = {"n": 0}
+
+    async def _always_fail(nft_id, destination, **kwargs):
+        create_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", _always_fail)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4021,
+            session_tag="job1:21",
+        )
+    )
+
+    assert res.nft_id == "NFTID1"  # minted on-chain regardless of the offer
+    assert res.offer_id is None
+    assert res.accept is None
+    assert create_calls["n"] == 3  # ensure_offer's default attempts, exhausted
+
+    assert res.error is not None
+    lowered = res.error.lower()
+    assert "contact an administrator" not in lowered
+    assert "minted" in lowered
+    # #571 review (Greptile P1 "Message Promises Missing Automation"): this
+    # path only ever writes a recovery record for a HUMAN to act on -- no
+    # automatic re-offer sweep exists (that is #518, explicitly deferred).
+    # The message must never claim otherwise, and must say the NFT is safe
+    # (held by the issuer, not lost).
+    assert "automatically" not in lowered
+    assert "no action needed" not in lowered
+    assert "issuer" in lowered
+    assert "not been lost" in lowered or "not lost" in lowered
+
+    record_path = tmp_path / "failed_db_records" / "nft_4021_minted_no_offer.json"
+    assert record_path.exists(), "expected a minted_no_offer recovery record on disk"
+    record = json.loads(record_path.read_text())
+    assert record["state"] == "minted_no_offer"
+    assert record["nft_id"] == "NFTID1"
+    assert record["wallet"] == "rUSER"
 
 
 def test_mint_one_unit_post_mint_exception_preserves_traits_and_body_type(monkeypatch, _mint_mocks):

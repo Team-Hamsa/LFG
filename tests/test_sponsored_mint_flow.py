@@ -2493,11 +2493,22 @@ def _stub_resume_success(monkeypatch):
     async def create_offer(*args, **kwargs):
         return "OFFER1"
 
+    async def get_nft_sell_offers(*args, **kwargs):
+        # offer_delivery.ensure_offer's adopt check (#466): nothing to adopt.
+        return []
+
+    async def nft_info(*args, **kwargs):
+        # offer_delivery.ensure_offer's delivered check (#466): unknown ->
+        # fails closed, falls through to create.
+        return None
+
     async def accept_payload(*args, **kwargs):
         return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
 
     monkeypatch.setattr(mint_flow.xrpl_ops, "submit_sponsored_mint", submit)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", get_nft_sell_offers)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", nft_info)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_accept_offer_payload", accept_payload)
     monkeypatch.setattr(mint_flow, "record_nft_mint", lambda **kwargs: True)
     monkeypatch.setattr(
