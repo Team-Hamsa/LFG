@@ -813,6 +813,15 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     async def fake_offer(nft_id, destination, **kwargs):
         return "OFFER456"
 
+    async def fake_get_nft_sell_offers(*args, **kwargs):
+        # offer_delivery.ensure_offer's adopt check (#466): nothing to adopt.
+        return []
+
+    async def fake_nft_info(*args, **kwargs):
+        # offer_delivery.ensure_offer's delivered check (#466): unknown ->
+        # fails closed, falls through to create.
+        return None
+
     async def fake_accept(offer_id, **kw):
         return {
             "qr_url": "https://xumm.test/qr.png",
@@ -842,6 +851,8 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload)
     monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_offer)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", fake_get_nft_sell_offers)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "nft_info", fake_nft_info)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_accept_offer_payload", fake_accept)
     monkeypatch.setattr(mint_flow.traits, "select_random_attributes", fake_select)
     monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
