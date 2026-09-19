@@ -8975,6 +8975,29 @@ async def handle_mint_active(request):
 _CLOSET_FILL_RESUME_WINDOW_SECONDS = 1800
 
 
+def _closet_pick_view(
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
+    """#503 (fix round 1): `has_live_bid`/a take-fill's ask scope uniqueness
+    per (owner, slot, value), so a wallet can hold several concurrent
+    non-terminal bids or fills at once -- the envelope has only one `closet`
+    slot, so pick the single best one to resume. Rank a row that still needs
+    the user's signature (view state == 'awaiting_signature' -- read off the
+    SAME _closet_bid_view/_closet_fill_view mapping every other closet
+    endpoint uses, never a second copy of that logic) ahead of one that's
+    merely settling/verifying; among equals (same tier) prefer the OLDEST
+    row -- it's closest to expiring, while the newest is likely still on the
+    user's own screen anyway. `candidates` is non-empty."""
+    _, view = min(
+        candidates,
+        key=lambda pair: (
+            0 if pair[1]["state"] == "awaiting_signature" else 1,
+            pair[0]["created_ts"],
+        ),
+    )
+    return view
+
+
 def _closet_resume_view(conn: sqlite3.Connection, wallet: str) -> dict[str, Any] | None:
     """#503: the `closet` entry for GET /api/sessions/active. A fill outranks
     a bid: it means BRIX or a trait has already moved and settlement is in
@@ -8985,16 +9008,16 @@ def _closet_resume_view(conn: sqlite3.Connection, wallet: str) -> dict[str, Any]
     closet_fill via MARKET_RESUME_RENDER/MARKET_STATUS_PATH) renders and
     polls a resumed entry exactly like the dedicated status endpoints do."""
     now = int(time.time())
-    fill = closet_market_store.unfinished_fill_for_wallet(
+    fills = closet_market_store.unfinished_fills_for_wallet(
         conn, wallet, since_ts=now - _CLOSET_FILL_RESUME_WINDOW_SECONDS
     )
-    if fill is not None:
-        return _closet_fill_view(fill, wallet)
-    order = closet_market_store.pending_bid_for_owner(
+    if fills:
+        return _closet_pick_view([(f, _closet_fill_view(f, wallet)) for f in fills])
+    orders = closet_market_store.pending_bids_for_owner(
         conn, wallet, since_ts=now - xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
     )
-    if order is not None:
-        return _closet_bid_view(order)
+    if orders:
+        return _closet_pick_view([(o, _closet_bid_view(o)) for o in orders])
     return None
 
 
@@ -9038,15 +9061,28 @@ async def handle_sessions_active(request):
     )
     # Closet Market bids/fills are durable DB rows, not in-memory sessions
     # (unlike every other flow above) -- _closet_resume_view queries them
-    # directly rather than going through pick()/_active_session. A DB hiccup
-    # here is a NEW failure surface next to six flows that can't fail (plain
-    # dict lookups) -- degrade to no closet resume rather than 500 the whole
-    # endpoint and strand every other flow's resume too.
-    try:
-        closet = await _closet_db(_closet_resume_view, wallet)
-    except Exception as e:
-        logging.warning(f"Closet Market resume lookup failed: {e!r}")
-        closet = None
+    # directly rather than going through pick()/_active_session. Gated on
+    # closet_market_settleable() -- the same tier as every other "view your
+    # own state" closet handler (handle_closet_bid_status, handle_closet_
+    # fill_status, handle_closet_orders_mine) -- so a disabled stack does no
+    # closet DB work on an endpoint that's polled by EVERY wallet on EVERY
+    # boot: a raw _closet_db call re-runs three ensure_schema/init_db
+    # executescript passes (nft_index.init_db + economy_store.
+    # init_economy_schema + closet_market_store.ensure_schema) per call, and
+    # an enabled stack would otherwise be doing that on a DB the mainnet
+    # listener is also writing, for a feature that's off. try/except stays
+    # broad and stays a fallback, not a narrower catch that could 500: a
+    # closet lookup failing must never take down mint/swap/market/economy/
+    # shop resume in the same payload, which can't fail (plain dict
+    # lookups). Logs the full traceback (not just repr(e)) since this is a
+    # brand-new failure surface with no prior incident history to pattern-
+    # match against.
+    closet = None
+    if config.closet_market_settleable():
+        try:
+            closet = await _closet_db(_closet_resume_view, wallet)
+        except Exception:
+            logging.error(f"Closet Market resume lookup failed: {traceback.format_exc()}")
 
     return web.json_response(
         {

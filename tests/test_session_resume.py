@@ -27,6 +27,7 @@ import time  # noqa: E402
 import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
+from cryptography.fernet import Fernet  # noqa: E402
 
 from lfg_core import (  # noqa: E402
     closet_market_store,
@@ -328,16 +329,25 @@ def closet_resume_env(dev_auth, tmp_path, monkeypatch):
     """Fresh per-test onchain.db (mirrors tests/test_closet_market_api.py's
     closet_env) with CLOSET_OWNER and CLOSET_SELLER both holding an active
     Closet, so the store-level create_pending_bid/create_ask/create_take_fill
-    calls below (no HTTP handler involved) don't refuse on closet_required."""
+    calls below (no HTTP handler involved) don't refuse on closet_required.
+    CLOSET_SELLER holds two DIFFERENT traits so a test can put two concurrent
+    fills in flight at once (fix round 1, #503) without colliding on
+    (owner, slot, value). CLOSET_MARKET_ENC_KEY is patched truthy so
+    config.closet_market_settleable() -- which now gates the closet DB
+    lookup in handle_sessions_active -- doesn't skip it (unset by default;
+    see test_closet_market_api.py's own closet_env fixture)."""
     path = str(tmp_path / "onchain_testnet.db")
     conn = init_onchain_db(path)
     economy_store.init_economy_schema(conn)
     for owner in (CLOSET_OWNER, CLOSET_SELLER):
         economy_store.set_closet_token(conn, owner, f"C-{owner}", "00", status=closet_token.ACTIVE)
-    economy_store.set_closet_contents(conn, CLOSET_SELLER, [("Hat", "Wizard Hat", 1)], [])
+    economy_store.set_closet_contents(
+        conn, CLOSET_SELLER, [("Hat", "Wizard Hat", 1), ("Eyes", "Laser Eyes", 1)], []
+    )
     conn.commit()
     conn.close()
     monkeypatch.setenv("ONCHAIN_DB_PATH", path)
+    monkeypatch.setattr(server.config, "CLOSET_MARKET_ENC_KEY", Fernet.generate_key().decode())
     return path
 
 
@@ -429,3 +439,70 @@ def test_indeterminate_fill_older_than_30min_excluded(dev_auth, closet_resume_en
 
     body = _active(dev_auth)
     assert body["closet"] is None
+
+
+# --- Closet Market resume: ranking among several candidates (fix round 1) ---
+# has_live_bid / a take-fill's ask scope uniqueness per (owner, slot, value),
+# so a wallet can genuinely hold several concurrent non-terminal bids or
+# fills. The envelope keeps its single `closet` slot -- the fix is WHICH one
+# wins: a row still needing the user's signature outranks one that's merely
+# settling, and among equals the OLDEST wins (closest to expiring).
+
+
+def test_older_awaiting_signature_fill_outranks_newer_settling_fill(dev_auth, closet_resume_env):
+    """Greptile P1 / task review: unfinished_fills_for_wallet used to collapse
+    to newest-created, which could hide an older fill still waiting on the
+    buyer's Payment signature behind a newer one that's merely settling."""
+    conn = _closet_conn(closet_resume_env)
+    ask1 = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Hat", value="Wizard Hat", price_brix="10", platform=None
+    )
+    ask2 = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Eyes", value="Laser Eyes", price_brix="10", platform=None
+    )
+    older_awaiting = closet_market_store.create_take_fill(
+        conn, ask1["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 600
+    )
+    newer_settling = closet_market_store.create_take_fill(
+        conn, ask2["id"], CLOSET_OWNER, fee_bps=0, platform=None, now=int(time.time()) - 120
+    )
+    closet_market_store.update_fill(conn, newer_settling["id"], state=closet_market_store.FUNDED)
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["id"] == older_awaiting["id"]
+    assert body["closet"]["state"] == "awaiting_signature"
+
+
+def test_fill_outranks_bid_when_both_eligible(dev_auth, closet_resume_env):
+    """The fill-outranks-bid branch in _closet_resume_view had no test
+    exercising both a live bid AND a live fill for the same wallet at once
+    (fix round 1 item 4) -- a reorder or deletion of that branch would have
+    passed every other test silently."""
+    conn = _closet_conn(closet_resume_env)
+    closet_market_store.create_pending_bid(
+        conn,
+        owner=CLOSET_OWNER,
+        slot="Hat",
+        value="Wizard Hat",
+        price_brix="10",
+        platform=None,
+        condition="COND",
+        fulfillment_enc="SEALED",
+        cancel_after=9_999_999_999,
+        payload_uuid="U1",
+        xumm_url="https://xumm.app/sign/u1",
+        qr_url="https://xumm.app/qr/u1",
+        push=None,
+    )
+    ask = closet_market_store.create_ask(
+        conn, owner=CLOSET_SELLER, slot="Eyes", value="Laser Eyes", price_brix="10", platform=None
+    )
+    fill = closet_market_store.create_take_fill(
+        conn, ask["id"], CLOSET_OWNER, fee_bps=0, platform=None
+    )
+    conn.close()
+
+    body = _active(dev_auth)
+    assert body["closet"]["kind"] == "closet_fill"
+    assert body["closet"]["id"] == fill["id"]
