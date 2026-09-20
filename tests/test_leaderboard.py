@@ -93,10 +93,15 @@ def test_users_swaps_and_nft_swaps():
     assert rows[0]["nft_id"] == "N1" and rows[0]["value"] == 3
 
 
-def _rebirth(h, *, edition, old_id, new_id, wallet, memo_action=None, prefix=""):
+def _rebirth(h, o, *, edition, old_id, new_id, wallet, memo_action=None, prefix=""):
     """Seed a burn -> remint -> issuer delivery of one edition. The burn's
     from_addr is the token's holder at burn time — for a legacy swap that IS
-    the swapper (the issuer burns the burnable token in the user's wallet)."""
+    the swapper (the issuer burns the burnable token in the user's wallet).
+
+    Both tokens are registered in the collection index: a rebirth is by
+    definition an edition, and every board is scoped to the index."""
+    _member(o, old_id, edition, wallet)
+    _member(o, new_id, edition, wallet)
     _ev(
         h,
         tx_hash=f"{prefix}b{edition}",
@@ -134,9 +139,9 @@ def test_users_builds_counts_only_assemble_rebirths():
     those and zero assembles; they were all showing up as builds)."""
     h, o = _dbs()
     # real assemble: rebirth whose mint is memo-stamped action=assemble
-    _rebirth(h, edition=7, old_id="OLD", new_id="NEW", wallet="rA", memo_action="assemble")
+    _rebirth(h, o, edition=7, old_id="OLD", new_id="NEW", wallet="rA", memo_action="assemble")
     # legacy remint swap: identical on-chain shape, no memo -> NOT a build
-    _rebirth(h, edition=8, old_id="OLD8", new_id="NEW8", wallet="rB")
+    _rebirth(h, o, edition=8, old_id="OLD8", new_id="NEW8", wallet="rB")
     # non-rebirth issuer transfer must not count either
     _ev(h, tx_hash="m2", event="mint", nft_id="N9", nft_number=9, to_addr=ISSUER, ts=20)
     _ev(
@@ -160,9 +165,9 @@ def test_swap_boards_count_legacy_remint_swaps():
     the swap boards must count rebirth deliveries too — except assembles."""
     h, o = _dbs()
     # legacy remint swap for rA (edition 5) — counts as a swap
-    _rebirth(h, edition=5, old_id="OLD5", new_id="NEW5", wallet="rA")
+    _rebirth(h, o, edition=5, old_id="OLD5", new_id="NEW5", wallet="rA")
     # assemble for rB (edition 6) — a build, NOT a swap
-    _rebirth(h, edition=6, old_id="OLD6", new_id="NEW6", wallet="rB", memo_action="assemble")
+    _rebirth(h, o, edition=6, old_id="OLD6", new_id="NEW6", wallet="rB", memo_action="assemble")
     # modern modify swap for rA on the same edition 5 — still counts
     _member(o, "NEW5", 5, "rA")
     _ev(h, tx_hash="mod", event="modify", nft_id="NEW5", nft_number=5, to_addr="rA", ts=40)
@@ -184,6 +189,8 @@ def test_swap_counted_from_burn_alone_without_delivery_transfer():
     leg undercounted 26x. A burn followed by a remint of the same edition IS
     the swap, attributed to the burn's holder; no delivery event needed."""
     h, o = _dbs()
+    _member(o, "OLD5", 5, "rA")
+    _member(o, "NEW5", 5, ISSUER)
     _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
     _ev(h, tx_hash="m1", event="mint", nft_id="NEW5", nft_number=5, to_addr=ISSUER, ts=20)
     rows = leaderboard.compute(
@@ -234,6 +241,8 @@ def test_harvest_burn_before_assemble_is_not_a_swap():
 
 def test_swap_windowing_keys_on_burn_time():
     h, o = _dbs()
+    _member(o, "OLD5", 5, "rA")
+    _member(o, "NEW5", 5, ISSUER)
     _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
     _ev(h, tx_hash="m1", event="mint", nft_id="NEW5", nft_number=5, to_addr=ISSUER, ts=50)
     in_window = leaderboard.compute(
@@ -253,9 +262,13 @@ def test_nft_swaps_reports_live_token_id_not_lexicographic_max():
     edition's live nft_id from the on-chain index."""
     h, o = _dbs()
     _ev(h, tx_hash="modold", event="modify", nft_id="OLD5", nft_number=5, to_addr="rA", ts=5)
-    _rebirth(h, edition=5, old_id="OLD5", new_id="NEW5", wallet="rA")
-    o.execute("INSERT INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('OLD5', 5, 1)")
-    o.execute("INSERT INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('NEW5', 5, 0)")
+    _rebirth(h, o, edition=5, old_id="OLD5", new_id="NEW5", wallet="rA")
+    o.execute(
+        "INSERT OR REPLACE INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('OLD5', 5, 1)"
+    )
+    o.execute(
+        "INSERT OR REPLACE INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('NEW5', 5, 0)"
+    )
     o.commit()
     rows = leaderboard.compute(
         "nft_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
@@ -424,7 +437,7 @@ def test_limit_parameter_threads_through():
 def _member(o, nft_id, number=None, owner=None):
     """Register a token in the collection index (what makes it a character)."""
     o.execute(
-        "INSERT INTO onchain_nfts (nft_id, nft_number, owner) VALUES (?,?,?)",
+        "INSERT OR REPLACE INTO onchain_nfts (nft_id, nft_number, owner) VALUES (?,?,?)",
         (nft_id, number, owner),
     )
     o.commit()
@@ -648,3 +661,30 @@ def test_users_nfts_windowed_skips_a_redelivery_whose_first_hop_predates_the_win
         )
         == []
     )
+
+
+def test_swap_boards_ignore_a_non_collection_burn_and_remint():
+    """The burn leg is scoped too. Unreachable in today's archive - an event's
+    nft_number is only ever filled by looking the token up in the index, so a
+    non-NULL edition already implies membership and mainnet has zero rows that
+    carry one without it - but the query should not lean on how that column
+    happens to be populated (CodeRabbit on PR #578)."""
+    h, o = _dbs()
+    # a burn + remint pair sharing an edition number, neither one indexed
+    _ev(h, tx_hash="xb", event="burn", nft_id="XOLD", nft_number=5, from_addr="rA", ts=10)
+    _ev(h, tx_hash="xm", event="mint", nft_id="XNEW", nft_number=5, to_addr=ISSUER, ts=20)
+    for board in ("users_swaps", "nft_swaps"):
+        assert (
+            leaderboard.compute(
+                board, h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+            )
+            == []
+        ), board
+    # once both are collection members it counts again, so the scope is the
+    # only thing that suppressed it
+    _member(o, "XOLD", 5, "rA")
+    _member(o, "XNEW", 5, ISSUER)
+    rows = leaderboard.compute(
+        "users_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]

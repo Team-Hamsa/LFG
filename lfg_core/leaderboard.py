@@ -210,6 +210,7 @@ _BURN_SWAP_EXISTS = """EXISTS (
             SELECT 1 FROM nft_events m
              WHERE m.event = 'mint' AND m.nft_number = b.nft_number
                AND m.nft_id != b.nft_id AND m.ts >= b.ts
+               AND m.nft_id IN (SELECT nft_id FROM {scope})
                AND (m.memo_action IS NULL OR m.memo_action != 'assemble')
                AND NOT EXISTS (
                    SELECT 1 FROM nft_events m2
@@ -219,15 +220,25 @@ _BURN_SWAP_EXISTS = """EXISTS (
           )"""
 
 
-def _burn_swap_sql(select_cols: str, group_by: str, excl: str) -> str:
+def _burn_swap_sql(select_cols: str, group_by: str, excl: str, scope: str) -> str:
     """Legacy-swap subquery over burns. Param order: (start_ts, end_ts,
-    *exclude_params). Windowed on the burn's timestamp."""
+    *exclude_params). Windowed on the burn's timestamp.
+
+    Scoped to the collection like the modify leg. That is belt-and-braces
+    rather than a live fix: `nft_number` is only ever populated by looking
+    the token up in the index, so a non-NULL edition already implies
+    membership, and mainnet has zero rows that carry one without it. The
+    implication is implicit though, and an implicit "this row must be a
+    character" is precisely what put Closet tokens on this board — so say it
+    in the query instead of relying on how the column gets filled.
+    """
     return f"""
         SELECT {select_cols}, COUNT(*) AS value
         FROM nft_events b
         WHERE b.event = 'burn' AND b.nft_number IS NOT NULL
           AND b.ts >= ? AND b.ts < ?
-          AND {_BURN_SWAP_EXISTS}{excl}
+          AND b.nft_id IN (SELECT nft_id FROM {scope})
+          AND {_BURN_SWAP_EXISTS.format(scope=scope)}{excl}
         GROUP BY {group_by}
     """
 
@@ -279,17 +290,21 @@ def _first_delivery_sql(
     """
 
 
-def _rebirth_sql(select_cols: str, group_by: str, memo_cond: str, issuer_ph: str, excl: str) -> str:
+def _rebirth_sql(
+    select_cols: str, group_by: str, memo_cond: str, issuer_ph: str, excl: str, scope: str
+) -> str:
     """Rebirth-delivery subquery. Param order: (*issuers, start_ts, end_ts,
     *exclude_params). Any system account counts as a delivering issuer —
     broader than strictly the NFT issuer, but harmless since only the NFT
-    issuer mints/burns NFTs."""
+    issuer mints/burns NFTs. Collection-scoped for the same reason as
+    `_burn_swap_sql`."""
     return f"""
         SELECT {select_cols}, COUNT(*) AS value
         FROM nft_events t
         JOIN nft_events m ON m.nft_id = t.nft_id AND m.event = 'mint'
         WHERE t.event IN ('transfer','sale') AND t.from_addr IN ({issuer_ph})
           AND t.ts >= ? AND t.ts < ?
+          AND t.nft_id IN (SELECT nft_id FROM {scope})
           AND {memo_cond}
           AND EXISTS (SELECT 1 FROM nft_events b
                       WHERE b.event='burn' AND b.nft_number = t.nft_number
@@ -308,13 +323,13 @@ def _board_users_swaps(
 ) -> list[Row]:
     excl_mod, excl_mod_params = _exclude_clause("to_addr", system_accounts)
     excl_burn, excl_burn_params = _exclude_clause("b.from_addr", system_accounts)
-    burn_swaps = _burn_swap_sql(
-        "b.from_addr AS wallet", "b.from_addr", " AND b.from_addr IS NOT NULL" + excl_burn
-    )
-    # The modify leg is scoped to the collection: 902 of mainnet's 1,512
+    # Both legs are scoped to the collection: 902 of mainnet's 1,512
     # NFTokenModify events are the owner's Closet token being re-stamped by an
     # economy op, which is not a trait swap.
     scope = _collection_scope(hconn, oconn)
+    burn_swaps = _burn_swap_sql(
+        "b.from_addr AS wallet", "b.from_addr", " AND b.from_addr IS NOT NULL" + excl_burn, scope
+    )
     sql = f"""
         SELECT wallet, SUM(value) AS value FROM (
             SELECT to_addr AS wallet, COUNT(*) AS value FROM nft_events
@@ -348,8 +363,11 @@ def _board_users_builds(
     issuers = list(system_accounts) if system_accounts else [None]
     excl, excl_params = _exclude_clause("t.to_addr", system_accounts)
     issuer_ph = ",".join("?" * len(issuers))
+    scope = _collection_scope(hconn, oconn)
     sql = (
-        _rebirth_sql("t.to_addr AS wallet", "t.to_addr", _REBIRTH_IS_ASSEMBLE, issuer_ph, excl)
+        _rebirth_sql(
+            "t.to_addr AS wallet", "t.to_addr", _REBIRTH_IS_ASSEMBLE, issuer_ph, excl, scope
+        )
         + " ORDER BY value DESC LIMIT ?"
     )
     params = (*issuers, start_ts, end_ts, *excl_params, limit)
@@ -365,12 +383,14 @@ def _board_nft_swaps(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    burn_swaps = _burn_swap_sql("b.nft_id AS nft_id, b.nft_number AS nft_number", "b.nft_id", "")
     # Keyed per edition (a remint swap changes the token's nft_id); rows with
     # no known edition fall back to keying on nft_id. That fallback is what
     # gave every Closet token its own blank row (no edition, no art) at the
-    # top of the board — hence the collection scope on the modify leg.
+    # top of the board — hence the collection scope on both legs.
     scope = _collection_scope(hconn, oconn)
+    burn_swaps = _burn_swap_sql(
+        "b.nft_id AS nft_id, b.nft_number AS nft_number", "b.nft_id", "", scope
+    )
     sql = f"""
         SELECT MAX(nft_id) AS nft_id, MAX(nft_number) AS nft_number, SUM(value) AS value FROM (
             SELECT nft_id, nft_number, COUNT(*) AS value FROM nft_events
