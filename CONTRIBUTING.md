@@ -74,9 +74,10 @@ tests a change can skip. Two things make that affordable:
   `/dev/shm` is world-writable, and the suite executes shims it writes under
   `tmp_path`), proves exec works there, and gets out of the way on any doubt:
   an explicit `TMPDIR` from you always wins, and a failed check just means the
-  default and a slower run. A green run deletes the scratch dir; a red one
-  keeps it and prints the path, so the failing tests' `tmp_path` trees are
-  still there to look at.
+  default and a slower run. A green run leaves that directory empty, because
+  pytest keeps `tmp_path` trees only for FAILED tests — so after a red run,
+  `ls -dt /dev/shm/lfg-pytest.*` finds the artefacts. They are reaped on the
+  next run that is more than six hours later.
 - **`-n auto`** (pytest-xdist), with `--dist loadfile` so a module's tests — and
   its module-level state — stay on one worker.
 

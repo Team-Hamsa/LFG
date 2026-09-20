@@ -29,14 +29,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # tmpfs surfaces as unrelated ENOSPC failures).
 MIN_FREE_KIB=$((4 * 1024 * 1024))
 
-scratch=""
-
-discard_scratch() {
-    [[ -n $scratch && -d $scratch ]] || return 0
-    rm -rf -- "$scratch" 2>/dev/null || true
-    scratch=""
-}
-
 # Echo a private scratch dir on a usable tmpfs, or fail. Called from an `if`,
 # so errexit is suspended inside it -- every step states its own failure.
 make_scratch() {
@@ -71,60 +63,36 @@ make_scratch() {
 }
 
 if [[ -z "${TMPDIR:-}" ]]; then
-    # Reap our own leftovers from earlier failed runs (see the exit path
-    # below). Only directories this user owns can match, and a hostile user
-    # cannot create one owned by us.
+    # Reap our own leftovers before making a new one. There is no
+    # after-the-run cleanup below -- `exec` leaves nothing to run it -- and
+    # none is needed: a green run leaves an EMPTY directory, because pyproject
+    # keeps tmp_path trees only for FAILED tests (measured: 0 bytes after a
+    # green full suite). So what accumulates here is the evidence from failed
+    # runs, which is worth keeping around a while: `ls -dt /dev/shm/lfg-pytest.*`
+    # finds the most recent. Six hours is long enough to still be debugging one
+    # and short enough to bound what sits in RAM.
+    #
+    # Only directories this user owns can match, and /dev/shm's sticky bit
+    # stops anyone else renaming one out from under the rm.
     find /dev/shm -maxdepth 1 -type d -user "$(id -u)" -name 'lfg-pytest.*' \
-        -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
+        -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
 
     if scratch="$(make_scratch)"; then
         export TMPDIR="$scratch"
-    else
-        scratch=""
     fi
 fi
 
-# Dropping `exec` (we need to clean up afterwards) means signals now land on
-# this shell, not on pytest -- and bash defers a trap until the running
-# foreground command returns, so a plain `kill` would leave the suite running
-# and the scratch dir behind. Run pytest as a tracked child and relay instead.
+# exec, deliberately. The wrapper has no work left once pytest starts, and
+# replacing this shell is what makes signals behave -- both alternatives are
+# broken, in opposite directions:
 #
-# A terminal Ctrl-C reaches pytest directly too (a background job in a script
-# stays in the shell's process group), so pytest sees that one twice and takes
-# its abort-now path. That is the right answer for an interrupt, and relaying
-# is what makes `kill -INT <pid>` work at all.
-pytest_pid=""
-cancelled=""
-
-relay() {
-    cancelled=1
-    [[ -n $pytest_pid ]] || return 0
-    kill -"$1" "$pytest_pid" 2>/dev/null || true
-}
-
-trap 'relay INT' INT
-trap 'relay TERM' TERM
-
-set +e
-"$here/venv-python" -m pytest "$@" &
-pytest_pid=$!
-# `wait` returns the moment a trapped signal arrives, before the child has
-# finished reacting to it, so keep waiting until the child is genuinely gone.
-while :; do
-    wait "$pytest_pid"
-    status=$?
-    kill -0 "$pytest_pid" 2>/dev/null || break
-done
-set -e
-
-# A green run has nothing worth keeping, and neither has a cancelled one. A
-# red one does: pyproject sets tmp_path_retention_policy = "failed", so the
-# failing tests' trees are still in there -- say where, rather than deleting
-# the evidence.
-if (( status == 0 )) || [[ -n $cancelled ]]; then
-    discard_scratch
-elif [[ -n $scratch ]]; then
-    printf 'test scratch kept for debugging: %s\n' "$scratch" >&2
-fi
-
-exit "$status"
+#   * a background child (`cmd &`) starts with SIGINT and SIGQUIT set to
+#     IGNORE, because POSIX says an asynchronous list in a shell without job
+#     control does, and CPython keeps an inherited SIG_IGN. Ctrl-C would never
+#     reach the suite.
+#   * a foreground child defers a trapped SIGTERM until pytest returns, so
+#     cancelling would leave the run going.
+#
+# exec hands pytest the signals, the terminal (so -s and --pdb still work) and
+# the exit status, with no relaying to get wrong.
+exec "$here/venv-python" -m pytest "$@"
