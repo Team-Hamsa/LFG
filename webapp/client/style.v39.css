@@ -1221,9 +1221,29 @@ button.back:hover { color: var(--text); border: none; }
 .lb-me { margin: 8px 0 0; font-size: .82rem; color: var(--muted); }
 
 /* Mint odds transparency (#494 Option A) */
-.odds-slot { margin-top: 16px; text-align: left; }
-.odds-slot-title { margin: 0 0 6px; font-size: .95rem; color: var(--text); }
-.odds-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.odds-slot {
+  margin-top: 8px; text-align: left;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+}
+/* Collapsible slot header: the whole summary row is the hit target. */
+.odds-slot-title {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; padding: 10px 12px; font-size: .95rem; font-weight: 700;
+  color: var(--text); cursor: pointer; list-style: none; user-select: none;
+  border-radius: 10px;
+}
+.odds-slot-title::-webkit-details-marker { display: none; }
+.odds-slot-title::after {
+  content: '\25be'; margin-left: auto; color: var(--muted); font-size: .9rem;
+  transition: transform .15s ease;
+}
+.odds-slot[open] > .odds-slot-title::after { transform: rotate(180deg); }
+.odds-slot[open] > .odds-slot-title { border-bottom: 1px solid var(--line); border-radius: 10px 10px 0 0; }
+.odds-slot-title:hover { background: var(--surface-2); }
+.odds-slot-title:focus-visible { outline: 2px solid var(--accent, var(--text)); outline-offset: 2px; }
+.odds-slot-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.odds-slot-count { flex: 0 0 auto; color: var(--muted); font-size: .75rem; font-weight: 600; }
+.odds-list { list-style: none; margin: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .odds-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 8px; border-radius: 8px; background: var(--surface-2);
