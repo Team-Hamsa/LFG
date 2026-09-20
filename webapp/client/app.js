@@ -1604,16 +1604,34 @@ function renderOddsRow(row) {
   return li;
 }
 
+// Which slots the user has opened. Module-level so switching body chips (a
+// full re-render) keeps the sections the user expanded expanded.
+const oddsOpenSlots = new Set();
+
 function renderOddsSlots(slots) {
   const sections = Object.keys(slots).map((slot) => {
-    const section = document.createElement('div');
+    const rows = slots[slot];
+    // <details>/<summary>: collapsed by default -- the full list across
+    // every slot is far too long to scroll through.
+    const section = document.createElement('details');
     section.className = 'odds-slot';
-    const heading = document.createElement('h4');
+    section.open = oddsOpenSlots.has(slot);
+    section.addEventListener('toggle', () => {
+      if (section.open) oddsOpenSlots.add(slot);
+      else oddsOpenSlots.delete(slot);
+    });
+    const heading = document.createElement('summary');
     heading.className = 'odds-slot-title';
-    heading.textContent = slot;
+    const name = document.createElement('span');
+    name.className = 'odds-slot-name';
+    name.textContent = slot;
+    const count = document.createElement('span');
+    count.className = 'odds-slot-count';
+    count.textContent = `${rows.length} trait${rows.length === 1 ? '' : 's'}`;
+    heading.replaceChildren(name, count);
     const list = document.createElement('ul');
     list.className = 'odds-list';
-    list.replaceChildren(...slots[slot].map(renderOddsRow));
+    list.replaceChildren(...rows.map(renderOddsRow));
     section.replaceChildren(heading, list);
     return section;
   });
