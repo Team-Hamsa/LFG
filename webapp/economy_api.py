@@ -314,18 +314,20 @@ async def _resolve_body_classes(
     a value found under `<class>/Body/` resolves to that class. Only values
     the genesis does not cover are looked up, classes are walked in sorted
     order so a value present in two dirs resolves deterministically, and a
-    value with no art anywhere stays unmapped (the caller drops it) -- as does
-    one whose only art is in `shared/`, which `list_values` returns for EVERY
-    class and which therefore names no class at all.
+    value with art only in `shared/` stays unmapped, and so does one with no
+    art at all (the caller drops both). The lookup reads each class's OWN
+    Body dir rather than `list_values`, whose shared/ union would report a
+    shared body under every class and so name none of them; a value with
+    both keeps the class its own art names, since shared/ is then just its
+    fallback rendering elsewhere.
     """
     mapped = {v: c for v, c in trait_economy.body_class_map(genesis).items() if v in held}
     missing = held - set(mapped)
     if not missing:
         return mapped
-    shared = set(await store.list_values(layer_store.SHARED_DIR, "Body"))
     for body_class in await store.list_bodies():
-        for value in await store.list_values(body_class, "Body"):
-            if value in missing and value not in shared:
+        for value in await store.list_own_values(body_class, "Body"):
+            if value in missing:
                 mapped.setdefault(value, body_class)
         missing -= set(mapped)
         if not missing:

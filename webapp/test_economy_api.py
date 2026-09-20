@@ -50,6 +50,9 @@ class _PermissiveLayerStore:
     async def list_values(self, body: str, trait_type: str) -> list[str]:
         return []
 
+    async def list_own_values(self, body: str, trait_type: str) -> list[str]:
+        return []
+
 
 def _stub_permissive_layer_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: _PermissiveLayerStore())
@@ -891,7 +894,10 @@ def _mk_body_gate_layers(tmp_path):
         ("milady", "Body", ["Curved Light Milady"]),
         # Body art in shared/ is returned by list_values for EVERY class, so
         # it names no class of its own -- the fallback must not invent one.
-        ("shared", "Body", ["Ghost Shell"]),
+        ("shared", "Body", ["Ghost Shell", "Spirit Frame"]),
+        # ...but a value that ALSO has class-local art is named by that art:
+        # shared/ is only its fallback for the other classes.
+        ("skeleton", "Body", ["Spirit Frame"]),
     ]:
         d = tmp_path / "layers" / body / trait_type
         d.mkdir(parents=True, exist_ok=True)
@@ -1340,6 +1346,22 @@ def test_assemble_options_shared_body_art_names_no_class(monkeypatch, body_gate_
     out = asyncio.get_event_loop().run_until_complete(go())
     assert out["bodies"] == []
     assert out["body_class"] == {}
+
+
+def test_assemble_options_shared_plus_class_local_body_uses_the_class(monkeypatch, body_gate_store):
+    """Shared Body art does not disqualify a value that also has class-local
+    art -- the class dir is what names the class, shared/ is only the
+    fallback rendering for the others. Dropping it would hide a renderable
+    owned body from the Builder and make start_assemble reject it."""
+    conn = _options_conn({}, [("Body", "Spirit Frame", 1)])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == ["Spirit Frame"]
+    assert out["body_class"] == {"Spirit Frame": "skeleton"}
 
 
 def test_start_assemble_body_outside_genesis_resolves_from_layers(monkeypatch, body_gate_store):
