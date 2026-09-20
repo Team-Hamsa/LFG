@@ -39,6 +39,11 @@ def release(session_id: str) -> None:
     _owned.pop(session_id, None)
 
 
+def reset() -> None:
+    """Drop every claim. For tests — the registry is process-global."""
+    _owned.clear()
+
+
 def owns(session_id: str) -> bool:
     """True while the chat handler owns this session's artwork delivery.
 

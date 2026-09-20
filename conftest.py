@@ -273,6 +273,20 @@ def _reset_xrpl_rpc_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_telegram_delivery_claims() -> Iterator[None]:
+    # surfaces.telegram_bot.delivered is a process-level LRU of the mint
+    # sessions whose artwork the /mint chat handler owns (#591). It is bounded,
+    # so one test's leftover claims can evict another's and flip a DM
+    # suppression either way. Scrub around every test. (The module imports
+    # nothing, so this lazy import freezes no config.)
+    from surfaces.telegram_bot import delivered
+
+    delivered.reset()
+    yield
+    delivered.reset()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_payment_ledger(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     # wait_for_payment now records consumed payments (issue #196); point the
     # ledger at a per-test file so tests never write the real app DB and a

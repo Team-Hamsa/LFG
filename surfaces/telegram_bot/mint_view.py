@@ -16,6 +16,35 @@ from surfaces._shared.mint_result import BAD_STATE_MESSAGES, MINT_OK_STATES, fri
 from surfaces.telegram_bot import delivered, render
 
 
+async def _send_artwork(
+    bot: Any, chat_id: Any, user_id: str, artwork_url: str, final: dict[str, Any]
+) -> bool:
+    """Show the minter their artwork. Returns whether it actually landed.
+
+    Claiming the session (#591) means the firehose has already skipped its DM
+    for this mint, and the bus does not replay a consumed event — so a failed
+    send here is the minter's last chance at the image, and it must not take
+    the claim QR down with it either. In a group chat the DM is a different
+    chat and usually still works; in the bot's own DM the retry is the same
+    media to the same chat, so it is skipped (the firehose DM it replaced
+    would have failed for the same reason).
+    """
+    caption = render.artwork_caption(final)
+    try:
+        await render.send_media(bot, chat_id, artwork_url, caption)
+        return True
+    except Exception as e:
+        logging.warning(f"artwork send to chat {chat_id} failed: {e}")
+    if str(chat_id) == user_id:
+        return False
+    try:
+        await render.send_media(bot, int(user_id), artwork_url, caption)
+        return True
+    except Exception as e:
+        logging.warning(f"artwork DM to {user_id} failed: {e}")
+        return False
+
+
 async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     bot = context.bot
     chat_id = update.effective_chat.id
@@ -82,8 +111,7 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
         # prefer it so the animation actually plays.
         artwork_url = final.get("video_url") or final.get("image_url")
         if artwork_url:
-            await render.send_media(bot, chat_id, artwork_url, render.artwork_caption(final))
-            artwork_shown = True
+            artwork_shown = await _send_artwork(bot, chat_id, user_id, artwork_url, final)
 
         # 4. offer-accept QR. Prefer the service-hosted accept_qr_url (no extra
         #    round-trip); otherwise render the accept deeplink ourselves.

@@ -27,12 +27,27 @@ class _Bot:
         self.messages.append((chat_id, text))
 
 
-def _update_ctx(bot, uid="55"):
+def _update_ctx(bot, uid="55", chat_id=999):
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=int(uid), username="tg", full_name="TG User"),
-        effective_chat=SimpleNamespace(id=999),
+        effective_chat=SimpleNamespace(id=chat_id),
     )
     return update, SimpleNamespace(bot=bot, args=[])
+
+
+class _MediaFailsBot(_Bot):
+    """Rejects the artwork URL for `fail_chat_id`, like Telegram refusing a
+    media send. Everything else (QRs, text) still goes through."""
+
+    def __init__(self, artwork_url, fail_chat_id):
+        super().__init__()
+        self._artwork_url = artwork_url
+        self._fail_chat_id = fail_chat_id
+
+    async def send_photo(self, chat_id, photo, caption=None):
+        if photo == self._artwork_url and chat_id == self._fail_chat_id:
+            raise RuntimeError("Bad Request: wrong file identifier")
+        await super().send_photo(chat_id, photo, caption)
 
 
 class _Svc:
@@ -196,6 +211,57 @@ def test_dm_still_sent_for_an_unclaimed_session():
     sent, dmed = _drive_events(_completed("dedupe-ev-2"))
     assert len(sent) == 1
     assert dmed == [("55", sent[0][0], "https://cdn/art.png")]
+
+
+# --- the artwork has to reach the minter somehow ----------------------------
+#
+# Claiming the session means the firehose already skipped its DM, and the bus
+# does not replay a consumed event — so a failed in-chat send must not leave
+# the minter with no artwork at all, and must not take the claim QR with it.
+
+
+def _final_with_art():
+    return {
+        "state": "offer_ready",
+        "nft_number": 3600,
+        "image_url": "https://cdn/art.png",
+        "accept_deeplink": "https://accept",
+    }
+
+
+def test_group_mint_falls_back_to_a_dm_when_the_chat_send_fails():
+    bot = _MediaFailsBot("https://cdn/art.png", fail_chat_id=999)
+    update, ctx = _update_ctx(bot, uid="55", chat_id=999)
+    svc = _Svc(
+        start={"id": "dedupe-art-1", "payment_link": "https://pay"},
+        final=_final_with_art(),
+    )
+    _run(mint_view.handle_mint(svc, update, ctx))
+
+    # the artwork landed in the minter's DM instead of the group
+    art = [p for p in bot.photos if p[1] == "https://cdn/art.png"]
+    assert len(art) == 1
+    assert art[0][0] == 55
+    # it arrived, so the claim stands and the firehose stays quiet
+    assert delivered.owns("dedupe-art-1")
+    # and the mint still finishes: the claim QR is not collateral damage
+    assert any(p[1] != "https://cdn/art.png" for p in bot.photos[1:])
+
+
+def test_dm_mint_releases_the_claim_when_the_artwork_send_fails():
+    # chat_id == the user's id: retrying the same media in the same chat is
+    # pointless, so the claim goes back and the firehose DM is unsuppressed
+    bot = _MediaFailsBot("https://cdn/art.png", fail_chat_id=55)
+    update, ctx = _update_ctx(bot, uid="55", chat_id=55)
+    svc = _Svc(
+        start={"id": "dedupe-art-2", "payment_link": "https://pay"},
+        final=_final_with_art(),
+    )
+    _run(mint_view.handle_mint(svc, update, ctx))
+
+    assert [p for p in bot.photos if p[1] == "https://cdn/art.png"] == []
+    assert not delivered.owns("dedupe-art-2")
+    assert any(p[1] != "https://cdn/art.png" for p in bot.photos[1:])
 
 
 def test_claimed_session_stays_suppressed_across_a_double_publish():
