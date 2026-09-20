@@ -130,6 +130,53 @@ function traits(mine, closetMarketEnabled) {
   return out.sort((a, b) => (a.dim === b.dim ? 0 : a.dim ? 1 : -1));
 }
 
+const ORDER_STATE_TEXT = {
+  pending_escrow: 'awaiting signature', open: 'open', matched: 'filling', cancelling: 'cancelling',
+};
+
+// matched ("filling") and cancelling admit no user action — they stay in
+// Selling/Buying wearing a state chip rather than climbing into Needs you.
+function orderItem(order, unit) {
+  const actionable = order.state === 'open';
+  return item({
+    unit,
+    key: `order:${order.id}`,
+    imageUrl: order.image_url || null,
+    title: traitTitle(order.slot, order.value),
+    price: { amount: order.price_brix, currency: 'BRIX' },
+    state: order.state === 'open' ? null : { label: ORDER_STATE_TEXT[order.state] ?? order.state },
+    action: actionable
+      ? { label: 'Cancel', kind: 'cancelClosetOrder', payload: { id: order.id, side: order.side } }
+      : null,
+  });
+}
+
+function listingItem(row) {
+  const isTrait = row.kind === 'trait';
+  return item({
+    unit: 'card',
+    key: `listing:${row.offer_index}`,
+    image: isTrait ? null : row.image || null,
+    imageUrl: isTrait ? row.image || null : null,
+    title: isTrait ? traitTitle(row.slot, row.value) : characterTitle(row),
+    price: isTrait
+      ? { amount: row.amount_brix, currency: 'BRIX' }
+      : { amount: row.amount_xrp, currency: 'XRP' },
+    action: { label: 'Cancel', kind: 'cancelListing', payload: row },
+  });
+}
+
+function bidItem(bid, { kind, label }) {
+  return item({
+    unit: 'row',
+    key: `bid:${bid.offer_index}`,
+    image: bid.image || null,
+    title: characterTitle(bid),
+    price: { amount: bid.amount_xrp, currency: 'XRP' },
+    action: { label, kind, payload: bid },
+  });
+}
+
 export function buildMine({
   mine = {}, bids = {}, closet = {}, wallet = null, closetMarketEnabled = false,
 } = {}) {
@@ -137,9 +184,20 @@ export function buildMine({
     characters: unlistedCharacters(mine),
     traits: traits(mine, closetMarketEnabled),
   };
+  const liveOrders = closet.orders || [];
+  const selling = [
+    ...(mine.listings || []).map(listingItem),
+    ...liveOrders
+      .filter((o) => o.side === 'ask' && o.state !== 'pending_escrow')
+      .map((o) => orderItem(o, 'card')),
+  ];
+  const buying = [
+    ...(bids.my_bids || []).map((b) => bidItem(b, { kind: 'cancelBid', label: 'Cancel' })),
+    ...liveOrders
+      .filter((o) => o.side === 'bid' && o.state !== 'pending_escrow')
+      .map((o) => orderItem(o, 'row')),
+  ];
   const needsYou = [];
-  const selling = [];
-  const buying = [];
   const history = [];
   const active = needsYou.length + selling.length + buying.length;
   const owned = active + history.length + stuff.characters.length + stuff.traits.length;

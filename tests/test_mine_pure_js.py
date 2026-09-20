@@ -142,3 +142,102 @@ def test_sell_payload_uses_the_closet_ask_path_only_when_the_market_is_on():
 def test_cap_group_returns_the_head_and_the_remainder_count():
     assert run_js("M.capGroup([1,2,3,4,5], 2)") == {"items": [1, 2], "total": 5, "hidden": 3}
     assert run_js("M.capGroup([1,2], 5)") == {"items": [1, 2], "total": 2, "hidden": 0}
+
+
+CHAR_LISTING = {
+    "kind": "character",
+    "nft_id": "0008AB",
+    "nft_number": 1035,
+    "image": "https://cdn/1035.png",
+    "amount_xrp": "12",
+    "amount_brix": None,
+    "offer_index": "E3F",
+    "seller": "rMe",
+}
+TRAIT_LISTING = {
+    "kind": "trait",
+    "nft_id": "0009CD",
+    "slot": "Hat",
+    "value": "Wizard Hat",
+    "image": "/api/layer?a",
+    "amount_xrp": None,
+    "amount_brix": "25",
+    "offer_index": "A11",
+    "seller": "rMe",
+}
+ASK = {
+    "id": "o1",
+    "side": "ask",
+    "slot": "Hat",
+    "value": "Wizard Hat",
+    "price_brix": "25",
+    "state": "open",
+    "created_ts": "2026-09-19T10:00:00Z",
+    "image_url": "/api/layer?a",
+}
+CLOSET_BID = {**ASK, "id": "o2", "side": "bid", "state": "open", "price_brix": "9"}
+MY_BID = {
+    "offer_index": "B1",
+    "nft_id": "0008AB",
+    "nft_number": 1035,
+    "image": "https://cdn/1035.png",
+    "bidder": "rMe",
+    "amount_xrp": "9",
+}
+
+
+def test_selling_holds_both_currencies_as_cards_in_one_group():
+    out = build(mine={"listings": [CHAR_LISTING, TRAIT_LISTING]})
+    assert [i["unit"] for i in out["selling"]] == ["card", "card"]
+    char, trait = out["selling"]
+    assert char["title"] == "#1035"
+    assert char["price"] == {"amount": "12", "currency": "XRP"}
+    assert char["image"] == "https://cdn/1035.png" and char["imageUrl"] is None
+    assert trait["title"] == "Hat: Wizard Hat"
+    assert trait["price"] == {"amount": "25", "currency": "BRIX"}
+    assert trait["imageUrl"] == "/api/layer?a" and trait["image"] is None
+    assert char["action"]["kind"] == "cancelListing"
+    assert char["action"]["payload"]["offer_index"] == "E3F"
+
+
+def test_a_closet_ask_sells_beside_the_nft_listings():
+    out = build(closet={"orders": [ASK]})
+    (item,) = out["selling"]
+    assert item["unit"] == "card"
+    assert item["title"] == "Hat: Wizard Hat"
+    assert item["price"] == {"amount": "25", "currency": "BRIX"}
+    assert item["action"] == {
+        "label": "Cancel",
+        "kind": "cancelClosetOrder",
+        "payload": {"id": "o1", "side": "ask"},
+    }
+
+
+def test_closet_orders_split_by_side():
+    out = build(closet={"orders": [ASK, CLOSET_BID]})
+    assert [i["title"] for i in out["selling"]] == ["Hat: Wizard Hat"]
+    assert [i["title"] for i in out["buying"]] == ["Hat: Wizard Hat"]
+    assert out["buying"][0]["unit"] == "row"
+    assert out["buying"][0]["action"]["payload"] == {"id": "o2", "side": "bid"}
+
+
+def test_matched_and_cancelling_orders_stay_put_with_a_state_chip_and_no_action():
+    out = build(
+        closet={"orders": [{**ASK, "state": "matched"}, {**CLOSET_BID, "state": "cancelling"}]}
+    )
+    assert out["selling"][0]["state"] == {"label": "filling"}
+    assert out["selling"][0]["action"] is None
+    assert out["buying"][0]["state"] == {"label": "cancelling"}
+    assert out["buying"][0]["action"] is None
+    assert out["needsYou"] == []
+
+
+def test_my_native_bids_are_buying_rows():
+    out = build(bids={"my_bids": [MY_BID]})
+    (item,) = out["buying"]
+    assert item["unit"] == "row"
+    assert item["title"] == "#1035"
+    assert item["price"] == {"amount": "9", "currency": "XRP"}
+    assert item["action"]["kind"] == "cancelBid"
+    assert item["action"]["payload"]["offer_index"] == "B1"
+    assert out["nothingActive"] is False
