@@ -564,12 +564,14 @@ def test_free_mint_badge_tells_consumed_and_full():
 
 def test_free_mint_badge_says_check_back_while_archive_catches_up():
     """2026-09-19: a campaign started right after a restart quoted eligible
-    users a paid mint while the archive caught up. The badge must tell them
-    they're eligible and to come back, not hide."""
+    users a paid mint while the archive caught up. The badge must tell them to
+    come back, not hide — and must NOT promise a free mint, since a completed
+    catch-up can still reveal tagged history and refuse them."""
     out = run_js("M.freeMintBadge({eligible: false, reason: 'eligibility_pending'})")
     assert out["show"] is True
-    assert "eligible" in out["text"].lower()
-    assert "check back" in out["text"].lower()
+    assert "checking" in out["text"].lower()
+    assert "come back" in out["text"].lower()
+    assert "you\u2019re eligible" not in out["text"].lower()
 
 
 def test_free_mint_badge_hides_off_unknown_and_refusals():

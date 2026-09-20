@@ -7296,9 +7296,12 @@ _PREFLIGHT_TIMEOUT_SECONDS = 5
 # makes delivery impossible and the single thing the user can do about it. These
 # strings reach every surface: the web client keys off `code`, and Discord and
 # Telegram render `error` verbatim through `friendly_error`.
+# `eligibility_pending` is not a verdict: it means the archive has not yet
+# PROVED this wallet has no tagged history, and a completed catch-up can still
+# turn it into a refusal. So the copy promises a check, never a free mint.
 _SPONSORED_PENDING_MESSAGE = (
-    "You're eligible for a free mint, but it isn't ready yet — we're finishing a "
-    "sync with the ledger. Check back in a few minutes and tap Mint again."
+    "We're still checking whether you qualify for a free mint — we're finishing "
+    "a sync with the ledger. Check back in a few minutes and tap Mint again."
 )
 
 _PREFLIGHT_REFUSALS: dict[str, str] = {

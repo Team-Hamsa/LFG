@@ -1860,7 +1860,10 @@ def test_pending_eligibility_refuses_instead_of_quoting_paid_mint(monkeypatch):
 
     assert response.status == 409
     assert body["code"] == "sponsored_pending"
-    assert "eligible" in body["error"] and "Check back" in body["error"]
+    # The message promises a check, never a mint: a completed catch-up can
+    # still reveal tagged history and refuse this wallet.
+    assert "still checking" in body["error"].lower() and "Check back" in body["error"]
+    assert "you're eligible" not in body["error"].lower()
     assert calls == ["reserve"]
     assert session.state == mint_flow.FAILED
     assert session.error == "sponsored_pending"
