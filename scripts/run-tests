@@ -84,18 +84,44 @@ if [[ -z "${TMPDIR:-}" ]]; then
     fi
 fi
 
-trap 'discard_scratch; exit 130' INT
-trap 'discard_scratch; exit 143' TERM
+# Dropping `exec` (we need to clean up afterwards) means signals now land on
+# this shell, not on pytest -- and bash defers a trap until the running
+# foreground command returns, so a plain `kill` would leave the suite running
+# and the scratch dir behind. Run pytest as a tracked child and relay instead.
+#
+# A terminal Ctrl-C reaches pytest directly too (a background job in a script
+# stays in the shell's process group), so pytest sees that one twice and takes
+# its abort-now path. That is the right answer for an interrupt, and relaying
+# is what makes `kill -INT <pid>` work at all.
+pytest_pid=""
+cancelled=""
+
+relay() {
+    cancelled=1
+    [[ -n $pytest_pid ]] || return 0
+    kill -"$1" "$pytest_pid" 2>/dev/null || true
+}
+
+trap 'relay INT' INT
+trap 'relay TERM' TERM
 
 set +e
-"$here/venv-python" -m pytest "$@"
-status=$?
+"$here/venv-python" -m pytest "$@" &
+pytest_pid=$!
+# `wait` returns the moment a trapped signal arrives, before the child has
+# finished reacting to it, so keep waiting until the child is genuinely gone.
+while :; do
+    wait "$pytest_pid"
+    status=$?
+    kill -0 "$pytest_pid" 2>/dev/null || break
+done
 set -e
 
-# A green run has nothing worth keeping. A red one does: pyproject sets
-# tmp_path_retention_policy = "failed", so the failing tests' trees are still
-# in there -- say where, rather than deleting the evidence.
-if (( status == 0 )); then
+# A green run has nothing worth keeping, and neither has a cancelled one. A
+# red one does: pyproject sets tmp_path_retention_policy = "failed", so the
+# failing tests' trees are still in there -- say where, rather than deleting
+# the evidence.
+if (( status == 0 )) || [[ -n $cancelled ]]; then
     discard_scratch
 elif [[ -n $scratch ]]; then
     printf 'test scratch kept for debugging: %s\n' "$scratch" >&2
