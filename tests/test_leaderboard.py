@@ -45,7 +45,11 @@ def _ev(h, **kw):
         "to_addr": None,
         "price_drops": None,
         "price_token": None,
-        "ledger_index": 1,
+        # Ledger sequence rises with close time, and the boards order a
+        # token's movements on it. Pinning every fixture event to ledger 1
+        # would leave them with no order at all; pass it explicitly to put
+        # two events in one ledger.
+        "ledger_index": kw.get("ts", 0) + 1,
         "ts": 0,
     }
     base.update(kw)
@@ -686,5 +690,76 @@ def test_swap_boards_ignore_a_non_collection_burn_and_remint():
     _member(o, "XNEW", 5, ISSUER)
     rows = leaderboard.compute(
         "users_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]
+
+
+def test_users_nfts_windowed_orders_movements_by_ledger_not_tx_hash():
+    """Two movements can share a close time; a transaction hash is not an
+    execution order (Greptile on PR #578). Here the earlier movement has the
+    LARGER hash, so a hash tie-break calls the redelivery "first" and mints
+    it. ledger_index is the archive's real order."""
+    h, o = _dbs()
+    _member(o, "N1", 1, "rB")
+    _ev(
+        h,
+        tx_hash="zzz-earlier-but-larger-hash",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr=ISSUER,
+        to_addr="rA",
+        ts=50,
+        ledger_index=99,
+    )
+    _ev(h, tx_hash="mint1", event="mint", nft_id="N1", nft_number=1, to_addr=ISSUER, ts=40)
+    _ev(
+        h,
+        tx_hash="aaa-later-but-smaller-hash",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr=ISSUER,
+        to_addr="rB",
+        ts=50,
+        ledger_index=100,
+    )
+    rows = leaderboard.compute(
+        "users_nfts", h, o, start_ts=40, end_ts=60, network="testnet", system_accounts=SYS
+    )
+    assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]
+
+
+def test_users_nfts_windowed_still_mints_when_the_buyer_flips_in_the_same_ledger():
+    """A same-ledger sibling must not suppress the delivery. A token's first
+    movement is always from the issuer — it is minted into the issuer's own
+    account — so a flip sharing that ledger can only be the later one."""
+    h, o = _dbs()
+    _member(o, "N1", 1, "rB")
+    _ev(h, tx_hash="mint1", event="mint", nft_id="N1", nft_number=1, to_addr=ISSUER, ts=40)
+    _ev(
+        h,
+        tx_hash="deliver",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr=ISSUER,
+        to_addr="rA",
+        ts=50,
+        ledger_index=100,
+    )
+    _ev(
+        h,
+        tx_hash="flip",
+        event="sale",
+        nft_id="N1",
+        nft_number=1,
+        from_addr="rA",
+        to_addr="rB",
+        ts=50,
+        ledger_index=100,
+    )
+    rows = leaderboard.compute(
+        "users_nfts", h, o, start_ts=40, end_ts=60, network="testnet", system_accounts=SYS
     )
     assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]

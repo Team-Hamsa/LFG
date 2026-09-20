@@ -260,10 +260,16 @@ def _first_delivery_sql(
     `COUNT(DISTINCT t.nft_id)` dedupes only inside one wallet's group, so the
     second recipient scored an edition that already existed (mainnet has one
     such token). The test is deliberately unwindowed: a redelivery is not a
-    mint however long after the original it lands. A token's first movement
-    can never predate its issuer delivery — it is minted into the issuer's
-    own account — so nothing legitimate is suppressed, and `tx_hash` breaks
-    the tie if two movements share a ledger close time.
+    mint however long after the original it lands.
+
+    Ordered on `ledger_index`, not `ts` or `tx_hash`. Close times repeat
+    across ledgers and a hash is not an execution order, so either would let
+    a redelivery pose as the first delivery; the ledger sequence is the one
+    total order the archive actually records (non-NULL on every mainnet row).
+    A movement sharing the delivery's own ledger does not suppress it: a
+    token's first movement is always from the issuer — it is minted into the
+    issuer's own account — so a same-ledger sibling can only be the later of
+    the two.
 
     COUNT(DISTINCT) is then belt-and-braces against a duplicated mint row in
     the archive. The 25 in-index tokens whose edition the index never
@@ -281,8 +287,7 @@ def _first_delivery_sql(
           AND (m.memo_action IS NULL OR m.memo_action != 'assemble')
           AND NOT EXISTS (SELECT 1 FROM nft_events e
                           WHERE e.nft_id = t.nft_id AND e.event IN ('transfer','sale')
-                            AND (e.ts < t.ts
-                                 OR (e.ts = t.ts AND e.tx_hash < t.tx_hash)))
+                            AND e.ledger_index < t.ledger_index)
           AND NOT EXISTS (SELECT 1 FROM nft_events b
                           WHERE b.event='burn' AND b.nft_number = t.nft_number
                             AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
