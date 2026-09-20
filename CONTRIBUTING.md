@@ -70,9 +70,13 @@ tests a change can skip. Two things make that affordable:
   writer (the deploy box runs an XRPL validator on the same volume) the suite
   spends its wall clock in `jbd2_log_wait_commit` — 881 s at 20% CPU, versus
   167 s at 83% with `TMPDIR` on a tmpfs. Same tests, same machine. The wrapper
-  uses `/dev/shm` when it has room and proves executable files work there, and
-  gets out of the way on any doubt — an explicit `TMPDIR` from you always wins,
-  and a failed probe just means the default and a slower run.
+  takes a private `mktemp -d` under `/dev/shm` (never a predictable path —
+  `/dev/shm` is world-writable, and the suite executes shims it writes under
+  `tmp_path`), proves exec works there, and gets out of the way on any doubt:
+  an explicit `TMPDIR` from you always wins, and a failed check just means the
+  default and a slower run. A green run deletes the scratch dir; a red one
+  keeps it and prints the path, so the failing tests' `tmp_path` trees are
+  still there to look at.
 - **`-n auto`** (pytest-xdist), with `--dist loadfile` so a module's tests — and
   its module-level state — stay on one worker.
 
