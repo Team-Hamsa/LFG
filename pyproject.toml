@@ -69,3 +69,15 @@ warn_return_any = false
 
 # (The former "standalone ops tools" override for rarity_admin/init_db is gone:
 # both now live under scripts/, which the top-level `exclude` already skips.)
+
+[tool.pytest.ini_options]
+# Collect only the directories that actually hold tests. Without this, a bare
+# `pytest` walks the whole checkout for test files and descends into the
+# runtime store directories (images_<net>/history/ alone is ~700 subdirs,
+# plus reports/, swap_records/, economy_records/, *_jobs/). Those exist only
+# in a live checkout like the deploy box's ~/LFG, where the #323/#509
+# store-isolation audit hook in conftest.py then records pytest's OWN
+# collection scandirs as "<outside a test>" checkout-store hits and fails the
+# session at exit -- 5821 tests passing, exit code 1, pre-push blocked.
+# Collection is identical either way (same 5821 items) and about 40% faster.
+testpaths = ["tests", "webapp"]
