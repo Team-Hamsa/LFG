@@ -40,9 +40,9 @@ jobs:
     # hung run holds a concurrency slot for GitHub's 6-hour default.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: pip
@@ -56,7 +56,7 @@ jobs:
       # on first use -- 33s of the gate's 200s, rebuilt from scratch every run.
       # The config's pinned `rev`s make the hash a sound cache key.
       - name: Cache pre-commit hook environments
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-py3.10-${{ hashFiles('.pre-commit-config.yaml') }}
