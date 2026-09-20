@@ -1868,6 +1868,47 @@ def test_pending_eligibility_refuses_instead_of_quoting_paid_mint(monkeypatch):
     assert session.payment_uuid is None
 
 
+def test_pending_eligibility_reports_a_cancel_that_won_the_race(monkeypatch):
+    """A cancel landing while the reservation runs is the session's real
+    outcome. Returning the check-back 409 over it would tell a user who just
+    cancelled to try again in a few minutes."""
+    calls = []
+
+    def reserve(*args, **kwargs):
+        calls.append("reserve")
+        # The cancel endpoint marks the session terminal while this thread runs.
+        session = next(iter(server.mint_sessions.values()))
+        session.state = mint_flow.CANCELLED
+        return _not_admitted("eligibility_pending")
+
+    async def prepare(self, _snapshot=None):
+        calls.append("prepare")
+
+    async def fake_wrapper(session):
+        calls.append("launch")
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", reserve)
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", prepare)
+    monkeypatch.setattr(server, "_run_mint_session_and_publish", fake_wrapper)
+
+    async def scenario():
+        response = await server.handle_mint_start(_post_request())
+        session = next(iter(server.mint_sessions.values()))
+        return response, session
+
+    response, session = _run(scenario())
+    body = json.loads(response.body)
+
+    assert response.status == 200
+    assert body["state"] == mint_flow.CANCELLED
+    assert body.get("code") != "sponsored_pending"
+    assert calls == ["reserve"]
+    assert session.state == mint_flow.CANCELLED
+    assert session.error is None
+    assert session.task is None
+    assert session.payment_uuid is None
+
+
 def test_bulk_mint_never_consults_sponsorship(monkeypatch):
     async def prepare(self, _snapshot=None):
         self.pay_with = "XRP"

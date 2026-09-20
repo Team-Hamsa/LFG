@@ -7533,9 +7533,14 @@ async def handle_mint_start(request):
         # opened a continuity gap). Falling through would hand a free-mint
         # user a paid request mid-campaign (2026-09-19) — refuse with a
         # "check back" instead. No claim was written; headroom goes back.
-        if session.state == mint_flow.AWAITING_PAYMENT:
-            session.state = mint_flow.FAILED
-            session.error = "sponsored_pending"
+        if session.state != mint_flow.AWAITING_PAYMENT:
+            # A cancel landed while the reservation ran. That terminal state is
+            # the session's real outcome — reporting "check back" over it would
+            # show retry-later messaging for a session the user already killed.
+            mint_flow.settle_headroom(session)
+            return web.json_response(session.to_dict())
+        session.state = mint_flow.FAILED
+        session.error = "sponsored_pending"
         mint_flow.settle_headroom(session)
         session.mark_published()  # a deliberate refusal, not a pipeline failure
         return web.json_response(
