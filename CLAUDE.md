@@ -38,7 +38,16 @@ Install all dependencies with:
 
 ### Pre-push gate (BLOCKING)
 `.pre-commit-config.yaml` runs at the **pre-push** stage: ruff (--fix), ruff-format, mypy (from the
-project `.venv`, real dep types), gitleaks, pytest, validate-trait-config,
+project `.venv`, real dep types), gitleaks, pytest (whole suite, via
+`scripts/run-tests -n auto --dist loadfile` — the wrapper puts `TMPDIR` on a
+tmpfs when the box has one, because the suite's SQLite stores `fsync` on every
+commit and the deploy box shares its ext4 journal with the XRPL validator:
+881s at 20% CPU vs 167s at 83%, same tests. Whole gate ~30s locally.
+`--dist loadfile` keeps a module's tests on one worker; the suite is
+order-independent as of 2026-09-20 and `-n auto` is what keeps it that way, so
+pin new global state in the root `conftest.py` — every import-time-mandatory
+env var and a current-event-loop fixture live there — never in whichever test
+file first noticed it missing), validate-trait-config,
 check-repo-layout (`scripts/check_repo_layout.py` — the README "Repository
 layout" tree must name only paths that exist, and every `lfg_core/*_flow.py`
 module and `surfaces/<pkg>/` package must appear in it),

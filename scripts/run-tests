@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Run the pytest gate on the fastest scratch filesystem available.
+#
+# WHY THIS EXISTS: the suite's stores are SQLite. Every commit fsyncs, and on
+# a box where the checkout's filesystem is shared with a busy writer (the
+# deploy box runs an XRPL validator on the same ext4 volume) each of those
+# fsyncs queues behind the journal. Measured on the deploy box 2026-09-20,
+# same suite, same machine, only TMPDIR moved:
+#
+#     TMPDIR=/tmp   (ext4, shared journal)   881s   20% CPU
+#     TMPDIR=/dev/shm (tmpfs)                167s   83% CPU
+#
+# Nothing about which tests run changes -- the process simply stops waiting in
+# jbd2_log_wait_commit. conftest.py builds its whole per-session store root
+# with tempfile.mkdtemp(), and pytest's own basetemp is TMPDIR-derived too, so
+# pointing TMPDIR at a tmpfs moves every store the suite writes.
+#
+# The choice is advisory in both directions: an explicit TMPDIR from the
+# caller always wins, and a box without a usable /dev/shm just runs on the
+# default. Never silently required.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# MIN_FREE_KIB: the serial suite writes ~600 MB of store churn and a parallel
+# run multiplies that by the worker count, so refuse a tmpfs that could fill
+# mid-run (a full tmpfs surfaces as unrelated ENOSPC test failures).
+MIN_FREE_KIB=$((4 * 1024 * 1024))
+
+if [[ -z "${TMPDIR:-}" && -d /dev/shm && -w /dev/shm ]]; then
+    free_kib="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [[ -n "${free_kib}" && "${free_kib}" -ge "${MIN_FREE_KIB}" ]]; then
+        TMPDIR="/dev/shm/lfg-pytest-$(id -u)"
+        mkdir -p "$TMPDIR"
+        export TMPDIR
+    fi
+fi
+
+exec "$here/venv-python" -m pytest "$@"

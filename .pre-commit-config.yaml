@@ -34,7 +34,14 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: scripts/venv-python -m pytest
+        # scripts/run-tests is scripts/venv-python plus one thing: it points
+        # TMPDIR at a tmpfs when the box has one. The suite's stores are
+        # SQLite and every commit fsyncs, so on a checkout sharing its ext4
+        # journal with a busy writer the gate spends most of its wall clock in
+        # jbd2_log_wait_commit -- 881s vs 167s for the identical suite on the
+        # deploy box. -n auto then parallelises what is left (--dist loadfile
+        # keeps a module's tests, and their module-level state, on one worker).
+        entry: scripts/run-tests -n auto --dist loadfile
         language: system
         pass_filenames: false
         always_run: true

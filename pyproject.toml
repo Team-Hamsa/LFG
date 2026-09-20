@@ -81,3 +81,10 @@ warn_return_any = false
 # session at exit -- 5821 tests passing, exit code 1, pre-push blocked.
 # Collection is identical either way (same 5821 items) and about 40% faster.
 testpaths = ["tests", "webapp"]
+# Fail on a typo rather than silently doing nothing: --strict-config rejects
+# an unknown key in this block, --strict-markers rejects an unregistered
+# @pytest.mark.* (the suite uses only built-ins), and xfail_strict turns an
+# xfail that unexpectedly passes into a failure so a fixed bug cannot keep
+# advertising itself as broken.
+addopts = "--strict-config --strict-markers"
+xfail_strict = true
