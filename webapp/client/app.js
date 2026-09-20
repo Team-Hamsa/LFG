@@ -38,6 +38,9 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=5';
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
 import * as brixPure from './brix_pure.js?v=8';
+// Mine tab (#583): the group partition, merge, sort and caps are pure and
+// Node-tested (tests/test_mine_pure_js.py); renderMine() below is the glue.
+import * as minePure from './mine_pure.js?v=1';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -5673,75 +5676,209 @@ function mineTraitImgSrc(slot, value, imageUrl) {
   return char && layerComplete(char.body, value) ? layerSrc(char.body, slot, value) : null;
 }
 
-function renderMineGroups(data) {
-  const listingEntries = data.listings.map((row) => {
-    const vm = marketPure.mapListingRow(row);
-    return {
-      imgSrc: marketRowImgSrc(vm),
-      label: `${vm.title} — ${vm.priceLabel}`,
-      payload: row,
-    };
-  });
-  renderChipList(el('mine-listings'), el('mine-listings-empty'), listingEntries, 'Cancel', cancelListing);
+// Which <details> the user has open, so the poll-driven re-render after an
+// action cannot collapse what they just opened (mirrors oddsOpenSlots).
+const mineOpenGroups = new Set(['needsYou', 'selling', 'buying', 'characters', 'traits']);
+// Each group's FULL list, for the "Show all" drill-in.
+const mineGroupItems = {};
 
-  const charEntries = data.unlisted_characters.map((c) => {
-    const label = c.nft_number != null ? `#${c.nft_number}` : c.nft_id;
-    return {
-      imgSrc: c.image ? imgUrl(c.image, THUMB_W) : null,
-      label,
-      payload: { nftId: c.nft_id, label, wizard: false },
-    };
-  });
-  renderChipList(el('mine-characters'), el('mine-characters-empty'), charEntries, 'List', openListForm);
+const MINE_GROUP_TITLES = {
+  needsYou: 'Needs you', selling: 'Selling', buying: 'Buying',
+  characters: 'Your characters', traits: 'Your traits', history: 'History',
+};
 
-  const traitEntries = data.unlisted_trait_tokens.map((t) => ({
-    imgSrc: mineTraitImgSrc(t.slot, t.value, t.image_url),
-    label: `${t.slot}: ${t.value}`,
-    payload: { nftId: t.nft_id, slot: t.slot, value: t.value, label: `${t.slot}: ${t.value}`, wizard: false },
-  }));
-  renderChipList(el('mine-traits'), el('mine-traits-empty'), traitEntries, 'List', openListForm);
+const MINE_GROUP_UNITS = {
+  needsYou: 'row', selling: 'card', buying: 'row',
+  characters: 'card', traits: 'card', history: 'row',
+};
 
-  const closetEntries = data.closet_assets.map((a) => ({
-    imgSrc: mineTraitImgSrc(a.slot, a.value, a.image_url),
-    label: closetPure.closetAssetLabel(a),
-    // (#516 D5) "None" is an empty slot, not a trait — nothing to sell.
-    noAction: a.value === 'None',
-    // #443: with the Closet market on, Sell posts a free off-ledger ask; the
-    // Extract -> List wizard stays reachable through Unlisted traits.
-    payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: !closetMarketEnabled, closetAsk: closetMarketEnabled },
-  }));
-  renderChipList(el('mine-closet'), el('mine-closet-empty'), closetEntries, 'Sell', openListForm);
+const MINE_ACTIONS = {
+  cancelListing,
+  cancelBid,
+  acceptBid,
+  list: openListForm,
+  sell: openListForm,
+  fillClosetBid,
+  cancelClosetOrder,
+  viewClosetFill,
+  resumeClosetOrder: viewClosetOrder,
+  resumeFill: viewClosetFill,
+};
+
+// A character's `image` is an absolute CDN URL; a trait's `imageUrl` is a
+// server /api/layer URL. buildMine keeps them apart precisely so this seam —
+// imgUrl vs traitLayerSrc, the same distinction marketRowImgSrc draws — can
+// live here, where the surface is known.
+function mineImgSrc(item) {
+  if (item.image) return imgUrl(item.image, THUMB_W);
+  if (item.imageUrl) return traitLayerSrc(item.imageUrl);
+  return null;
 }
 
-function renderBidGroups(data) {
-  const myEntries = (data.my_bids || []).map((b) => ({
-    imgSrc: b.image ? imgUrl(b.image, THUMB_W) : null,
-    label: `${b.nft_number != null ? `#${b.nft_number}` : b.nft_id} — ${b.amount_xrp} XRP`,
-    payload: b,
-  }));
-  renderChipList(el('mine-bids'), el('mine-bids-empty'), myEntries, 'Cancel', cancelBid);
-  const inEntries = (data.bids_on_my_nfts || []).map((b) => ({
-    imgSrc: b.image ? imgUrl(b.image, THUMB_W) : null,
-    label: `${b.nft_number != null ? `#${b.nft_number}` : b.nft_id} — ${b.amount_xrp} XRP`,
-    payload: b,
-  }));
-  renderChipList(el('mine-incoming-bids'), el('mine-incoming-bids-empty'), inEntries, 'Accept', acceptBid);
+function mineActionButton(item, cls) {
+  const btn = document.createElement('button');
+  btn.className = cls;
+  btn.textContent = item.action.label;
+  // #133: a handler may be async — Promise.resolve covers the sync ones and
+  // stops a rejection from vanishing silently.
+  btn.onclick = (ev) => {
+    ev.stopPropagation();
+    Promise.resolve()
+      .then(() => MINE_ACTIONS[item.action.kind](item.action.payload))
+      .catch((e) => showError(e.message));
+  };
+  return btn;
+}
+
+function renderMineCard(item) {
+  const card = document.createElement('div');
+  card.className = item.dim ? 'nft-card dim' : 'nft-card';
+  const img = document.createElement('img');
+  img.src = mineImgSrc(item) || BLANK_IMG;
+  decorateTraitArt(img, img.src);
+  img.loading = 'lazy';
+  img.alt = '';
+  const cap = document.createElement('span');
+  cap.className = 'cap';
+  cap.textContent = item.title;
+  if (item.price) {
+    const price = document.createElement('span');
+    price.className = 'mine-card-price';
+    price.textContent = `${item.price.amount} ${item.price.currency}`;
+    cap.appendChild(price);
+  }
+  for (const text of item.badges) {
+    const badge = document.createElement('span');
+    badge.className = 'mine-card-badge';
+    badge.textContent = text;
+    cap.appendChild(badge);
+  }
+  if (item.state) {
+    const chip = document.createElement('span');
+    chip.className = 'mine-card-badge';
+    chip.textContent = item.state.label;
+    cap.appendChild(chip);
+  }
+  const parts = [img, cap];
+  if (item.action) parts.push(mineActionButton(item, 'secondary mine-action'));
+  card.replaceChildren(...parts);
+  return card;
+}
+
+function renderMineRow(item) {
+  const row = document.createElement('div');
+  row.className = item.dim ? 'mine-row dim' : 'mine-row';
+  const img = document.createElement('img');
+  img.src = mineImgSrc(item) || BLANK_IMG;
+  decorateTraitArt(img, img.src);
+  img.loading = 'lazy';
+  img.alt = '';
+  const label = document.createElement('span');
+  label.className = 'mine-row-label';
+  label.textContent = item.title;
+  const subText = item.subtitle || (item.state ? item.state.label : null)
+    || (item.badges.length ? item.badges.join(' · ') : null);
+  if (subText) {
+    const sub = document.createElement('span');
+    sub.className = 'mine-row-sub';
+    sub.textContent = subText;
+    label.appendChild(sub);
+  }
+  const price = document.createElement('span');
+  price.className = 'mine-row-price';
+  price.textContent = item.price ? `${item.price.amount} ${item.price.currency}` : '';
+  const parts = [img, label, price];
+  if (item.action) parts.push(mineActionButton(item, 'secondary mine-action'));
+  row.replaceChildren(...parts);
+  return row;
+}
+
+function renderMineItems(items, unit) {
+  const container = document.createElement('div');
+  container.className = unit === 'card' ? 'nft-grid' : 'mine-rows';
+  container.replaceChildren(...items.map(unit === 'card' ? renderMineCard : renderMineRow));
+  return container;
+}
+
+function renderMineGroup(key, items) {
+  mineGroupItems[key] = items;
+  const details = el(`mine-group-${key}`);
+  const body = el(`mine-body-${key}`);
+  // A group with nothing in it renders nothing at all — no header, no italic
+  // apology. Eight of those was most of the old tab for the typical holder.
+  details.hidden = items.length === 0;
+  if (!items.length) { body.replaceChildren(); return; }
+  details.open = mineOpenGroups.has(key);
+  details.querySelector('.mine-group-count').textContent = String(items.length);
+  const { items: shown, hidden } = minePure.capGroup(items, minePure.CAPS[key]);
+  const parts = [renderMineItems(shown, MINE_GROUP_UNITS[key])];
+  if (hidden > 0) {
+    const more = document.createElement('button');
+    more.className = 'secondary mine-show-all';
+    more.textContent = `Show all ${items.length} →`;
+    more.onclick = () => showMineAll(key);
+    parts.push(more);
+  }
+  body.replaceChildren(...parts);
+}
+
+function renderMine(built) {
+  // A poll-driven re-render must not leave a drill-in showing a stale list.
+  closeMineAll();
+  renderMineGroup('needsYou', built.needsYou);
+  renderMineGroup('selling', built.selling);
+  renderMineGroup('buying', built.buying);
+  renderMineGroup('characters', built.stuff.characters);
+  renderMineGroup('traits', built.stuff.traits);
+  renderMineGroup('history', built.history);
+  el('mine-nothing').hidden = built.ownsNothing || !built.nothingActive;
+  el('mine-empty').hidden = !built.ownsNothing;
+}
+
+// The drill-in replaces the group list entirely, so exactly one scroller is
+// ever live — nesting .nft-grid's scroll container inside the page scroll is
+// the mobile trap this avoids.
+function renderMineAllBody(key, query) {
+  const needle = query.trim().toLowerCase();
+  const items = (mineGroupItems[key] || []).filter((i) => !needle
+    || i.title.toLowerCase().includes(needle)
+    || (i.subtitle || '').toLowerCase().includes(needle));
+  el('mine-all-body').replaceChildren(renderMineItems(items, MINE_GROUP_UNITS[key]));
+}
+
+function showMineAll(key) {
+  const items = mineGroupItems[key] || [];
+  el('mine-all-title').textContent = `${MINE_GROUP_TITLES[key]} (${items.length})`;
+  const search = el('mine-all-search');
+  search.value = '';
+  search.oninput = () => renderMineAllBody(key, search.value);
+  renderMineAllBody(key, '');
+  el('mine-groups').hidden = true;
+  el('mine-all').hidden = false;
+}
+
+function closeMineAll() {
+  el('mine-all').hidden = true;
+  el('mine-groups').hidden = false;
 }
 
 async function loadMarketMine() {
+  let mine = {};
   try {
-    const data = await api('/api/market/mine');
-    renderMineGroups(data);
+    mine = await api('/api/market/mine');
   } catch (e) {
     showError(e.message);
   }
   // #283: bids load separately — a bids failure must not blank the listings.
-  try {
-    renderBidGroups(await api('/api/market/bids/mine'));
-  } catch (e) {
-    renderBidGroups({});
+  let bids = {};
+  try { bids = await api('/api/market/bids/mine'); } catch (e) { bids = {}; }
+  let closet = {};
+  if (closetMarketEnabled) {
+    try { closet = await api('/api/closet/orders/mine'); } catch (e) { showError(e.message); }
   }
-  loadClosetMine().catch((e) => showError(e.message));
+  renderMine(minePure.buildMine({
+    mine, bids, closet, wallet: me && me.wallet, closetMarketEnabled,
+  }));
 }
 
 // --- marketFlow: the single start -> QR -> poll driver (spec §Q8), reused
@@ -6215,18 +6352,6 @@ async function postClosetAsk(item, price) {
   switchMarketTab('mine');
 }
 
-async function loadClosetMine() {
-  if (!closetMarketEnabled) return;
-  const data = await api('/api/closet/orders/mine');
-  const img = (x) => mineTraitImgSrc(x.slot, x.value, x.image_url);
-  renderChipList(el('mine-closet-orders'), el('mine-closet-orders-empty'),
-    data.orders.map((o) => ({ imgSrc: img(o), label: closetPure.orderChipLabel(o), payload: o })), 'Cancel', cancelClosetOrder);
-  renderChipList(el('mine-closet-incoming'), el('mine-closet-incoming-empty'),
-    data.bids_on_my_traits.map((b) => ({ imgSrc: img(b), label: closetPure.holdingLabel(b), payload: b })), 'Fill', fillClosetBid);
-  renderChipList(el('mine-closet-fills'), el('mine-closet-fills-empty'),
-    data.fills.map((f) => ({ imgSrc: img(f), label: closetPure.fillChipLabel(f, me && me.wallet), payload: f })), 'View', viewClosetFill);
-}
-
 async function cancelClosetOrder(order) {
   const isBid = order.side === 'bid';
   const ok = await confirmDialog({
@@ -6255,6 +6380,15 @@ async function fillClosetBid(entry) {
     if (final.state === 'failed') throw new Error(final.error || 'deposit failed');
   }
   await marketFlow('closet_fill', `/api/closet/bid/${entry.id}/fill`, {}, closetFillRender);
+}
+
+// A pending_escrow order was never signed. Only a BID can be in that state —
+// an ask is off-ledger and opens instantly — so this always resumes the bid
+// signing flow through the existing GET /api/closet/bid/{id} status route.
+async function viewClosetOrder(order) {
+  const s = await api(`/api/closet/bid/${order.id}`);
+  showFlow(closetBidRender(s));
+  if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow('closet_bid', s.id, closetBidRender);
 }
 
 async function viewClosetFill(fill) {
@@ -6748,6 +6882,15 @@ async function main() {
   // --- Marketplace (#44 Task 10) ---
   el('market-btn').onclick = () => { ensureMarketTraitSlotOptions(); openMarket(); };
   el('market-back-btn').onclick = () => showMintHome();
+  // #583: Mine's five groups remember what the user opened across the
+  // poll-driven re-render after every action.
+  for (const key of Object.keys(MINE_GROUP_TITLES)) {
+    el(`mine-group-${key}`).addEventListener('toggle', (ev) => {
+      if (ev.target.open) mineOpenGroups.add(key); else mineOpenGroups.delete(key);
+    });
+  }
+  el('mine-all-back').onclick = closeMineAll;
+  el('mine-browse-btn').onclick = () => switchMarketTab('browse');
   el('market-tabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.lb-chip');
     if (!btn) return;

@@ -47,9 +47,14 @@ def test_index_has_market_panel_and_nav_entry():
 
 
 def test_index_has_mine_groups():
+    """#583: nine table-shaped strips became five intent groups. Each is a
+    <details> with a body the renderer fills."""
     html = _read("index.html")
-    for group_id in ("mine-listings", "mine-characters", "mine-traits", "mine-closet"):
-        assert f'id="{group_id}"' in html
+    for key in ("needsYou", "selling", "buying", "characters", "traits", "history"):
+        assert f'id="mine-group-{key}"' in html
+        assert f'id="mine-body-{key}"' in html
+    for el_id in ("mine-groups", "mine-all", "mine-all-body", "mine-all-search", "mine-nothing"):
+        assert f'id="{el_id}"' in html
 
 
 def test_app_js_imports_market_pure():
@@ -452,8 +457,9 @@ def test_bids_wiring():
     # bids groups in Mine, bid + bid_accept flow routing.
     html = _read("index.html")
     for el_id in (
-        "mine-bids",
-        "mine-incoming-bids",
+        # #583: my bids live in Buying, incoming bids lead Needs you.
+        "mine-body-buying",
+        "mine-body-needsYou",
         "listing-detail-bids",
         "listing-bid-form",
         "listing-bid-price",
@@ -467,7 +473,7 @@ def test_bids_wiring():
     assert "function marketBidRender" in js
     assert "function marketBidAcceptRender" in js
     assert "'/api/market/bids/mine'" in js
-    assert "renderChipList(el('mine-incoming-bids')" in js
+    assert "acceptBid," in js  # #583: dispatched by action kind, not a chip list
     # Bids are character-only and never offered on the viewer's own listing.
     assert "vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller)" in js
 

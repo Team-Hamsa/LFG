@@ -33,12 +33,17 @@ def test_markup_has_closet_market_surfaces():
         "closet-bid-note",
         "closet-bid-confirm-btn",
         "closet-bid-cancel-btn",
-        "mine-closet-orders-section",
-        "mine-closet-orders",
-        "mine-closet-incoming-section",
-        "mine-closet-incoming",
-        "mine-closet-fills-section",
-        "mine-closet-fills",
+        # #583: the Mine tab's Closet surfaces are the five intent groups —
+        # orders split by side into Selling/Buying, incoming bids and stuck
+        # fills into Needs you, settled fills into History.
+        "mine-group-needsYou",
+        "mine-body-needsYou",
+        "mine-group-selling",
+        "mine-body-selling",
+        "mine-group-buying",
+        "mine-body-buying",
+        "mine-group-history",
+        "mine-body-history",
     ):
         assert f'id="{element_id}"' in html, element_id
     assert 'data-tab="book"' in html
@@ -54,7 +59,7 @@ def test_app_js_wires_closet_market():
         "function closetBidRender(s)",
         "function closetFillRender(s)",
         "async function loadClosetBook()",
-        "async function loadClosetMine()",
+        "function renderMine(",
         "async function openClosetBidForm(",
         "async function placeClosetBid(",
         "async function postClosetAsk(",
@@ -118,12 +123,16 @@ def test_closet_market_dom_lookups_are_null_guarded():
 
 def test_mine_closet_hides_sell_button_for_none_value():
     """(#516 D5) a harvested-but-empty slot ("None") sits in the Closet as a
-    loose asset like any other, but there is nothing to sell — no button."""
+    loose asset like any other, but there is nothing to sell — no button.
+    Since #583 the decision is mine_pure's (`action: null`, `dim: true`) and
+    both Mine renderers skip the button when an item carries no action."""
+    pure = _read("webapp/client/mine_pure.js")
+    assert "const isNone = a.value === 'None'" in pure
+    assert "action: isNone ? null :" in pure
     js = _read("webapp/client/app.js")
-    body = js[
-        js.index("function renderMineGroups(data)") : js.index("function renderBidGroups(data)")
-    ]
-    assert "noAction: a.value === 'None'" in body
+    for renderer in ("function renderMineCard(item)", "function renderMineRow(item)"):
+        body = js[js.index(renderer) : js.index("\n}\n", js.index(renderer))]
+        assert "if (item.action) parts.push(mineActionButton(" in body, renderer
 
 
 def test_render_chip_list_skips_the_action_button_when_no_action():
@@ -147,7 +156,7 @@ def test_closet_ask_errors_are_surfaced():
     was an unhandled rejection — the list modal closed and nothing happened."""
     js = _read("webapp/client/app.js")
     body = js[
-        js.index("async function postClosetAsk(") : js.index("async function loadClosetMine()")
+        js.index("async function postClosetAsk(") : js.index("async function cancelClosetOrder(")
     ]
     assert "e.body.code === 'trustline_required'" in body
     assert "startBrixTrustline(" in body
@@ -273,6 +282,7 @@ def _run_open_buy_flow(rows: list) -> dict:
     script = (
         "import * as marketPure from './webapp/client/market_pure.js';\n"
         "import * as closetPure from './webapp/client/closet_market_pure.js';\n"
+        "import * as minePure from './webapp/client/mine_pure.js';\n"
         + src
         + """
 const seen = { confirms: [], flows: [], errors: [] };
@@ -354,10 +364,11 @@ def _top_level_fn(js: str, signature: str) -> str:
 
 
 def _run_closet_loaders(responses: dict) -> dict:
-    """Execute app.js's real loadClosetBook + loadClosetMine, with the real
-    mineTraitImgSrc / traitLayerSrc / closet_market_pure, under Node; returns
-    each chip list's image sources. No economy state is loaded, so any image
-    has to come from the server's image_url, not a body guess."""
+    """Execute app.js's real loadClosetBook (the Wanted book) and its real
+    mineImgSrc over mine_pure's Mine groups, with the real traitLayerSrc /
+    mineTraitImgSrc, under Node; returns each surface's image sources. No
+    economy state is loaded, so any image has to come from the server's
+    image_url, not a body guess."""
     if _NODE is None:
         pytest.skip("node is not installed on this host")
     js = _read("webapp/client/app.js")
@@ -366,12 +377,13 @@ def _run_closet_loaders(responses: dict) -> dict:
         for sig in (
             "function traitLayerSrc(",
             "function mineTraitImgSrc(",
+            "function mineImgSrc(",
             "async function loadClosetBook(",
-            "async function loadClosetMine(",
         )
     )
     script = (
         "import * as closetPure from './webapp/client/closet_market_pure.js';\n"
+        "import * as minePure from './webapp/client/mine_pure.js';\n"
         f"const API_BASE = {json.dumps(_API_BASE)};\n"
         f"const RESPONSES = {json.dumps(responses)};\n"
         """
@@ -379,8 +391,10 @@ let economyState = null;
 let closetMarketEnabled = true;
 const me = { wallet: 'rMe' };
 const seen = {};
+const THUMB_W = 256;
 async function api(path) { return RESPONSES[path]; }
 function el(id) { return { id }; }
+function imgUrl(u) { return u; }
 function renderChipList(container, empty, entries) { seen[container.id] = entries.map((e) => e.imgSrc); }
 function openClosetBidForm() {}
 function cancelClosetOrder() {}
@@ -390,7 +404,15 @@ function viewClosetFill() {}
         + fns
         + """
 await loadClosetBook();
-await loadClosetMine();
+// #583: the Mine tab's three Closet surfaces are groups of mine_pure items,
+// and their art reaches the DOM through mineImgSrc.
+const built = minePure.buildMine({
+  mine: {}, bids: {}, closet: RESPONSES['/api/closet/orders/mine'],
+  wallet: 'rMe', closetMarketEnabled: true,
+});
+seen['mine-selling'] = built.selling.map(mineImgSrc);
+seen['mine-needsYou'] = built.needsYou.map(mineImgSrc);
+seen['mine-history'] = built.history.map(mineImgSrc);
 console.log(JSON.stringify(seen));
 """
     )
@@ -475,7 +497,7 @@ def test_closet_market_chips_render_the_server_trait_image():
     )
     assert seen == {
         "closet-book-bids": [_API_BASE + _CHICKEN],
-        "mine-closet-orders": [_API_BASE + _LASER],
-        "mine-closet-incoming": [_API_BASE + _CROWN],
-        "mine-closet-fills": [_API_BASE + _CHICKEN],
+        "mine-selling": [_API_BASE + _LASER],
+        "mine-needsYou": [_API_BASE + _CROWN],
+        "mine-history": [_API_BASE + _CHICKEN],
     }
