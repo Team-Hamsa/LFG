@@ -15,6 +15,7 @@
 #
 # Only stdlib/pytest imports may sit above the pins: nothing here may import
 # lfg_core before the environment below is in place.
+import asyncio
 import os
 import re
 import shutil
@@ -29,7 +30,23 @@ from _pytest.monkeypatch import MonkeyPatch
 
 # One throwaway root per session for every store the suite may reach; removed
 # again in pytest_unconfigure (the old per-dir mkdtemps were never cleaned up).
+#
+# A pytest-xdist worker inherits the CONTROLLER's environment, so the pins the
+# controller's import of this file already wrote would survive each worker's
+# own setdefault below and every worker would share one sqlite file per store
+# (verified: 4 workers, one lfg_nfts.db). Stamp the root we created into the
+# environment so a child can tell "my parent's conftest generated this" from
+# "the invoker deliberately exported it", and re-root only the former.
+_INHERITED_STORE_ROOT = os.environ.get("LFG_TEST_STORE_ROOT")
 _STORE_ROOT = tempfile.mkdtemp(prefix="lfg-test-stores-")
+os.environ["LFG_TEST_STORE_ROOT"] = _STORE_ROOT
+
+
+def _generated_by_parent(value: str | None) -> bool:
+    """True for a pin some parent process's copy of this file produced."""
+    if not value or not _INHERITED_STORE_ROOT:
+        return False
+    return value.startswith(_INHERITED_STORE_ROOT + os.sep)
 
 
 def _store_path(name: str, *, mkdir: bool = False) -> str:
@@ -85,6 +102,8 @@ _STORE_PINS = {
     "LAYER_DIM_CACHE": "layer_dimensions_cache.json",
 }
 for _var, _name in _STORE_PINS.items():
+    if _generated_by_parent(os.environ.get(_var)):
+        del os.environ[_var]  # an xdist controller's pin, not a real override
     os.environ.setdefault(_var, _store_path(_name))
 # Every pin a Python subprocess must carry. A test that builds a child env from
 # scratch copies these in: `env.update({k: os.environ[k] for k in
@@ -112,6 +131,29 @@ os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
 os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+# The Discord and Telegram surfaces have their own _require()-strict config
+# modules on top of lfg_core.config. A test file that imports one inside a
+# test body -- tests/test_discord_guild_sync.py, tests/test_telegram_buttons.py
+# -- only ever passed because some OTHER file had already imported it with
+# those vars patched in, leaving the module cached in sys.modules. That is a
+# collection-order dependency: it breaks the moment the two files land on
+# different pytest-xdist workers. Pin them centrally like every other
+# mandatory var (setdefault, so a file's own monkeypatch still wins).
+# The full import-time-mandatory set of both modules, so adding a surface
+# import to a test file never needs a preamble:
+#   discord  DISCORD_BOT_TOKEN LFG_SERVICE_URL SERVICE_TOKEN_DISCORD
+#            ADMIN_LOG_CHANNEL_ID (+ SEED / XUMM_* / TOKEN_*, pinned above)
+#   telegram TELEGRAM_BOT_TOKEN LFG_SERVICE_URL SERVICE_TOKEN_TELEGRAM
+#            TELEGRAM_ANNOUNCE_CHAT_ID
+# The two id vars must parse as a non-zero int; "1" is what every test file
+# that patches them already uses.
+os.environ.setdefault("DISCORD_BOT_TOKEN", "test-discord-bot-token")
+os.environ.setdefault("LFG_SERVICE_URL", "http://localhost:8000")
+os.environ.setdefault("SERVICE_TOKEN_DISCORD", "test-discord-surface-token")
+os.environ.setdefault("ADMIN_LOG_CHANNEL_ID", "1")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-bot-token")
+os.environ.setdefault("SERVICE_TOKEN_TELEGRAM", "test-telegram-surface-token")
+os.environ.setdefault("TELEGRAM_ANNOUNCE_CHAT_ID", "1")
 
 os.environ.setdefault("ECONOMY_ENABLED", "1")
 os.environ.setdefault("XRPL_NETWORK", "testnet")
@@ -148,6 +190,53 @@ os.environ.setdefault("SHOP_BASE_BRIX", "1.0")
 os.environ.setdefault("SHOP_MIN_BRIX", "5")
 os.environ.setdefault("SHOP_MAX_BRIX", "5000")
 os.environ.setdefault("SHOP_OFFER_TTL_SECONDS", "900")
+
+
+@pytest.fixture(autouse=True)
+def _main_thread_event_loop() -> Iterator[None]:
+    """Keep the legacy ``asyncio.get_event_loop()`` idiom working, always.
+
+    The suite has no pytest-asyncio: sync tests drive coroutines through a
+    local ``_run()`` helper, and several of those helpers still call
+    ``asyncio.get_event_loop().run_until_complete(...)``. Any test that runs
+    ``asyncio.run()`` (directly, or through a script's ``main()``) ends by
+    calling ``set_event_loop(None)``, leaving the main thread with no current
+    loop -- every later ``get_event_loop()`` then raises "There is no current
+    event loop in thread 'MainThread'". Serial collection order happened to
+    sort the poisoners after their victims; splitting the suite across
+    pytest-xdist workers does not, and three files already carry a bespoke
+    local workaround (test_headroom, test_house_closet_script,
+    test_identity_token_links). Restore a usable loop before every test
+    instead, so the idiom never depends on what ran first.
+    """
+    policy = asyncio.get_event_loop_policy()
+    try:
+        if not policy.get_event_loop().is_closed():
+            yield
+            return
+    except RuntimeError:
+        pass
+
+    loop = policy.new_event_loop()
+    policy.set_event_loop(loop)
+    try:
+        yield
+    finally:
+        # Close the loop we created whatever the test did with the current-loop
+        # slot: asyncio.run() clears that slot without touching our loop, so
+        # keying the close on "is it still current" would leak a selector and
+        # its fds for exactly the tests that poisoned the slot in the first
+        # place. The slot is a separate question -- clear it only while it
+        # still points at our loop, so we never strand a closed loop there and
+        # never disturb one the test installed itself.
+        try:
+            still_ours = policy.get_event_loop() is loop
+        except RuntimeError:
+            still_ours = False
+        if still_ours:
+            policy.set_event_loop(None)
+        if not loop.is_closed():
+            loop.close()
 
 
 @pytest.fixture(autouse=True)

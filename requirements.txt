@@ -1,48 +1,57 @@
+# Every direct dependency is pinned with `==`. The pins are the versions the
+# production stack is actually running (deploy box, verified green by the full
+# pytest gate on 2026-09-20), so CI tests what prod runs and the deployer's
+# pip step on a requirements change stays a no-op. Transitive dependencies
+# still float -- this buys reproducibility of the surface we import, not a
+# full lockfile. Bump these through the Dependabot PRs (.github/dependabot.yml)
+# so every bump goes through the gate rather than arriving unannounced on the
+# next fresh install.
+
 # Discord bot framework supporting slash commands and UI components
-discord.py>=2.0.0
+discord.py==2.7.1
 
 # XUMM SDK for generating transaction payloads
-xumm-sdk-py
+xumm-sdk-py==1.0.4
 
 # XRP Ledger client libraries
-xrpl-py>=5.0.0
+xrpl-py==5.0.0
 
 # BunnyCDN storage client library for file uploads
-bunnycdn-storage
-bunnycdnpython
+bunnycdn-storage==0.4
+bunnycdnpython==0.0.8
 
 # NumPy (required by OpenCV)
-numpy
+numpy==2.2.6
 
 # Image processing
-opencv-python
-Pillow
-ffmpeg-python  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
-qrcode[pil]  # For generating QR codes locally
+opencv-python==4.13.0.92
+Pillow==12.2.0
+ffmpeg-python==0.2.0  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
+qrcode[pil]==8.2  # For generating QR codes locally
 
 # Environment variable management
-python-dotenv
+python-dotenv==0.21.1
 
 # Async HTTP client
-aiohttp
+aiohttp==3.14.1
 
 # OAuth 1.0a request signing (X/Twitter API — surfaces/x_bot/x_api.py).
 # Already present transitively via xumm-sdk-py → requests-oauthlib, but we
 # import it directly, so declare it directly.
-oauthlib
+oauthlib==3.3.1
 
 # Fernet at-rest encryption for per-user X OAuth2 tokens (#252,
 # lfg_service/x_oauth.py — a leaked DB file must not leak posting capability).
-cryptography
+cryptography==50.0.0
 
 # Voice support for Discord (optional)
-PyNaCl
+PyNaCl==1.6.2
 
 # Testing (webapp smoke tests)
-pytest
+pytest==9.1.0
 
 # Telegram bot framework
-python-telegram-bot>=21
+python-telegram-bot==22.8
 
 # YAML config parsing
-PyYAML
+PyYAML==6.0.3

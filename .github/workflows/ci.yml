@@ -21,9 +21,24 @@ on:
   pull_request:
     branches: [main]
 
+# One gate per PR: a superseding push cancels the in-flight run, since only
+# the tip matters there.
+#
+# Pushes to main get a group of their own per run, NOT a shared one with
+# cancel-in-progress off. Entering an occupied group cancels whatever is
+# QUEUED there regardless of that setting -- with A running and B queued, C
+# would evict B -- and main's green tick is the record that a merged commit
+# passed the gate, so no main run may be dropped.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   gate:
     runs-on: ubuntu-latest
+    # The gate is ~4 min; anything past 20 is wedged, not slow. Without this a
+    # hung run holds a concurrency slot for GitHub's 6-hour default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +46,20 @@ jobs:
         with:
           python-version: "3.10"
           cache: pip
+          # setup-python's default only globs requirements.txt, so a dev-only
+          # dependency change would reuse a stale pip cache key.
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # pre-commit builds an isolated env per remote hook repo (ruff, gitleaks)
+      # on first use -- 33s of the gate's 200s, rebuilt from scratch every run.
+      # The config's pinned `rev`s make the hash a sound cache key.
+      - name: Cache pre-commit hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-py3.10-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Create venv and install dependencies
         # Build the SAME .venv the local pre-push hook expects: the mypy and

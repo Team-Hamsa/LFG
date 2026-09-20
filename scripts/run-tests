@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Run the pytest gate on the fastest scratch filesystem available.
+#
+# WHY THIS EXISTS: the suite's stores are SQLite. Every commit fsyncs, and on
+# a box where the checkout's filesystem is shared with a busy writer (the
+# deploy box runs an XRPL validator on the same ext4 volume) each of those
+# fsyncs queues behind the journal. Measured on the deploy box 2026-09-20,
+# same suite, same machine, only TMPDIR moved:
+#
+#     TMPDIR=/tmp   (ext4, shared journal)   881s   20% CPU
+#     TMPDIR=/dev/shm (tmpfs)                167s   83% CPU
+#
+# Nothing about which tests run changes -- the process simply stops waiting in
+# jbd2_log_wait_commit. conftest.py builds its whole per-session store root
+# with tempfile.mkdtemp(), and pytest's own basetemp is TMPDIR-derived too, so
+# pointing TMPDIR at a tmpfs moves every store the suite writes.
+#
+# This wrapper picks TMPDIR and nothing else -- it does NOT add -n auto; the
+# caller (the pre-push hook, or you) passes the pytest flags. Every step below
+# is advisory: an explicit TMPDIR from the caller wins outright, and any check
+# that fails leaves TMPDIR alone and runs on the default. A slower gate is a
+# fine outcome; a gate that refuses to start is not.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The serial suite writes ~600 MB of store churn and a parallel run multiplies
+# that by the worker count, so refuse a tmpfs that could fill mid-run (a full
+# tmpfs surfaces as unrelated ENOSPC failures).
+MIN_FREE_KIB=$((4 * 1024 * 1024))
+
+# Echo a private scratch dir on a usable tmpfs, or fail. Called from an `if`,
+# so errexit is suspended inside it -- every step states its own failure.
+make_scratch() {
+    local base=/dev/shm free dir probe
+    [[ -d $base && -w $base ]] || return 1
+
+    free="$(df -Pk "$base" 2>/dev/null | awk 'NR==2 {print $4}')" || return 1
+    [[ $free =~ ^[0-9]+$ ]] || return 1
+    (( free >= MIN_FREE_KIB )) || return 1
+
+    # mktemp -d, NEVER a predictable `mkdir -p /dev/shm/lfg-pytest-$(id -u)`.
+    # /dev/shm is world-writable (1777), and mkdir -p adopts an existing
+    # directory whatever its owner and mode -- so a hostile local user could
+    # pre-create that path, then swap entries underneath us. That matters
+    # because TMPDIR is not just scratch: the suite writes executable shims
+    # under pytest's tmp_path and runs them, so an attacker-owned parent is
+    # arbitrary code execution as whoever runs the gate. mktemp -d is atomic
+    # and yields a 0700 directory we own, closing the whole class.
+    dir="$(mktemp -d "$base/lfg-pytest.XXXXXXXX" 2>/dev/null)" || return 1
+
+    # A tmpfs mounted noexec -- normal on hardened hosts and in containers --
+    # would fail those same shim tests with PermissionError. Writability says
+    # nothing about the mount flags, so prove exec works rather than assume it.
+    probe="$dir/execprobe"
+    if ! { printf '#!/bin/sh\nexit 0\n' >"$probe" && chmod +x "$probe" && "$probe"; } 2>/dev/null; then
+        rm -rf -- "$dir" 2>/dev/null || true
+        return 1
+    fi
+    rm -f -- "$probe"
+
+    printf '%s\n' "$dir"
+}
+
+if [[ -z "${TMPDIR:-}" ]]; then
+    # Reap our own leftovers before making a new one. There is no
+    # after-the-run cleanup below -- `exec` leaves nothing to run it -- and
+    # none is needed: a green run leaves an EMPTY directory, because pyproject
+    # keeps tmp_path trees only for FAILED tests (measured: 0 bytes after a
+    # green full suite). So what accumulates here is the evidence from failed
+    # runs, which is worth keeping around a while: `ls -dt /dev/shm/lfg-pytest.*`
+    # finds the most recent. Six hours is long enough to still be debugging one
+    # and short enough to bound what sits in RAM.
+    #
+    # Only directories this user owns can match, and /dev/shm's sticky bit
+    # stops anyone else renaming one out from under the rm.
+    find /dev/shm -maxdepth 1 -type d -user "$(id -u)" -name 'lfg-pytest.*' \
+        -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
+
+    if scratch="$(make_scratch)"; then
+        export TMPDIR="$scratch"
+    fi
+fi
+
+# exec, deliberately. The wrapper has no work left once pytest starts, and
+# replacing this shell is what makes signals behave -- both alternatives are
+# broken, in opposite directions:
+#
+#   * a background child (`cmd &`) starts with SIGINT and SIGQUIT set to
+#     IGNORE, because POSIX says an asynchronous list in a shell without job
+#     control does, and CPython keeps an inherited SIG_IGN. Ctrl-C would never
+#     reach the suite.
+#   * a foreground child defers a trapped SIGTERM until pytest returns, so
+#     cancelling would leave the run going.
+#
+# exec hands pytest the signals, the terminal (so -s and --pdb still work) and
+# the exit status, with no relaying to get wrong.
+exec "$here/venv-python" -m pytest "$@"

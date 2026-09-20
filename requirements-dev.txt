@@ -1,22 +1,37 @@
+# Every direct dependency is pinned with `==`. The pins are the versions the
+# production stack is actually running (deploy box, verified green by the full
+# pytest gate on 2026-09-20), so CI tests what prod runs and the deployer's
+# pip step on a requirements change stays a no-op. Transitive dependencies
+# still float -- this buys reproducibility of the surface we import, not a
+# full lockfile. Bump these through the Dependabot PRs (.github/dependabot.yml)
+# so every bump goes through the gate rather than arriving unannounced on the
+# next fresh install.
+
 # Dev-only tooling. Install with: pip install -r requirements-dev.txt
 # Runtime deps stay in requirements.txt.
 
 # Manages the pre-push hook gate (ruff, ruff-format, mypy, gitleaks, pytest).
-pre-commit>=3.7,<5
+pre-commit==4.6.0
 
 # Type checker (also pulled by the pre-commit mypy hook; pinned here so it can
 # be run directly during the Phase-B grind: `.venv/bin/mypy .`).
-mypy>=1.13,<2
+mypy==1.20.2
 
 # Linter/formatter (also run via pre-commit; pinned here for direct CLI use
 # during the Phase-B grind: `.venv/bin/ruff check --fix .`).
-ruff>=0.8,<1
+ruff==0.15.17
+
+# Parallel test execution for the pre-push/CI pytest gate (-n auto). The
+# suite is xdist-clean as of 2026-09-20: --dist loadfile keeps each module's
+# tests on one worker, and conftest.py pins the surface config vars plus a
+# main-thread event loop so nothing depends on collection order any more.
+pytest-xdist==3.8.0
 
 # Type stubs for PyYAML (lfg_core/trait_config.py does `import yaml`); mypy
 # needs these installed or it fails CI with "Library stubs not installed".
-types-PyYAML
+types-PyYAML==6.0.12.20260518
 
 # Type stubs for oauthlib (surfaces/x_bot/x_api.py signs requests with
 # oauthlib.oauth1.Client); mypy needs these installed or it fails with
 # "Library stubs not installed".
-types-oauthlib
+types-oauthlib==3.3.0.20260518
