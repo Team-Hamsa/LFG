@@ -11,7 +11,7 @@
 // — see webapp/client/market_pure.js's own header for the full rationale.
 import * as marketPure from './market_pure.js?v=32';
 // Closet Market (#443) pure helpers — Node-tested in tests/test_closet_market_pure_js.py.
-import * as closetPure from './closet_market_pure.js?v=3';
+import * as closetPure from './closet_market_pure.js?v=4';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=26';

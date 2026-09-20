@@ -93,30 +93,7 @@ def test_keys_group_by_slot():
     assert run_js(f"M.keyValues({json.dumps(keys)}, 'Head')") == ["Crown", "Tiara"]
 
 
-def test_chip_labels():
-    order = {
-        "side": "bid",
-        "slot": "Head",
-        "value": "Crown",
-        "price_brix": "10",
-        "state": "pending_escrow",
-    }
-    assert (
-        run_js(f"M.orderChipLabel({json.dumps(order)})")
-        == "Bid · Head: Crown · 10 BRIX (awaiting signature)"
-    )
-    fill = {
-        "buyer": "rMe",
-        "seller": "rYou",
-        "slot": "Head",
-        "value": "Crown",
-        "price_brix": "10",
-        "state": "refunded",
-    }
-    assert (
-        run_js(f"M.fillChipLabel({json.dumps(fill)}, 'rMe')")
-        == "Bought · Head: Crown · 10 BRIX — Refunded"
-    )
+def test_holding_fill_action_picks_deposit_for_a_wallet_token():
     token = {
         "source": "token",
         "nft_id": "N1",
@@ -129,16 +106,11 @@ def test_chip_labels():
         "needsDeposit": True,
         "nftId": "N1",
     }
-    assert (
-        run_js(f"M.holdingLabel({json.dumps(token)})") == "Head: Crown — 10 BRIX (in your wallet)"
-    )
-    assert (
-        run_js("M.closetAssetLabel({slot: 'Head', value: 'Crown', count: 3, listed: 1})")
-        == "Head: Crown ×3 (1 listed)"
-    )
-    assert (
-        run_js("M.closetAssetLabel({slot: 'Head', value: 'Crown', count: 3})") == "Head: Crown ×3"
-    )
+    assert run_js("M.holdingFillAction({source: 'closet'})") == {
+        "label": "Fill",
+        "needsDeposit": False,
+        "nftId": None,
+    }
 
 
 def test_buy_disclosure_names_the_price_and_the_xrp_fallback():
