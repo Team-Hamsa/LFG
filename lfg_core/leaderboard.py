@@ -4,12 +4,30 @@ Boards operate over two connections:
 - `hconn`: per-network history DB (`history_store`) — `nft_events`, `brix_events`.
 - `oconn`: per-network on-chain index DB (`nft_index`) — `onchain_nfts`.
 
+Every board that reads `nft_events` must first scope itself to the collection
+(`_collection_scope`). The archive carries every token our issuer has ever
+touched: characters, the soulbound per-user Closet tokens (taxon 1762) and
+tradeable trait tokens (taxon 176). Nothing in a row distinguishes them —
+flags and transfer fee are identical for a legacy character and a trait token
+(0x0009/7000), a Closet claim's mint carries the same `action=mint` memo a
+paid mint does (86 on mainnet), and `nft_number` is NULL for the 699 legacy
+editions the index never resolved. Membership in the on-chain index is the
+only authority, exactly as the BRIX drip scopes its epochs.
+
 Boards (this module):
-- `users_nfts`: NFTs held per wallet. All-time (`start_ts == 0`) reads the
-  live on-chain index (`onchain_nfts`) for a point-in-time census. Windowed
-  queries instead net acquisitions/dispositions from `nft_events` in the
-  window (mint/transfer/sale in +1, transfer/sale/burn out -1), keeping only
-  positive totals — this is a *delta within the window*, not a live balance.
+- `users_nfts`: two things under one board key, because the UI labels it
+  "Holders" on All Time and "Minters" on any window. All-time
+  (`start_ts == 0`) reads the live on-chain index (`onchain_nfts`) for a
+  point-in-time holdings census. Windowed counts *mints*: brand-new
+  collection editions the issuer first delivered to a wallet inside the
+  window. Mints are backend-signed, so `mint.to_addr` is always the issuer —
+  the issuer -> user delivery is the only user-attributable leg. A rebirth
+  (the edition was burned before this token's mint: a legacy remint swap or
+  an assemble) re-delivers an edition that already existed and is not a mint,
+  nor is an assemble-memo'd delivery of a new edition (that is a build).
+  A marketplace sale is an acquisition, not a mint. The ~3,500 pre-app
+  editions have no delivery event in any store, so they score for nobody;
+  that is why All Time stays a census.
 - `users_swaps`: trait swaps per wallet — `modify` events (modern in-place
   swaps, keyed to the receiving wallet) PLUS legacy burn+remint swaps
   counted from the BURN side: a burn whose edition was subsequently
@@ -98,6 +116,31 @@ def period_bounds(period: str, start: str | None, *, now: int) -> tuple[int, int
     raise ValueError(f"unknown period: {period!r}")
 
 
+_SCOPE_TABLE = "lb_collection_scope"
+
+
+def _collection_scope(hconn: sqlite3.Connection, oconn: sqlite3.Connection) -> str:
+    """Materialize the collection's `nft_id`s into a TEMP table on `hconn`.
+
+    `nft_events` and `onchain_nfts` live in different database files, so a
+    board cannot simply join them; this bridges the two by copying the index's
+    key column across. Returns the table name to reference in a subquery.
+
+    Rebuilt on every call rather than cached: `hconn` is short-lived in the
+    service (one per request that misses the 60s cache) but long-lived in
+    tests and scripts, and a token indexed since the last call must be in
+    scope. The index is capped at MAX_COLLECTION_SIZE (10,000) rows, so the
+    copy is bounded and cheap.
+    """
+    hconn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {_SCOPE_TABLE} (nft_id TEXT PRIMARY KEY)")
+    hconn.execute(f"DELETE FROM {_SCOPE_TABLE}")
+    # Materialized before inserting: `hconn` and `oconn` are the same object
+    # in some callers, and iterating a cursor while writing to it is not safe.
+    members = [(r[0],) for r in oconn.execute("SELECT nft_id FROM onchain_nfts").fetchall()]
+    hconn.executemany(f"INSERT OR IGNORE INTO {_SCOPE_TABLE} (nft_id) VALUES (?)", members)
+    return _SCOPE_TABLE
+
+
 def _exclude_clause(col: str, system_accounts: frozenset[str]) -> tuple[str, list[str]]:
     if not system_accounts:
         return "", []
@@ -134,28 +177,16 @@ def _board_users_nfts(
         cur = oconn.execute(sql, (*params, limit))
         return [_row(wallet=r["owner"], value=r["value"]) for r in cur.fetchall()]
 
-    excl_to, params_to = _exclude_clause("to_addr", system_accounts)
-    excl_from, params_from = _exclude_clause("from_addr", system_accounts)
-    sql = f"""
-        SELECT wallet, SUM(delta) AS value FROM (
-            SELECT to_addr AS wallet, 1 AS delta FROM nft_events
-            WHERE event IN ('mint','transfer','sale') AND to_addr IS NOT NULL
-              AND ts >= ? AND ts < ?{excl_to}
-            UNION ALL
-            SELECT from_addr AS wallet, -1 AS delta FROM nft_events
-            WHERE event IN ('transfer','sale','burn') AND from_addr IS NOT NULL
-              AND ts >= ? AND ts < ?{excl_from}
-        ) GROUP BY wallet HAVING SUM(delta) > 0 ORDER BY value DESC LIMIT ?
-    """
-    query_params: tuple[Any, ...] = (
-        start_ts,
-        end_ts,
-        *params_to,
-        start_ts,
-        end_ts,
-        *params_from,
-        limit,
+    # Windowed: mints, not holdings (see the module docstring).
+    issuers = list(system_accounts) if system_accounts else [None]
+    issuer_ph = ",".join("?" * len(issuers))
+    excl, excl_params = _exclude_clause("t.to_addr", system_accounts)
+    scope = _collection_scope(hconn, oconn)
+    sql = (
+        _first_delivery_sql("t.to_addr AS wallet", "t.to_addr", issuer_ph, excl, scope)
+        + " ORDER BY value DESC LIMIT ?"
     )
+    query_params: tuple[Any, ...] = (*issuers, start_ts, end_ts, *excl_params, limit)
     cur = hconn.execute(sql, query_params)
     return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
 
@@ -179,6 +210,7 @@ _BURN_SWAP_EXISTS = """EXISTS (
             SELECT 1 FROM nft_events m
              WHERE m.event = 'mint' AND m.nft_number = b.nft_number
                AND m.nft_id != b.nft_id AND m.ts >= b.ts
+               AND m.nft_id IN (SELECT nft_id FROM {scope})
                AND (m.memo_action IS NULL OR m.memo_action != 'assemble')
                AND NOT EXISTS (
                    SELECT 1 FROM nft_events m2
@@ -188,30 +220,96 @@ _BURN_SWAP_EXISTS = """EXISTS (
           )"""
 
 
-def _burn_swap_sql(select_cols: str, group_by: str, excl: str) -> str:
+def _burn_swap_sql(select_cols: str, group_by: str, excl: str, scope: str) -> str:
     """Legacy-swap subquery over burns. Param order: (start_ts, end_ts,
-    *exclude_params). Windowed on the burn's timestamp."""
+    *exclude_params). Windowed on the burn's timestamp.
+
+    Scoped to the collection like the modify leg. That is belt-and-braces
+    rather than a live fix: `nft_number` is only ever populated by looking
+    the token up in the index, so a non-NULL edition already implies
+    membership, and mainnet has zero rows that carry one without it. The
+    implication is implicit though, and an implicit "this row must be a
+    character" is precisely what put Closet tokens on this board — so say it
+    in the query instead of relying on how the column gets filled.
+    """
     return f"""
         SELECT {select_cols}, COUNT(*) AS value
         FROM nft_events b
         WHERE b.event = 'burn' AND b.nft_number IS NOT NULL
           AND b.ts >= ? AND b.ts < ?
-          AND {_BURN_SWAP_EXISTS}{excl}
+          AND b.nft_id IN (SELECT nft_id FROM {scope})
+          AND {_BURN_SWAP_EXISTS.format(scope=scope)}{excl}
         GROUP BY {group_by}
     """
 
 
-def _rebirth_sql(select_cols: str, group_by: str, memo_cond: str, issuer_ph: str, excl: str) -> str:
+def _first_delivery_sql(
+    select_cols: str, group_by: str, issuer_ph: str, excl: str, scope: str
+) -> str:
+    """Mint-delivery subquery: the issuer handing over a BRAND-NEW collection
+    edition. Param order: (*issuers, start_ts, end_ts, *exclude_params).
+
+    The inverse of `_rebirth_sql`'s burn test, plus the assemble memo (an
+    assemble of a never-before-seen edition is a build, not a mint) and the
+    collection scope — without which a Closet claim scores as a mint, since
+    its mint carries the same `action=mint` memo a paid mint does.
+
+    `t` must be the token's FIRST recorded movement, which (together with
+    `from_addr IN (issuers)`) is what makes it the mint delivery. An edition
+    handed back to the issuer and re-delivered would otherwise mint twice —
+    `COUNT(DISTINCT t.nft_id)` dedupes only inside one wallet's group, so the
+    second recipient scored an edition that already existed (mainnet has one
+    such token). The test is deliberately unwindowed: a redelivery is not a
+    mint however long after the original it lands.
+
+    Ordered on `ledger_index`, not `ts` or `tx_hash`. Close times repeat
+    across ledgers and a hash is not an execution order, so either would let
+    a redelivery pose as the first delivery; the ledger sequence is the one
+    total order the archive actually records (non-NULL on every mainnet row).
+    A movement sharing the delivery's own ledger does not suppress it: a
+    token's first movement is always from the issuer — it is minted into the
+    issuer's own account — so a same-ledger sibling can only be the later of
+    the two.
+
+    COUNT(DISTINCT) is then belt-and-braces against a duplicated mint row in
+    the archive. The 25 in-index tokens whose edition the index never
+    resolved always read as first deliveries (`b.nft_number = t.nft_number`
+    is NULL either way) — they are real characters that reached a wallet, so
+    counting them is the right side to err on.
+    """
+    return f"""
+        SELECT {select_cols}, COUNT(DISTINCT t.nft_id) AS value
+        FROM nft_events t
+        JOIN nft_events m ON m.nft_id = t.nft_id AND m.event = 'mint'
+        WHERE t.event IN ('transfer','sale') AND t.from_addr IN ({issuer_ph})
+          AND t.ts >= ? AND t.ts < ?
+          AND t.nft_id IN (SELECT nft_id FROM {scope})
+          AND (m.memo_action IS NULL OR m.memo_action != 'assemble')
+          AND NOT EXISTS (SELECT 1 FROM nft_events e
+                          WHERE e.nft_id = t.nft_id AND e.event IN ('transfer','sale')
+                            AND e.ledger_index < t.ledger_index)
+          AND NOT EXISTS (SELECT 1 FROM nft_events b
+                          WHERE b.event='burn' AND b.nft_number = t.nft_number
+                            AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
+        GROUP BY {group_by}
+    """
+
+
+def _rebirth_sql(
+    select_cols: str, group_by: str, memo_cond: str, issuer_ph: str, excl: str, scope: str
+) -> str:
     """Rebirth-delivery subquery. Param order: (*issuers, start_ts, end_ts,
     *exclude_params). Any system account counts as a delivering issuer —
     broader than strictly the NFT issuer, but harmless since only the NFT
-    issuer mints/burns NFTs."""
+    issuer mints/burns NFTs. Collection-scoped for the same reason as
+    `_burn_swap_sql`."""
     return f"""
         SELECT {select_cols}, COUNT(*) AS value
         FROM nft_events t
         JOIN nft_events m ON m.nft_id = t.nft_id AND m.event = 'mint'
         WHERE t.event IN ('transfer','sale') AND t.from_addr IN ({issuer_ph})
           AND t.ts >= ? AND t.ts < ?
+          AND t.nft_id IN (SELECT nft_id FROM {scope})
           AND {memo_cond}
           AND EXISTS (SELECT 1 FROM nft_events b
                       WHERE b.event='burn' AND b.nft_number = t.nft_number
@@ -230,13 +328,18 @@ def _board_users_swaps(
 ) -> list[Row]:
     excl_mod, excl_mod_params = _exclude_clause("to_addr", system_accounts)
     excl_burn, excl_burn_params = _exclude_clause("b.from_addr", system_accounts)
+    # Both legs are scoped to the collection: 902 of mainnet's 1,512
+    # NFTokenModify events are the owner's Closet token being re-stamped by an
+    # economy op, which is not a trait swap.
+    scope = _collection_scope(hconn, oconn)
     burn_swaps = _burn_swap_sql(
-        "b.from_addr AS wallet", "b.from_addr", " AND b.from_addr IS NOT NULL" + excl_burn
+        "b.from_addr AS wallet", "b.from_addr", " AND b.from_addr IS NOT NULL" + excl_burn, scope
     )
     sql = f"""
         SELECT wallet, SUM(value) AS value FROM (
             SELECT to_addr AS wallet, COUNT(*) AS value FROM nft_events
-             WHERE event='modify' AND ts>=? AND ts<?{excl_mod} GROUP BY to_addr
+             WHERE event='modify' AND ts>=? AND ts<?
+               AND nft_id IN (SELECT nft_id FROM {scope}){excl_mod} GROUP BY to_addr
             UNION ALL
             {burn_swaps}
         ) GROUP BY wallet ORDER BY value DESC LIMIT ?
@@ -265,8 +368,11 @@ def _board_users_builds(
     issuers = list(system_accounts) if system_accounts else [None]
     excl, excl_params = _exclude_clause("t.to_addr", system_accounts)
     issuer_ph = ",".join("?" * len(issuers))
+    scope = _collection_scope(hconn, oconn)
     sql = (
-        _rebirth_sql("t.to_addr AS wallet", "t.to_addr", _REBIRTH_IS_ASSEMBLE, issuer_ph, excl)
+        _rebirth_sql(
+            "t.to_addr AS wallet", "t.to_addr", _REBIRTH_IS_ASSEMBLE, issuer_ph, excl, scope
+        )
         + " ORDER BY value DESC LIMIT ?"
     )
     params = (*issuers, start_ts, end_ts, *excl_params, limit)
@@ -282,13 +388,19 @@ def _board_nft_swaps(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    burn_swaps = _burn_swap_sql("b.nft_id AS nft_id, b.nft_number AS nft_number", "b.nft_id", "")
     # Keyed per edition (a remint swap changes the token's nft_id); rows with
-    # no known edition fall back to keying on nft_id.
+    # no known edition fall back to keying on nft_id. That fallback is what
+    # gave every Closet token its own blank row (no edition, no art) at the
+    # top of the board — hence the collection scope on both legs.
+    scope = _collection_scope(hconn, oconn)
+    burn_swaps = _burn_swap_sql(
+        "b.nft_id AS nft_id, b.nft_number AS nft_number", "b.nft_id", "", scope
+    )
     sql = f"""
         SELECT MAX(nft_id) AS nft_id, MAX(nft_number) AS nft_number, SUM(value) AS value FROM (
             SELECT nft_id, nft_number, COUNT(*) AS value FROM nft_events
-             WHERE event='modify' AND ts>=? AND ts<? GROUP BY nft_id
+             WHERE event='modify' AND ts>=? AND ts<?
+               AND nft_id IN (SELECT nft_id FROM {scope}) GROUP BY nft_id
             UNION ALL
             {burn_swaps}
         ) GROUP BY COALESCE(nft_number, nft_id) ORDER BY value DESC LIMIT ?
