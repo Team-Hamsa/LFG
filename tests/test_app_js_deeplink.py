@@ -82,8 +82,13 @@ def test_qr_disclosure_expansion_survives_poll_rerenders():
 
 
 def test_cache_busters_bumped():
+    """A ratchet, not a pin — see the twin in tests/test_harvest_pure_js.py.
+    An exact equality makes every unrelated client change edit this file; a
+    floor still catches a version regressing below what this module shipped."""
     html = _read("index.html")
-    assert "app.js?v=111" in html
+    m = re.search(r'src="app\.js\?v=(\d+)"', html)
+    assert m, "no app.js cache buster in index.html"
+    assert int(m.group(1)) >= 111, "app.js?v= regressed below the shipped version"
 
 
 # ---------------------------------------------------------------------------
