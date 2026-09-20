@@ -281,7 +281,10 @@ export function buildMine({
   ];
   const history = fills.filter((f) => !fillNeedsUser(f, wallet)).map((f) => fillItem(f, wallet));
   const active = needsYou.length + selling.length + buying.length;
-  const owned = active + history.length + stuff.characters.length + stuff.traits.length;
+  // Ownership, not activity: an outgoing bid buys nothing yet and a settled
+  // fill is a memory, so neither suppresses "You don't own anything yet".
+  // Selling counts because every row there is backed by something held.
+  const owned = selling.length + stuff.characters.length + stuff.traits.length;
   return {
     needsYou,
     selling,

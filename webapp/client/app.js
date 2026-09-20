@@ -5868,11 +5868,15 @@ function closeMineAll() {
 }
 
 async function loadMarketMine() {
-  let mine = {};
+  let mine;
   try {
     mine = await api('/api/market/mine');
   } catch (e) {
+    // Stop here: an empty payload is indistinguishable from an empty wallet,
+    // so rendering it would replace a stocked Mine tab with "You don't own
+    // anything yet" on a transient 500. Leave whatever is on screen.
     showError(e.message);
+    return;
   }
   // #283: bids load separately — a bids failure must not blank the listings.
   let bids = {};

@@ -414,3 +414,18 @@ def test_stuck_actions_are_oldest_first_however_the_server_ordered_them():
         "fill:fold",
         "fill:fnew",
     ]
+
+
+def test_owns_nothing_counts_holdings_not_activity():
+    """An outgoing bid buys nothing yet and a settled fill is a memory. A
+    wallet holding neither a character nor a trait still owns nothing, and
+    must still be offered the Browse control."""
+    out = build(bids={"my_bids": [MY_BID]}, closet={"fills": [FILL_DONE]})
+    assert out["buying"] and out["history"]
+    assert out["ownsNothing"] is True
+    assert out["nothingActive"] is False
+
+
+def test_a_listing_is_ownership_backed_so_it_counts():
+    out = build(mine={"listings": [CHAR_LISTING]})
+    assert out["ownsNothing"] is False
