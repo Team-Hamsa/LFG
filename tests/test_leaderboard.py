@@ -589,3 +589,62 @@ def test_users_nfts_windowed_excludes_system_accounts():
         )
         == []
     )
+
+
+def test_users_nfts_windowed_credits_only_the_editions_first_recipient():
+    """An edition returned to the issuer and re-delivered must not mint twice.
+    COUNT(DISTINCT t.nft_id) only dedupes inside one wallet's group, so the
+    second recipient scored a mint of an edition that already existed
+    (Greptile P1 on PR #578; mainnet has one such token today)."""
+    h, o = _dbs()
+    _member(o, "N1", 1, "rB")
+    _delivery(h, nft_id="N1", edition=1, wallet="rA", ts=50)
+    # rA hands it back and the issuer re-delivers to rB, same window
+    _ev(
+        h,
+        tx_hash="ret",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr="rA",
+        to_addr=ISSUER,
+        ts=52,
+    )
+    _ev(
+        h,
+        tx_hash="redeliver",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr=ISSUER,
+        to_addr="rB",
+        ts=54,
+    )
+    rows = leaderboard.compute(
+        "users_nfts", h, o, start_ts=40, end_ts=60, network="testnet", system_accounts=SYS
+    )
+    assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]
+
+
+def test_users_nfts_windowed_skips_a_redelivery_whose_first_hop_predates_the_window():
+    """The first-hop test is deliberately unwindowed: a redelivery is not a
+    mint no matter how long after the original it lands."""
+    h, o = _dbs()
+    _member(o, "N1", 1, "rB")
+    _delivery(h, nft_id="N1", edition=1, wallet="rA", ts=10)  # before the window
+    _ev(
+        h,
+        tx_hash="redeliver",
+        event="transfer",
+        nft_id="N1",
+        nft_number=1,
+        from_addr=ISSUER,
+        to_addr="rB",
+        ts=50,
+    )
+    assert (
+        leaderboard.compute(
+            "users_nfts", h, o, start_ts=40, end_ts=60, network="testnet", system_accounts=SYS
+        )
+        == []
+    )

@@ -243,12 +243,22 @@ def _first_delivery_sql(
     collection scope — without which a Closet claim scores as a mint, since
     its mint carries the same `action=mint` memo a paid mint does.
 
-    COUNT(DISTINCT) because a token can be delivered, returned and
-    re-delivered; the board counts editions minted, not delivery events. The
-    25 in-index tokens whose edition the index never resolved always read as
-    first deliveries (`b.nft_number = t.nft_number` is NULL either way) —
-    they are real characters that reached a wallet, so counting them is the
-    right side to err on.
+    `t` must be the token's FIRST recorded movement, which (together with
+    `from_addr IN (issuers)`) is what makes it the mint delivery. An edition
+    handed back to the issuer and re-delivered would otherwise mint twice —
+    `COUNT(DISTINCT t.nft_id)` dedupes only inside one wallet's group, so the
+    second recipient scored an edition that already existed (mainnet has one
+    such token). The test is deliberately unwindowed: a redelivery is not a
+    mint however long after the original it lands. A token's first movement
+    can never predate its issuer delivery — it is minted into the issuer's
+    own account — so nothing legitimate is suppressed, and `tx_hash` breaks
+    the tie if two movements share a ledger close time.
+
+    COUNT(DISTINCT) is then belt-and-braces against a duplicated mint row in
+    the archive. The 25 in-index tokens whose edition the index never
+    resolved always read as first deliveries (`b.nft_number = t.nft_number`
+    is NULL either way) — they are real characters that reached a wallet, so
+    counting them is the right side to err on.
     """
     return f"""
         SELECT {select_cols}, COUNT(DISTINCT t.nft_id) AS value
@@ -258,6 +268,10 @@ def _first_delivery_sql(
           AND t.ts >= ? AND t.ts < ?
           AND t.nft_id IN (SELECT nft_id FROM {scope})
           AND (m.memo_action IS NULL OR m.memo_action != 'assemble')
+          AND NOT EXISTS (SELECT 1 FROM nft_events e
+                          WHERE e.nft_id = t.nft_id AND e.event IN ('transfer','sale')
+                            AND (e.ts < t.ts
+                                 OR (e.ts = t.ts AND e.tx_hash < t.tx_hash)))
           AND NOT EXISTS (SELECT 1 FROM nft_events b
                           WHERE b.event='burn' AND b.nft_number = t.nft_number
                             AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
