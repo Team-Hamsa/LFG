@@ -192,7 +192,7 @@ def test_index_html_cache_buster_bumped():
     src = open(os.path.join(ROOT, "webapp", "client", "index.html")).read()
     m = re.search(r'src="app\.js\?v=(\d+)"', src)
     assert m, "no app.js cache buster in index.html"
-    assert int(m.group(1)) >= 111, "app.js?v= regressed below the shipped version"
+    assert int(m.group(1)) >= 112, "app.js?v= regressed below the shipped version"
 
 
 # ---------------------------------------------------------------------------

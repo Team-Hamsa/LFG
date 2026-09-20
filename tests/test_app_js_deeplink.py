@@ -88,7 +88,7 @@ def test_cache_busters_bumped():
     html = _read("index.html")
     m = re.search(r'src="app\.js\?v=(\d+)"', html)
     assert m, "no app.js cache buster in index.html"
-    assert int(m.group(1)) >= 111, "app.js?v= regressed below the shipped version"
+    assert int(m.group(1)) >= 112, "app.js?v= regressed below the shipped version"
 
 
 # ---------------------------------------------------------------------------
