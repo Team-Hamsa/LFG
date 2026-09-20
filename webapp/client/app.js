@@ -2613,7 +2613,7 @@ async function refreshOffersBadge(force) {
   try { offers = await fetchPendingOffers(); } catch (_) { return; }
   const btn = el('offers-btn');
   btn.hidden = offers.length === 0;
-  if (offers.length) btn.textContent = `🎁 Pending (${offers.length})`;
+  if (offers.length) btn.textContent = `🎁 Offers (${offers.length})`;
 }
 
 function offerRow(o) {
