@@ -344,7 +344,11 @@ select option { background: var(--surface); color: var(--text); }
 }
 
 /* --- Buttons ---
-   One primary per view; it gets the sticker. Everything else stays calm. */
+   One primary per view; it gets the loud yellow sticker. Secondaries get the
+   same sticker frame in a calm dark fill, so a row of actions reads as one
+   family. Both keep a flatter radius than the base pill: `.actions` squeezes
+   its buttons to flex:1 on wide screens, and a 99px radius at that width
+   rounds a short label into a blob. */
 
 button {
   font-family: 'Inter', sans-serif;
@@ -370,26 +374,38 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+button.primary, button.secondary {
+  border-radius: 14px;
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker-sm);
+}
+button.primary:active, button.secondary:active {
+  transform: translate(2px, 2px);
+  box-shadow: var(--sticker-pressed);
+}
+
 button.primary {
   font-family: 'Fredoka', sans-serif;
   font-size: 1.05rem;
   background: var(--yellow);
   color: var(--ink);
-  border: 3px solid var(--ink);
-  box-shadow: var(--sticker-sm);
 }
 button.primary:hover { color: var(--ink); border-color: var(--ink); }
-button.primary:active {
-  transform: translate(2px, 2px);
-  box-shadow: var(--sticker-pressed);
-}
 button.primary:disabled {
   filter: grayscale(.6) brightness(.7);
   box-shadow: var(--sticker-sm);
 }
 button.big { padding: 14px 20px; }
 
-/* .secondary is the default button style above — no extra rules needed */
+button.secondary {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* The ink border vanishes against the dark fill; the white ring of
+   --sticker-sm is what draws the outline, so hover recolors the label
+   rather than the (invisible) border. */
+button.secondary:hover { color: var(--blue); border-color: var(--ink); }
+button.secondary:disabled { box-shadow: var(--sticker-sm); }
 
 button.link, a.link {
   background: none;
