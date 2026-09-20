@@ -107,6 +107,15 @@ def _mint_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
     monkeypatch.setattr(mint_flow.swap_compose, "upload_output", fake_upload_output)
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
+
+    async def fake_destination_preflight(address):
+        # XLS-52 folding gate: default to a wallet the ledger PROVES can take
+        # delivery, so the fixture exercises the folded path.
+        return xrpl_ops.DestinationPreflight(
+            exists=True, blocks_nft_offers=False, balance_drops=50_000_000, owner_count=0
+        )
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "destination_preflight", fake_destination_preflight)
     monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_create_nft_offer)
     monkeypatch.setattr(mint_flow.xrpl_ops, "get_nft_sell_offers", fake_get_nft_sell_offers)
@@ -166,17 +175,26 @@ def test_mint_one_unit_happy_path(monkeypatch, _mint_mocks):
 
 
 @pytest.mark.parametrize("legacy_caller", ["paid", "bulk"])
-def test_paid_and_bulk_paths_keep_exact_legacy_mint_signature(
+def test_paid_and_bulk_paths_share_one_folded_mint_signature(
     monkeypatch, _mint_mocks, legacy_caller
 ):
+    """Paid single mint and bulk fulfillment must keep calling mint_nft with
+    ONE signature. XLS-52 changed that signature -- the delivery offer is now
+    folded into the mint, so `destination` and `return_details` are part of the
+    contract both paths use -- and a strict double pins it against drift.
+    """
     seen = {}
 
-    async def strict_mint_nft(*, metadata_cdn_url, taxon, issuer, platform):
+    async def strict_mint_nft(
+        *, metadata_cdn_url, taxon, issuer, platform, destination, return_details
+    ):
         seen.update(
             metadata_cdn_url=metadata_cdn_url,
             taxon=taxon,
             issuer=issuer,
             platform=platform,
+            destination=destination,
+            return_details=return_details,
         )
         return "NFTID1"
 
@@ -200,6 +218,11 @@ def test_paid_and_bulk_paths_keep_exact_legacy_mint_signature(
     assert res.error is None
     assert res.nft_id == "NFTID1"
     assert seen["issuer"] == mint_flow.config.SWAP_ISSUER_ADDRESS
+    assert seen["destination"] == "rUSER"
+    assert seen["return_details"] is True
+    # A double still returning the pre-XLS-52 bare-string contract yields no
+    # folded offer id, so delivery falls through to ensure_offer unchanged.
+    assert res.offer_id == "OFFER1"
 
 
 def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
@@ -653,3 +676,148 @@ def test_xrp_path_not_refused_when_the_trustline_lookup_failed(_xrp_path, monkey
     _run(session.prepare_payment(_snapshot(10_000_000, 4)))  # a known line would refuse
     assert session.pay_with == "XRP"
     assert len(_xrp_path) == 1
+
+
+def test_mint_one_unit_uses_the_folded_offer_and_skips_ensure_offer(monkeypatch, _mint_mocks):
+    """XLS-52: when the NFTokenMint itself created the delivery offer, there is
+    no second transaction to ensure -- the offer is on-ledger iff the mint is,
+    which is what makes the minted-but-never-offered state unreachable."""
+
+    async def fake_mint_nft(**kwargs):
+        _mint_mocks["mint_nft_kwargs"] = kwargs
+        return xrpl_ops.MintNFTResult(nft_id="NFTID1", tx_hash="D" * 64, offer_id="FOLDED1")
+
+    async def boom(*a, **k):
+        raise AssertionError("ensure_offer must not run when the mint already offered")
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+    monkeypatch.setattr(mint_flow.offer_delivery, "ensure_offer", boom)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4010,
+            session_tag="job1:0",
+        )
+    )
+
+    assert _mint_mocks["mint_nft_kwargs"]["destination"] == "rUSER"
+    assert res.offer_id == "FOLDED1"
+    assert res.error is None
+
+
+def test_a_failed_folded_mint_is_never_retried(monkeypatch, _mint_mocks):
+    """mint_nft returning None must NEVER trigger a second NFTokenMint.
+
+    None is not proof the first mint failed: _validated_result returns None
+    whenever meta.TransactionResult is not tesSUCCESS, INCLUDING a malformed or
+    absent meta on a transaction that DID commit. Retrying there could mint a
+    duplicate (CodeRabbit, PR #577), so the folded-vs-plain choice is a
+    pre-mint gate and a failed mint stays failed.
+    """
+    calls: list[dict[str, Any]] = []
+
+    async def fake_mint_nft(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4011,
+            session_tag="job1:0",
+        )
+    )
+
+    assert len(calls) == 1, "a failed mint must not be re-submitted"
+    assert res.nft_id is None
+    assert res.error is not None
+
+
+@pytest.mark.parametrize(
+    "preflight",
+    [
+        pytest.param((None, None), id="lookup_unresolved"),
+        pytest.param((True, True), id="blocks_nft_offers"),
+        pytest.param((False, None), id="wallet_unfunded"),
+    ],
+)
+def test_the_mint_is_only_folded_when_delivery_is_proven_possible(
+    monkeypatch, _mint_mocks, preflight
+):
+    """Folding stakes the MINT on the offer being creatable, so a destination
+    the ledger cannot PROVE will accept it mints unfolded and lets
+    offer_delivery.ensure_offer own delivery, exactly as before XLS-52."""
+    exists, blocks = preflight
+    calls: list[dict[str, Any]] = []
+
+    async def fake_preflight(address):
+        return xrpl_ops.DestinationPreflight(
+            exists=exists, blocks_nft_offers=blocks, balance_drops=None, owner_count=None
+        )
+
+    async def fake_mint_nft(**kwargs):
+        calls.append(kwargs)
+        return "NFTID1"
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "destination_preflight", fake_preflight)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4012,
+            session_tag="job1:0",
+        )
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["destination"] is None, "must not stake the mint on an unproven destination"
+    assert res.offer_id == "OFFER1"  # the pre-XLS-52 delivery path
+    assert res.error is None
+
+
+def test_a_pre_flight_that_raises_does_not_fail_the_mint(monkeypatch, _mint_mocks):
+    """An account_info blip must degrade to an unfolded mint, never take
+    minting down (the #388/#408 fail-open posture)."""
+    calls: list[dict[str, Any]] = []
+
+    async def boom(address):
+        raise RuntimeError("rpc down")
+
+    async def fake_mint_nft(**kwargs):
+        calls.append(kwargs)
+        return "NFTID1"
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "destination_preflight", boom)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4013,
+            session_tag="job1:0",
+        )
+    )
+
+    assert calls[0]["destination"] is None
+    assert res.nft_id == "NFTID1"
+    assert res.error is None
