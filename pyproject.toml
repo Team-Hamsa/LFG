@@ -88,3 +88,8 @@ testpaths = ["tests", "webapp"]
 # advertising itself as broken.
 addopts = "--strict-config --strict-markers"
 xfail_strict = true
+# The gate runs on a tmpfs (scripts/run-tests), where pytest's default
+# "keep the last 3 sessions' tmp_path trees" is ~660 MB of RAM held between
+# runs for scratch nobody reads. Keep only what a failure might need.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
