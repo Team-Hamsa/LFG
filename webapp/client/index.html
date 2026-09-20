@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v37.css">
+  <link rel="stylesheet" href="style.v38.css">
 </head>
 <body>
   <main id="app">
@@ -157,7 +157,10 @@
           <button class="lb-chip lb-cat" role="tab" aria-selected="false" data-cat="brix">BRIX</button>
         </div>
         <div id="lb-boards" class="lb-chips lb-boards" role="tablist" aria-label="Board"></div>
-        <ol id="lb-list" class="lb-list"></ol>
+        <!-- Scrolls internally to the full 25 rows; tabindex makes the region
+             reachable without a mouse (browsers only auto-focus scrollers in
+             recent versions). -->
+        <ol id="lb-list" class="lb-list" tabindex="0" aria-label="Leaderboard rankings"></ol>
         <p id="lb-me" class="lb-me" hidden></p>
         <p id="lb-empty" class="card-sub" hidden>Nothing here yet for this period.</p>
       </div>
@@ -554,6 +557,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=107"></script>
+  <script type="module" src="app.js?v=108"></script>
 </body>
 </html>

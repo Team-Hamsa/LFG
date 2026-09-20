@@ -1377,7 +1377,11 @@ const NFT_BOARDS = ['nft_swaps', 'nft_rarity'];
 // /api/leaderboard contract and are unchanged.
 const CATEGORIES = {
   users: [
-    { board: 'users_nfts', label: 'Holders' },
+    // One board key, two honest names: on All Time the server reads the live
+    // index (who HOLDS what right now); on any window it counts the editions
+    // the issuer first delivered inside it (who MINTED). `windowLabel` is the
+    // name for the windowed periods.
+    { board: 'users_nfts', label: 'Holders', windowLabel: 'Minters' },
     { board: 'users_swaps', label: 'Swappers' },
     { board: 'users_builds', label: 'Builders' },
   ],
@@ -1393,18 +1397,22 @@ const CATEGORIES = {
 };
 const lbState = { period: 'week', cat: 'users', board: 'users_nfts', anchor: null };
 
+function lbBoardLabel(entry) {
+  return lbState.period !== 'all' && entry.windowLabel ? entry.windowLabel : entry.label;
+}
+
 function renderLbBoards() {
   const row = el('lb-boards');
   row.replaceChildren(
-    ...CATEGORIES[lbState.cat].map(({ board, label }) => {
+    ...CATEGORIES[lbState.cat].map((entry) => {
       const btn = document.createElement('button');
       btn.className = 'lb-chip';
       btn.setAttribute('role', 'tab');
-      btn.dataset.board = board;
-      const active = board === lbState.board;
+      btn.dataset.board = entry.board;
+      const active = entry.board === lbState.board;
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-selected', String(active));
-      btn.textContent = label;
+      btn.textContent = lbBoardLabel(entry);
       return btn;
     })
   );
@@ -1474,10 +1482,13 @@ function highlightChips(containerId, dataKey, activeValue) {
 }
 
 async function loadLeaderboard() {
-  // Chip active states reflect current selection.
+  // Chip active states reflect current selection. The board row is re-rendered
+  // rather than just re-highlighted because a period change can rename a chip
+  // (Holders <-> Minters); the click handler is delegated on the container,
+  // so replacing the buttons does not drop it.
   highlightChips('lb-periods', 'period', lbState.period);
   highlightChips('lb-cats', 'cat', lbState.cat);
-  highlightChips('lb-boards', 'board', lbState.board);
+  renderLbBoards();
 
   const stepper = el('lb-stepper');
   const stepped = STEPPED_PERIODS.includes(lbState.period);

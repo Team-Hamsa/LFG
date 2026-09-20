@@ -52,3 +52,52 @@ def test_app_js_category_switch_behavior():
     assert "function renderLbBoards()" in src
     assert "CATEGORIES[lbState.cat][0].board" in src
     assert "cat: 'users'" in src  # default category in lbState
+
+
+def test_users_nfts_chip_renames_to_minters_off_all_time():
+    """The board key is one; the name is two. All Time reads the live index
+    (a holdings census), every window counts mints — so the chip must say
+    Holders only on All Time."""
+    src = _read("app.js")
+    block = re.search(r"const CATEGORIES\s*=\s*\{.*?\};", src, re.S).group(0)
+    assert re.search(r"label:\s*'Holders',\s*windowLabel:\s*'Minters'", block)
+    assert "function lbBoardLabel(entry)" in src
+    assert "lbState.period !== 'all'" in src
+    assert "btn.textContent = lbBoardLabel(entry)" in src
+
+
+def test_loadleaderboard_rerenders_board_chips_so_the_rename_applies():
+    """Re-highlighting alone would leave a stale chip name after a period
+    change; the row is re-rendered instead (delegated handler survives)."""
+    src = _read("app.js")
+    body = re.search(r"async function loadLeaderboard\(\)\s*\{.*?\n\}", src, re.S).group(0)
+    assert "renderLbBoards();" in body
+    assert "highlightChips('lb-boards'" not in body
+
+
+def _stylesheet() -> str:
+    html = _read("index.html")
+    name = re.search(r'href="(style\.v\d+\.css)"', html).group(1)
+    return _read(name)
+
+
+def test_leaderboard_list_scrolls_to_25_while_the_card_stays_put():
+    """Top 10 in view; rows 11-25 reachable by scrolling the list only."""
+    css = _stylesheet()
+    block = re.search(r"\.lb-list\s*\{[^}]*\}", css, re.S).group(0)
+    assert "overflow-y: auto" in block
+    assert "max-height:" in block
+    assert "overscroll-behavior: contain" in block  # never scroll-chain the page
+    frame = re.search(r"\.leaderboard\s*\{[^}]*\}", css, re.S).group(0)
+    assert "--lb-rows: 10" in frame
+    # Uniform row height, or "10 rows" would mean two different heights on
+    # the thumbnail boards vs the text-only ones.
+    row = re.search(r"\.lb-row\s*\{[^}]*\}", css, re.S).group(0)
+    assert "min-height: var(--lb-row-h)" in row
+
+
+def test_leaderboard_list_is_a_reachable_scroll_region():
+    html = _read("index.html")
+    ol = re.search(r"<ol id=\"lb-list\"[^>]*>", html).group(0)
+    assert 'tabindex="0"' in ol
+    assert "aria-label=" in ol

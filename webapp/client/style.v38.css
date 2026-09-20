@@ -1169,7 +1169,15 @@ button.back:hover { color: var(--text); border: none; }
 }
 
 /* Home-screen leaderboard card */
-.leaderboard { margin-top: 20px; text-align: left; }
+.leaderboard {
+  margin-top: 20px; text-align: left;
+  /* The server still sends 25 rows; only 10 are in view at a time. Both
+     knobs are read by the .lb-list max-height below — change them here. */
+  --lb-rows: 10;
+  --lb-row-h: 44px;   /* the 2rem thumb + .lb-row padding; also the floor
+                         that keeps a text-only row the same height */
+  --lb-row-gap: 6px;
+}
 .lb-title { margin: 0 0 10px; font-size: 1rem; color: var(--text); }
 .lb-chips { display: flex; flex-wrap: wrap; gap: .4rem; padding-bottom: 4px; }
 .lb-boards { margin-top: 6px; }
@@ -1186,10 +1194,25 @@ button.back:hover { color: var(--text); border: none; }
   margin: 8px 0; color: var(--muted); font-size: .82rem;
 }
 .lb-stepper button.link { margin: 0; font-size: 1rem; }
-.lb-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Only the list scrolls — the card around it is never pushed off screen.
+   The +10px shows a sliver of row 11, so it reads as scrollable without a
+   JS-driven fade. overscroll-behavior keeps the page (and the Discord
+   iframe) still when the list hits an end. */
+.lb-list {
+  list-style: none; margin: 10px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--lb-row-gap);
+  max-height: calc(var(--lb-rows) * (var(--lb-row-h) + var(--lb-row-gap)) + 10px);
+  overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.lb-list::-webkit-scrollbar { width: 8px; }
+.lb-list::-webkit-scrollbar-track { background: transparent; }
+.lb-list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
+.lb-list:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .lb-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 8px; border-radius: 8px; background: var(--surface-2);
+  min-height: var(--lb-row-h); box-sizing: border-box;
 }
 .lb-rank { flex: 0 0 auto; width: 2rem; font-size: .9rem; }
 .lb-label { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: .85rem; }

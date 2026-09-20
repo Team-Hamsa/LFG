@@ -47,12 +47,20 @@ def _seed_dbs(tmp_path):
     # end-exclusive at request time, so same-second events are dropped).
     week_start, _ = period_bounds("week", None, now=now)
     ts_in_week = week_start + (now - week_start) // 2
-    events = [
-        ("txA1", "0001", 1, "mint", None, WALLET_A, ts_in_week),
-        ("txA2", "0002", 2, "mint", None, WALLET_A, ts_in_week),
-        ("txB1", "0003", 3, "mint", None, WALLET_B, ts_in_week),
-        ("txM1", "0004", 4, "mint", None, WALLET_ME, ts_in_week),
+    # A mint is backend-signed (to_addr is the issuer) and then delivered to
+    # the minter — the delivery leg is what the windowed users_nfts board
+    # ("Minters") counts, and only for tokens the collection index knows.
+    issuer = server.config.SWAP_ISSUER_ADDRESS
+    minted = [
+        ("0001", 1, WALLET_A),
+        ("0002", 2, WALLET_A),
+        ("0003", 3, WALLET_B),
+        ("0004", 4, WALLET_ME),
     ]
+    events = []
+    for nft_id, number, wallet in minted:
+        events.append((f"txm{nft_id}", nft_id, number, "mint", None, issuer, ts_in_week - 1))
+        events.append((f"txd{nft_id}", nft_id, number, "transfer", issuer, wallet, ts_in_week))
     for tx_hash, nft_id, nft_number, event, from_addr, to_addr, ts in events:
         insert_nft_event(
             hconn,
@@ -73,6 +81,10 @@ def _seed_dbs(tmp_path):
     hconn.close()
 
     oconn = init_onchain_db(onchain_path)
+    oconn.executemany(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner) VALUES (?,?,?)",
+        [(nft_id, number, wallet) for nft_id, number, wallet in minted],
+    )
     oconn.commit()
     oconn.close()
 
