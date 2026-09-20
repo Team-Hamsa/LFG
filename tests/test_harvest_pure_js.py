@@ -6,6 +6,7 @@
 # No lfg_core import at module top -> no env-guard preamble needed.
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -184,8 +185,14 @@ def test_app_js_imports_harvest_pure():
 
 
 def test_index_html_cache_buster_bumped():
+    """A ratchet, not a pin: raise the floor with every app.js ?v= bump. An
+    exact equality here made every unrelated client change edit this file (and
+    cost #583 a red suite); a floor still catches a version that regressed
+    below the one this module's glue shipped with."""
     src = open(os.path.join(ROOT, "webapp", "client", "index.html")).read()
-    assert "app.js?v=111" in src
+    m = re.search(r'src="app\.js\?v=(\d+)"', src)
+    assert m, "no app.js cache buster in index.html"
+    assert int(m.group(1)) >= 112, "app.js?v= regressed below the shipped version"
 
 
 # ---------------------------------------------------------------------------

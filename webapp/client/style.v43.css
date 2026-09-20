@@ -1449,3 +1449,71 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   background-position: center;
   background-repeat: no-repeat;
 }
+
+/* --- Marketplace > Mine: five intent groups (#583) --- */
+.mine-group {
+  margin-top: 12px; text-align: left;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+}
+/* The whole summary row is the hit target — same pattern as .odds-slot-title. */
+.mine-group-title {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; padding: 10px 12px; font-size: .95rem; font-weight: 700;
+  color: var(--text); cursor: pointer; list-style: none; user-select: none;
+  border-radius: 10px; min-height: 40px; box-sizing: border-box;
+}
+.mine-group-title::-webkit-details-marker { display: none; }
+.mine-group-title::after {
+  content: '\25be'; margin-left: auto; color: var(--muted); font-size: .9rem;
+  transition: transform .15s ease;
+}
+.mine-group[open] > .mine-group-title::after { transform: rotate(180deg); }
+.mine-group[open] > .mine-group-title { border-bottom: 1px solid var(--line); border-radius: 10px 10px 0 0; }
+.mine-group-title:hover { background: var(--surface-2); }
+.mine-group-title:focus-visible { outline: 2px solid var(--accent, var(--text)); outline-offset: 2px; }
+.mine-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mine-group-count { flex: 0 0 auto; color: var(--muted); font-size: .75rem; font-weight: 600; }
+.mine-group-body { padding: 10px 12px; }
+
+/* Rows: offers and trade events, where art identifies nothing. */
+.mine-rows { display: flex; flex-direction: column; gap: 8px; }
+.mine-row {
+  display: grid; grid-template-columns: 44px 1fr auto auto; gap: 10px;
+  align-items: center; padding: 6px 8px; border-radius: 8px; background: var(--surface-2);
+  grid-template-areas: 'art label price action';
+}
+.mine-row img, .mine-row video {
+  grid-area: art; width: 44px; height: 44px; object-fit: contain;
+  border-radius: 6px; background: var(--surface);
+}
+.mine-row-label { grid-area: label; min-width: 0; color: var(--text); font-size: .85rem; }
+.mine-row-sub { display: block; color: var(--muted); font-size: .68rem; margin-top: 2px; }
+.mine-row-price { grid-area: price; color: var(--yellow); font-size: .78rem; font-weight: 700; white-space: nowrap; }
+.mine-row .mine-action { grid-area: action; }
+.mine-row.dim { opacity: .45; }
+@media (max-width: 420px) {
+  .mine-row {
+    grid-template-columns: 44px 1fr;
+    grid-template-areas: 'art label' 'price price' 'action action';
+    row-gap: 6px;
+  }
+  .mine-row .mine-action { width: 100%; }
+}
+
+/* Cards: things you hold or are selling, where the art is the point. */
+.nft-card .mine-card-price { display: block; color: var(--yellow); font-size: .72rem; font-weight: 700; margin-top: 2px; }
+.nft-card .mine-card-badge { display: block; color: var(--muted); font-size: .62rem; font-weight: 700; margin-top: 1px; }
+.mine-action {
+  min-height: 40px; padding: 6px 12px; margin: 0;
+  font-size: .78rem; font-weight: 700; border-radius: 8px;
+}
+.nft-card .mine-action { width: 100%; border-radius: 0; border: 0; border-top: 3px solid var(--ink); }
+
+/* An inline group is bounded by its cap, so it must not also be a scroller —
+   six nested scroll containers inside the page scroll is the mobile trap. */
+.nft-grid.mine-cards { max-height: none; overflow: visible; }
+
+.mine-show-all { margin: 10px 0 0; display: block; width: 100%; min-height: 40px; }
+.mine-note { margin: 10px 0 0; font-size: .85rem; color: var(--muted); }
+#mine-all-search { width: 100%; margin: 0 0 10px; }
+#mine-all-title { margin: 0 0 8px; }

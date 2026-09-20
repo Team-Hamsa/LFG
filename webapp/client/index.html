@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v42.css">
+  <link rel="stylesheet" href="style.v43.css">
 </head>
 <body>
   <main id="app">
@@ -286,50 +286,42 @@
       </div>
 
       <div id="market-mine" class="market-section" hidden>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">My listings</h4>
-          <div id="mine-listings" class="trait-strip"></div>
-          <p id="mine-listings-empty" class="trait-strip-empty" hidden>You have nothing listed.</p>
+        <div id="mine-groups">
+          <details class="mine-group" id="mine-group-needsYou" open>
+            <summary class="mine-group-title"><span class="mine-group-name">Needs you</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-needsYou"></div>
+          </details>
+          <details class="mine-group" id="mine-group-selling" open>
+            <summary class="mine-group-title"><span class="mine-group-name">Selling</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-selling"></div>
+          </details>
+          <details class="mine-group" id="mine-group-buying" open>
+            <summary class="mine-group-title"><span class="mine-group-name">Buying</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-buying"></div>
+          </details>
+          <details class="mine-group" id="mine-group-characters" open>
+            <summary class="mine-group-title"><span class="mine-group-name">Your characters</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-characters"></div>
+          </details>
+          <details class="mine-group" id="mine-group-traits" open>
+            <summary class="mine-group-title"><span class="mine-group-name">Your traits</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-traits"></div>
+          </details>
+          <details class="mine-group" id="mine-group-history">
+            <summary class="mine-group-title"><span class="mine-group-name">History</span><span class="mine-group-count"></span></summary>
+            <div class="mine-group-body" id="mine-body-history"></div>
+          </details>
+          <p id="mine-nothing" class="mine-note" hidden>Nothing listed or bid on yet.</p>
+          <div id="mine-empty" hidden>
+            <p class="mine-note">You don't own anything yet.</p>
+            <button id="mine-browse-btn" class="primary">Browse the marketplace</button>
+          </div>
         </div>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">Unlisted characters</h4>
-          <div id="mine-characters" class="trait-strip"></div>
-          <p id="mine-characters-empty" class="trait-strip-empty" hidden>Nothing here.</p>
-        </div>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">Unlisted traits</h4>
-          <div id="mine-traits" class="trait-strip"></div>
-          <p id="mine-traits-empty" class="trait-strip-empty" hidden>Nothing here.</p>
-        </div>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">My bids</h4>
-          <div id="mine-bids" class="trait-strip"></div>
-          <p id="mine-bids-empty" class="trait-strip-empty" hidden>No open bids.</p>
-        </div>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">Bids on my NFTs</h4>
-          <div id="mine-incoming-bids" class="trait-strip"></div>
-          <p id="mine-incoming-bids-empty" class="trait-strip-empty" hidden>No incoming bids.</p>
-        </div>
-        <div class="trait-strip-section">
-          <h4 class="trait-strip-heading">Loose Closet traits</h4>
-          <div id="mine-closet" class="trait-strip"></div>
-          <p id="mine-closet-empty" class="trait-strip-empty" hidden>Your Closet has no loose traits.</p>
-        </div>
-        <div id="mine-closet-orders-section" class="trait-strip-section" hidden>
-          <h4 class="trait-strip-heading">My Closet market orders</h4>
-          <div id="mine-closet-orders" class="trait-strip"></div>
-          <p id="mine-closet-orders-empty" class="trait-strip-empty" hidden>No open asks or bids.</p>
-        </div>
-        <div id="mine-closet-incoming-section" class="trait-strip-section" hidden>
-          <h4 class="trait-strip-heading">Bids on my traits</h4>
-          <div id="mine-closet-incoming" class="trait-strip"></div>
-          <p id="mine-closet-incoming-empty" class="trait-strip-empty" hidden>Nobody is bidding on traits you hold.</p>
-        </div>
-        <div id="mine-closet-fills-section" class="trait-strip-section" hidden>
-          <h4 class="trait-strip-heading">Recent Closet trades</h4>
-          <div id="mine-closet-fills" class="trait-strip"></div>
-          <p id="mine-closet-fills-empty" class="trait-strip-empty" hidden>No trades yet.</p>
+        <div id="mine-all" hidden>
+          <p class="row-links"><button id="mine-all-back" class="back">← Back</button></p>
+          <h4 id="mine-all-title"></h4>
+          <input id="mine-all-search" type="text" placeholder="Search…" autocomplete="off">
+          <div id="mine-all-body"></div>
         </div>
       </div>
 
@@ -557,6 +549,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=111"></script>
+  <script type="module" src="app.js?v=112"></script>
 </body>
 </html>

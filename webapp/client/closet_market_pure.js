@@ -83,16 +83,6 @@ export function keyValues(keys, slot) {
   return keys.filter((k) => k.slot === slot).map((k) => k.value).sort();
 }
 
-const ORDER_STATE_TEXT = {
-  pending_escrow: 'awaiting signature', open: 'open', matched: 'filling', cancelling: 'cancelling',
-  filled: 'filled', cancelled: 'cancelled', expired: 'expired',
-};
-
-export function orderChipLabel(order) {
-  const side = order.side === 'bid' ? 'Bid' : 'Ask';
-  return `${side} · ${order.slot}: ${order.value} · ${order.price_brix} BRIX (${ORDER_STATE_TEXT[order.state] ?? order.state})`;
-}
-
 const FILL_STATE_TEXT = {
   funds_pending: 'Waiting for funds', funded: 'Moving the trait', asset_moved: 'Paying the seller',
   paid: 'Updating Closets', mirrored: 'Complete', refund_pending: 'Refunding', refunded: 'Refunded',
@@ -103,23 +93,8 @@ export function fillStateText(state) {
   return FILL_STATE_TEXT[state] ?? state;
 }
 
-export function fillChipLabel(fill, wallet) {
-  const role = fill.buyer === wallet ? 'Bought' : 'Sold';
-  return `${role} · ${fill.slot}: ${fill.value} · ${fill.price_brix} BRIX — ${fillStateText(fill.state)}`;
-}
-
 export function holdingFillAction(entry) {
   return entry.source === 'token'
     ? { label: 'Deposit & fill', needsDeposit: true, nftId: entry.nft_id }
     : { label: 'Fill', needsDeposit: false, nftId: null };
-}
-
-export function holdingLabel(entry) {
-  const where = entry.source === 'token' ? ' (in your wallet)' : '';
-  return `${entry.slot}: ${entry.value} — ${entry.price_brix} BRIX${where}`;
-}
-
-export function closetAssetLabel(asset) {
-  const listed = asset.listed ? ` (${asset.listed} listed)` : '';
-  return `${asset.slot}: ${asset.value} ×${asset.count}${listed}`;
 }
