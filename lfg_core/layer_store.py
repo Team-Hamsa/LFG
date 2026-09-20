@@ -62,6 +62,13 @@ class LocalLayerStore:
     async def list_values(self, body: str, trait_type: str) -> list[str]:
         return self.list_values_sync(body, trait_type)
 
+    async def list_own_values(self, body: str, trait_type: str) -> list[str]:
+        """Values whose art lives in the body's OWN dir, WITHOUT the shared/
+        union list_values applies. shared/ art renders under every body, so
+        it says nothing about which body a value belongs to; this is the
+        listing for callers asking "which body does this value name?"."""
+        return self._list_values_one(body, trait_type)
+
     def list_values_sync(self, body: str, trait_type: str) -> list[str]:
         """Sync twin of list_values (body dir ∪ shared/) for callers with no
         event loop — e.g. rarity.get_odds deriving the candidate set (#198)."""
@@ -196,12 +203,19 @@ class CdnLayerStore:
     async def list_values(self, body: str, trait_type: str) -> list[str]:
         values: set[str] = set()
         for dirname in (body, SHARED_DIR):
-            for name, is_dir in await self._list_dir_tolerant(f"{dirname}/{trait_type}"):
-                if is_dir:
-                    continue
-                stem, ext = os.path.splitext(name)
-                if ext.lower() in LAYER_EXTENSIONS:
-                    values.add(stem)
+            values.update(await self.list_own_values(dirname, trait_type))
+        return sorted(values)
+
+    async def list_own_values(self, body: str, trait_type: str) -> list[str]:
+        """Values whose art lives in the body's OWN dir, WITHOUT the shared/
+        union list_values applies — the CDN twin of LocalLayerStore's."""
+        values: set[str] = set()
+        for name, is_dir in await self._list_dir_tolerant(f"{body}/{trait_type}"):
+            if is_dir:
+                continue
+            stem, ext = os.path.splitext(name)
+            if ext.lower() in LAYER_EXTENSIONS:
+                values.add(stem)
         return sorted(values)
 
     async def resolve(self, body: str, trait_type: str, value: str) -> str | None:

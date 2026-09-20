@@ -44,6 +44,15 @@ class _PermissiveLayerStore:
     async def resolve(self, body: str, trait_type: str, value: str) -> str:
         return f"/fake/{body}/{trait_type}/{value}.png"
 
+    async def list_bodies(self) -> list[str]:
+        return []
+
+    async def list_values(self, body: str, trait_type: str) -> list[str]:
+        return []
+
+    async def list_own_values(self, body: str, trait_type: str) -> list[str]:
+        return []
+
 
 def _stub_permissive_layer_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: _PermissiveLayerStore())
@@ -879,6 +888,16 @@ def _mk_body_gate_layers(tmp_path):
         # matrix pair (Head) makes it resolvable on an ape through the
         # foreign branch of swap_compose.resolve_layer.
         ("skeleton", "Head", ["Spikey Black"]),
+        # Body art for the genesis-unknown-body fallback: these values are
+        # deliberately absent from every test's frozen edition_bodies.
+        ("male", "Body", ["Straight Casino"]),
+        ("milady", "Body", ["Curved Light Milady"]),
+        # Body art in shared/ is returned by list_values for EVERY class, so
+        # it names no class of its own -- the fallback must not invent one.
+        ("shared", "Body", ["Ghost Shell", "Spirit Frame"]),
+        # ...but a value that ALSO has class-local art is named by that art:
+        # shared/ is only its fallback for the other classes.
+        ("skeleton", "Body", ["Spirit Frame"]),
     ]:
         d = tmp_path / "layers" / body / trait_type
         d.mkdir(parents=True, exist_ok=True)
@@ -1258,6 +1277,123 @@ def test_assemble_options_blanks_exclude_dressed_and_non_mutable(monkeypatch, bo
 
     out = asyncio.get_event_loop().run_until_complete(go())
     assert out["blanks"] == [{"nft_id": "BLANK1", "edition": 10}]
+
+
+def test_assemble_options_body_outside_genesis_resolves_from_layers(monkeypatch, body_gate_store):
+    """A harvested Body whose value is no edition's body-of-record (staging
+    2026-09-20: the testnet genesis froze 16 of 3558 editions, so nearly every
+    harvested body was unknown and the Builder said "your Closet has no
+    bodies") must still be offered, with its class resolved from the layer
+    tree that actually holds its art."""
+    conn = _options_conn(
+        {1: ("male", "male")},  # genesis knows only the body VALUE "male"
+        [("Body", "Straight Casino", 1), ("Clothing", "Hoodie", 1)],
+    )
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == ["Straight Casino"]
+    assert out["body_class"] == {"Straight Casino": "male"}
+    # And the per-slot options are computed against that resolved class.
+    assert out["options"]["Straight Casino"]["Clothing"] == ["Hoodie"]
+
+
+def test_assemble_options_body_with_no_art_anywhere_is_dropped(monkeypatch, body_gate_store):
+    """The layer-tree fallback is not a free pass: a Body value that neither
+    the genesis nor any body dir knows has no renderable class, so it stays
+    out of the Builder rather than producing an unpreviewable option."""
+    conn = _options_conn({}, [("Body", "Alien Bodysuit", 1)])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == []
+    assert out["body_class"] == {}
+
+
+def test_assemble_options_genesis_wins_over_layers_for_the_same_value(monkeypatch, body_gate_store):
+    """The frozen genesis stays authoritative where it has an answer: the
+    fallback only fills values it does not cover."""
+    conn = _options_conn(
+        {1: ("Straight Casino", "skeleton")},  # deliberately disagrees with layers/male
+        [("Body", "Straight Casino", 1)],
+    )
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["body_class"] == {"Straight Casino": "skeleton"}
+
+
+def test_assemble_options_shared_body_art_names_no_class(monkeypatch, body_gate_store):
+    """Body art under shared/ is returned by list_values for every body class,
+    so it identifies no class at all. The fallback must leave such a value
+    unmapped (the Builder drops it) rather than handing it the first class in
+    sort order, which would then drive the commit-time affinity gate."""
+    conn = _options_conn({}, [("Body", "Ghost Shell", 1)])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == []
+    assert out["body_class"] == {}
+
+
+def test_assemble_options_shared_plus_class_local_body_uses_the_class(monkeypatch, body_gate_store):
+    """Shared Body art does not disqualify a value that also has class-local
+    art -- the class dir is what names the class, shared/ is only the
+    fallback rendering for the others. Dropping it would hide a renderable
+    owned body from the Builder and make start_assemble reject it."""
+    conn = _options_conn({}, [("Body", "Spirit Frame", 1)])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == ["Spirit Frame"]
+    assert out["body_class"] == {"Spirit Frame": "skeleton"}
+
+
+def test_start_assemble_body_outside_genesis_resolves_from_layers(monkeypatch, body_gate_store):
+    """The commit path gates on the same map as the options payload -- a body
+    the Builder offers must not then be refused as "unknown body"."""
+    conn = _seed_blank_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    captured = {}
+
+    async def fake_run_assemble(session, deps):
+        captured["session"] = session
+        session.state = economy_flow.DONE
+
+    monkeypatch.setattr(economy_flow, "run_assemble", fake_run_assemble)
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
+
+    async def go():
+        ws = await economy_api.start_assemble(
+            "123", "rOwner", "A", "Straight Casino", {"Clothing": "Hoodie"}
+        )
+        await asyncio.sleep(0)
+        return ws
+
+    asyncio.get_event_loop().run_until_complete(go())
+    s = captured["session"]
+    assert s.body_value == "Straight Casino" and s.body_class == "male"
 
 
 # --- Closet screen self-heals a listener-missed accept ---
