@@ -5793,9 +5793,14 @@ function renderMineRow(item) {
   return row;
 }
 
-function renderMineItems(items, unit) {
+// `scroll` is the difference between an inline group and the drill-in. Inline,
+// the cap already bounds the group, so .nft-grid's own max-height/overflow is
+// switched off (.mine-cards) — stacking six scroll containers inside the page
+// scroll is the nested-scroll trap on mobile. The drill-in is the only thing on
+// screen, so there it keeps the containment and is the single live scroller.
+function renderMineItems(items, unit, { scroll = false } = {}) {
   const container = document.createElement('div');
-  container.className = unit === 'card' ? 'nft-grid' : 'mine-rows';
+  container.className = unit !== 'card' ? 'mine-rows' : scroll ? 'nft-grid' : 'nft-grid mine-cards';
   container.replaceChildren(...items.map(unit === 'card' ? renderMineCard : renderMineRow));
   return container;
 }
@@ -5843,7 +5848,7 @@ function renderMineAllBody(key, query) {
   const items = (mineGroupItems[key] || []).filter((i) => !needle
     || i.title.toLowerCase().includes(needle)
     || (i.subtitle || '').toLowerCase().includes(needle));
-  el('mine-all-body').replaceChildren(renderMineItems(items, MINE_GROUP_UNITS[key]));
+  el('mine-all-body').replaceChildren(renderMineItems(items, MINE_GROUP_UNITS[key], { scroll: true }));
 }
 
 function showMineAll(key) {
@@ -6235,11 +6240,9 @@ function applyClosetMarketVisibility(cfg) {
   closetBidTtlDays = Math.round(Number(cfg.closet_bid_ttl_seconds || 604800) / 86400);
   const chip = document.querySelector('#market-tabs [data-tab="book"]');
   if (chip) chip.hidden = !closetMarketEnabled;
-  // Null-guarded: a cached older index.html may lack these ids (PR #502 C5).
-  for (const id of ['mine-closet-orders-section', 'mine-closet-incoming-section', 'mine-closet-fills-section']) {
-    const node = el(id);
-    if (node) node.hidden = !closetMarketEnabled;
-  }
+  // #583: Mine needs no per-section hiding any more. With the market off,
+  // loadMarketMine fetches no Closet data, those groups arrive empty, and an
+  // empty group renders nothing — a strict improvement over "Nothing here."
   const book = el('market-book');
   if (!closetMarketEnabled && book) book.hidden = true;
 }

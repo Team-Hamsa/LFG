@@ -1509,6 +1509,10 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
 }
 .nft-card .mine-action { width: 100%; border-radius: 0; border: 0; border-top: 3px solid var(--ink); }
 
+/* An inline group is bounded by its cap, so it must not also be a scroller —
+   six nested scroll containers inside the page scroll is the mobile trap. */
+.nft-grid.mine-cards { max-height: none; overflow: visible; }
+
 .mine-show-all { margin: 10px 0 0; display: block; width: 100%; min-height: 40px; }
 .mine-note { margin: 10px 0 0; font-size: .85rem; color: var(--muted); }
 #mine-all-search { width: 100%; margin: 0 0 10px; }
