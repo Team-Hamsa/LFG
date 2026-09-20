@@ -540,6 +540,7 @@ async def _finalize_minted_unit(
     on_state: Callable[[str], None] | None,
     on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None,
     referrer: str | None = None,
+    offer_id: str | None = None,
 ) -> UnitResult:
     """The shared post-mint tail (#336): record (+ rarity) -> offer -> XUMM
     accept payload, once a mint is confirmed on-chain. Extracted verbatim from
@@ -598,9 +599,18 @@ async def _finalize_minted_unit(
     # blindly re-creating (mirrors bulk_mint_flow._ensure_offer, #227).
     if on_state:
         on_state(CREATING_OFFER)
-    offer_result = await offer_delivery.ensure_offer(
-        nft_id, wallet_address, platform=memos.platform_for_surface(platform)
-    )
+    if offer_id:
+        # A folded XLS-52 mint created the delivery offer in the SAME
+        # transaction that minted the token, so there is nothing to ensure:
+        # the offer is on-ledger iff the mint is. This is what makes
+        # "minted_no_offer" unreachable for a folded mint.
+        offer_result = offer_delivery.OfferResult(
+            status="offered", offer_index=offer_id, reason=None
+        )
+    else:
+        offer_result = await offer_delivery.ensure_offer(
+            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
+        )
     if offer_result.status == "failed":
         # The mint is safely on-chain; only delivery is stuck after every
         # retry. Persist a recovery record so an administrator can re-offer
@@ -935,6 +945,10 @@ async def mint_one_unit(
     """
     nft_id: str | None = None
     mint_tx_hash: str | None = None
+    # The delivery offer a folded XLS-52 mint already created (None on the
+    # sponsored path, which mints from a pre-signed blob, and on any mint
+    # whose folded offer could not be read back).
+    folded_offer_id: str | None = None
     # Hoisted with None defaults so the catch-all below can return whatever
     # was already computed at the point of failure (#41 fix-wave, CodeRabbit
     # PR #245): an exception from on_mint/offer-creation/payload-creation
@@ -1084,26 +1098,51 @@ async def mint_one_unit(
                     submission.error or "sponsored mint outcome is indeterminate"
                 )
             mint_result = xrpl_ops.MintNFTResult(nft_id=nft_id, tx_hash=mint_tx_hash)
-        elif on_mint_confirmed is not None:
+        else:
+            # XLS-52: fold the destination-locked delivery offer into the mint
+            # itself, so the minted-but-never-offered state (#215's
+            # `_ensure_offer` re-offer pass, the "delivered-pending-offer,
+            # NEVER re-minted" rule) cannot arise for a paid mint. The offer
+            # id rides back on the result, so this path always asks for
+            # details — a fake that still returns the legacy bare-string
+            # contract simply yields offer_id=None and falls through to the
+            # separate NFTokenCreateOffer below.
             mint_result = await xrpl_ops.mint_nft(
                 metadata_cdn_url=metadata_cdn_url,
                 taxon=config.NFT_TAXON,
                 issuer=config.SWAP_ISSUER_ADDRESS,
                 platform=memos.platform_for_surface(platform),
+                destination=wallet_address,
                 return_details=True,
             )
-        else:
-            # Preserve the exact legacy call contract for paid single mints
-            # and bulk fulfillment (including strict plugin/test doubles).
-            mint_result = await xrpl_ops.mint_nft(
-                metadata_cdn_url=metadata_cdn_url,
-                taxon=config.NFT_TAXON,
-                issuer=config.SWAP_ISSUER_ADDRESS,
-                platform=memos.platform_for_surface(platform),
-            )
+            if mint_result is None:
+                # A folded mint stakes the MINT on the offer being creatable:
+                # a destination that blocks incoming NFT offers
+                # (lsfDisallowIncomingNFTokenOffer), or is unfunded, now fails
+                # the whole NFTokenMint rather than just delivery. handle_mint_
+                # start's pre-flight refuses both BEFORE payment, but it fails
+                # OPEN on an unresolved account_info (#388/#408) — so on a
+                # definitive failure, fall back to the unfolded mint and let
+                # offer_delivery.ensure_offer own the delivery problem exactly
+                # as it did before. Only a definitive failure reaches here:
+                # mint_nft re-raises IndeterminateResultError, so this can
+                # never re-mint a token that may already be on-ledger.
+                logging.warning(
+                    "folded XLS-52 mint for %s failed definitively; "
+                    "retrying as a plain mint + separate offer",
+                    wallet_address,
+                )
+                mint_result = await xrpl_ops.mint_nft(
+                    metadata_cdn_url=metadata_cdn_url,
+                    taxon=config.NFT_TAXON,
+                    issuer=config.SWAP_ISSUER_ADDRESS,
+                    platform=memos.platform_for_surface(platform),
+                    return_details=True,
+                )
         if isinstance(mint_result, xrpl_ops.MintNFTResult):
             nft_id = mint_result.nft_id
             mint_tx_hash = mint_result.tx_hash
+            folded_offer_id = mint_result.offer_id
         else:
             # Backward-compatible test/plugin fakes may still return the
             # legacy string contract. Ordinary callers use mint_nft's default
@@ -1171,6 +1210,7 @@ async def mint_one_unit(
             on_state=on_state,
             on_offer_created=on_offer_created,
             referrer=referrer,
+            offer_id=folded_offer_id,
         )
 
     except Exception as e:

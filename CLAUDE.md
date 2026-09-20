@@ -382,9 +382,30 @@ Database Tables:
 4. **Trait Selection** → Randomly selects one trait from each layer directory
 5. **Image Composition** → Uses FFmpeg to overlay trait layers into a single PNG
 6. **BunnyCDN Upload** → Uploads both image and metadata JSON to BunnyCDN
-7. **NFT Minting** → Creates NFTokenMint transaction on XRPL using the wallet seed
-8. **NFT Offer Creation** → Creates an NFTokenCreateOffer to send the minted NFT to user's wallet
-9. **Offer QR Code** → Generates XUMM QR for user to accept the NFT offer
+7. **NFT Minting + delivery offer (one transaction)** → Creates an NFTokenMint
+   on XRPL using the wallet seed, carrying the XLS-52 `Destination`/`Amount`
+   fields so the destination-locked, free (0 drops) delivery sell offer is
+   created by that SAME transaction
+8. **Offer QR Code** → Generates XUMM QR for user to accept the NFT offer
+
+> **XLS-52 (`NFTokenMintOffer`) folds steps 7 and 8 of the old flow into one
+> transaction.** The amendment is enabled on mainnet and testnet, and xrpl-py
+> models the fields, so `xrpl_ops.mint_nft(destination=…)` mints and offers
+> atomically: the offer is on-ledger iff the mint is, which makes the
+> minted-but-never-offered state (`minted_no_offer` recovery records, bulk
+> mint's `_ensure_offer` re-offer pass) unreachable for a paid mint. The
+> resulting offer index rides back on `MintNFTResult.offer_id`, read from the
+> validated meta's `offer_id` or its CreatedNode `NFTokenOffer`.
+>
+> Two paths deliberately keep the old two-transaction shape: the **sponsored
+> free mint** (it submits a pre-signed blob prepared before the destination is
+> final) and every **non-delivery mint** (swap remint, economy
+> assemble/extract, Trait Shop), whose offers are not simple issuer→user
+> transfers. `offer_delivery.ensure_offer` (#466) therefore stays the delivery
+> path for those, and is also the **fallback** when a folded mint fails
+> definitively — a destination with `lsfDisallowIncomingNFTokenOffer` fails the
+> whole folded NFTokenMint rather than just delivery, so `mint_one_unit` retries
+> unfolded rather than leave a paid mint with nothing minted.
 
 ### Key Data Structures
 

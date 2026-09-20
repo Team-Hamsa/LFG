@@ -116,10 +116,16 @@ class IndeterminateResultError(RuntimeError):
 
 @dataclass(frozen=True)
 class MintNFTResult:
-    """Confirmed NFToken mint identifiers for callers that need durability."""
+    """Confirmed NFToken mint identifiers for callers that need durability.
+
+    `offer_id` is the sell offer the SAME NFTokenMint created when the caller
+    asked for a folded XLS-52 mint+offer (`destination=`); None for a plain
+    mint, whose offer is a separate NFTokenCreateOffer.
+    """
 
     nft_id: str
     tx_hash: str
+    offer_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -511,6 +517,44 @@ async def _submit_and_confirm(
         return validated
 
 
+def created_sell_offer_id(meta: Any, nft_id: str) -> str | None:
+    """The NFTokenOffer index a folded XLS-52 NFTokenMint created for `nft_id`.
+
+    rippled surfaces it as the convenience `meta.offer_id`, but that field is
+    not guaranteed on every build / api_version, so fall back to the
+    CreatedNode NFTokenOffer the same way market_ops reads NFTokenCreateOffer
+    meta. Returns None when no sell offer for this token was created — callers
+    MUST read that as "the offer step did not happen" and fall back to a
+    separate NFTokenCreateOffer, never as a failure of the mint itself (the
+    token is on-ledger either way).
+    """
+    if not isinstance(meta, dict):
+        return None
+    offer_id = meta.get("offer_id")
+    if isinstance(offer_id, str) and offer_id:
+        return offer_id
+    nodes = meta.get("AffectedNodes")
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        created = node.get("CreatedNode")
+        if not isinstance(created, dict):
+            continue
+        if created.get("LedgerEntryType") != "NFTokenOffer":
+            continue
+        new_fields = created.get("NewFields")
+        if not isinstance(new_fields, dict):
+            continue
+        if str(new_fields.get("NFTokenID") or "") != str(nft_id):
+            continue
+        index = created.get("LedgerIndex")
+        if isinstance(index, str) and index:
+            return index
+    return None
+
+
 @overload
 async def mint_nft(
     metadata_cdn_url: str,
@@ -521,6 +565,9 @@ async def mint_nft(
     campaign: str | None = None,
     action: str = memos.ACTION_MINT,
     *,
+    destination: str | None = None,
+    amount: Any = "0",
+    expiration: int | None = None,
     return_details: Literal[False] = False,
 ) -> str | None: ...
 
@@ -535,6 +582,9 @@ async def mint_nft(
     campaign: str | None = None,
     action: str = memos.ACTION_MINT,
     *,
+    destination: str | None = None,
+    amount: Any = "0",
+    expiration: int | None = None,
     return_details: Literal[True],
 ) -> MintNFTResult | None: ...
 
@@ -548,12 +598,26 @@ async def mint_nft(
     campaign: str | None = None,
     action: str = memos.ACTION_MINT,
     *,
+    destination: str | None = None,
+    amount: Any = "0",
+    expiration: int | None = None,
     return_details: bool = False,
 ) -> str | MintNFTResult | None:
     """Mint an NFT on XRPL; returns the NFToken ID or None by default.
 
     `return_details=True` opts into a `MintNFTResult` containing the same ID
-    plus the validated transaction hash. `flags` overrides config.NFT_FLAGS
+    plus the validated transaction hash.
+
+    `destination` opts into a folded XLS-52 mint+offer: the SAME NFTokenMint
+    also creates the destination-locked sell offer that delivers the token,
+    so the mint-succeeded-but-offer-failed state cannot exist. `amount`
+    (drops string or IssuedCurrencyAmount, default free) and `expiration`
+    (ripple-epoch) define that offer; XRPL rejects either without a
+    Destination/Amount pair, so they are only sent alongside `destination`.
+    The resulting offer id rides back on `MintNFTResult.offer_id`, which
+    means the folded path is only useful with `return_details=True`.
+
+    `flags` overrides config.NFT_FLAGS
     (e.g. burnable economy characters / soulbound buckets). `platform`
     records the originating surface in the provenance memo (#54); `action`
     the app operation (economy assembles/extracts pass their own so the memo
@@ -578,6 +642,15 @@ async def mint_nft(
             kwargs["transfer_fee"] = config.NFT_TRANSFER_FEE
         if issuer != config.SIGNING_ACCOUNT:
             kwargs["issuer"] = issuer
+        if destination is not None:
+            # XLS-52 (NFTokenMintOffer, enabled on mainnet + testnet): fold the
+            # delivery sell offer into the mint. Amount is what CREATES the
+            # offer — Destination/Expiration without it are temMALFORMED — so
+            # it is always sent, defaulting to a free (0 drops) transfer.
+            kwargs["destination"] = destination
+            kwargs["amount"] = amount
+            if expiration is not None:
+                kwargs["expiration"] = expiration
         payment = NFTokenMint(**kwargs)
 
         # submit_and_wait already returns only after the tx validates, so its
@@ -601,7 +674,21 @@ async def mint_nft(
         if nft_id:
             logging.info(f"NFT minted: {nft_id}")
             if return_details:
-                return MintNFTResult(nft_id=str(nft_id), tx_hash=str(result["hash"]))
+                offer_id = (
+                    created_sell_offer_id(meta, str(nft_id)) if destination is not None else None
+                )
+                if destination is not None and not offer_id:
+                    # The mint validated; only the folded offer is unaccounted
+                    # for. Returning the mint alone lets the caller fall back
+                    # to a separate NFTokenCreateOffer — never a lost mint.
+                    logging.warning(
+                        "folded XLS-52 mint %s created no readable sell offer; "
+                        "caller must create one separately",
+                        nft_id,
+                    )
+                return MintNFTResult(
+                    nft_id=str(nft_id), tx_hash=str(result["hash"]), offer_id=offer_id
+                )
             return str(nft_id)
         # Committed but unidentifiable: fail closed as indeterminate, never as a
         # definitive-failure None — the NFT is on-ledger and must not be treated
