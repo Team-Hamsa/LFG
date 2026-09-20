@@ -21,12 +21,16 @@ on:
   pull_request:
     branches: [main]
 
-# One gate per ref. Superseding pushes to a PR cancel the in-flight run --
-# only the tip matters there. Pushes to main are NEVER cancelled: main's green
-# tick is the record that a merged commit passed, so every one of them runs to
-# completion even when merges land back to back.
+# One gate per PR: a superseding push cancels the in-flight run, since only
+# the tip matters there.
+#
+# Pushes to main get a group of their own per run, NOT a shared one with
+# cancel-in-progress off. Entering an occupied group cancels whatever is
+# QUEUED there regardless of that setting -- with A running and B queued, C
+# would evict B -- and main's green tick is the record that a merged commit
+# passed the gate, so no main run may be dropped.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

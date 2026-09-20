@@ -30,7 +30,23 @@ from _pytest.monkeypatch import MonkeyPatch
 
 # One throwaway root per session for every store the suite may reach; removed
 # again in pytest_unconfigure (the old per-dir mkdtemps were never cleaned up).
+#
+# A pytest-xdist worker inherits the CONTROLLER's environment, so the pins the
+# controller's import of this file already wrote would survive each worker's
+# own setdefault below and every worker would share one sqlite file per store
+# (verified: 4 workers, one lfg_nfts.db). Stamp the root we created into the
+# environment so a child can tell "my parent's conftest generated this" from
+# "the invoker deliberately exported it", and re-root only the former.
+_INHERITED_STORE_ROOT = os.environ.get("LFG_TEST_STORE_ROOT")
 _STORE_ROOT = tempfile.mkdtemp(prefix="lfg-test-stores-")
+os.environ["LFG_TEST_STORE_ROOT"] = _STORE_ROOT
+
+
+def _generated_by_parent(value: str | None) -> bool:
+    """True for a pin some parent process's copy of this file produced."""
+    if not value or not _INHERITED_STORE_ROOT:
+        return False
+    return value.startswith(_INHERITED_STORE_ROOT + os.sep)
 
 
 def _store_path(name: str, *, mkdir: bool = False) -> str:
@@ -86,6 +102,8 @@ _STORE_PINS = {
     "LAYER_DIM_CACHE": "layer_dimensions_cache.json",
 }
 for _var, _name in _STORE_PINS.items():
+    if _generated_by_parent(os.environ.get(_var)):
+        del os.environ[_var]  # an xdist controller's pin, not a real override
     os.environ.setdefault(_var, _store_path(_name))
 # Every pin a Python subprocess must carry. A test that builds a child env from
 # scratch copies these in: `env.update({k: os.environ[k] for k in
@@ -204,13 +222,20 @@ def _main_thread_event_loop() -> Iterator[None]:
     try:
         yield
     finally:
-        # Close only the loop we installed, and only if the test left it in
-        # place -- a test that swapped in its own owns the teardown.
+        # Close the loop we created whatever the test did with the current-loop
+        # slot: asyncio.run() clears that slot without touching our loop, so
+        # keying the close on "is it still current" would leak a selector and
+        # its fds for exactly the tests that poisoned the slot in the first
+        # place. The slot is a separate question -- clear it only while it
+        # still points at our loop, so we never strand a closed loop there and
+        # never disturb one the test installed itself.
         try:
             still_ours = policy.get_event_loop() is loop
         except RuntimeError:
             still_ours = False
-        if still_ours and not loop.is_closed():
+        if still_ours:
+            policy.set_event_loop(None)
+        if not loop.is_closed():
             loop.close()
 
 

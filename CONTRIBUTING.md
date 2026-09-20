@@ -50,23 +50,29 @@ you unfairly, fix it or raise it in your PR — don't skip it.
 ## Running tests
 
 ```bash
-scripts/run-tests               # what the gate runs (tmpfs + parallel)
-scripts/run-tests -p no:xdist   # same, one process — clearer tracebacks
-python3 -m pytest               # plain pytest still works
+scripts/run-tests -n auto --dist loadfile    # exactly what the gate runs
+scripts/run-tests                            # serial — clearer tracebacks
+scripts/run-tests tests/test_market_flow.py  # one file
+python3 -m pytest                            # plain pytest still works
 ```
+
+`scripts/run-tests` chooses `TMPDIR` and nothing else: it forwards every
+argument to pytest untouched, so the parallel flags are the caller's to pass
+(the pre-push hook passes them for you). Leave them off when you want a serial
+run — the tracebacks are far easier to read.
 
 The gate runs the whole suite every time, and that is deliberate: at ~5,800
 tests and ~30 s it is cheaper to run everything than to maintain a map of which
-tests a change can skip. Two things make that affordable, and `scripts/run-tests`
-applies both:
+tests a change can skip. Two things make that affordable:
 
-- **tmpfs.** The suite's stores are SQLite, so every commit `fsync`s. On a box
-  whose checkout shares an ext4 journal with a busy writer (the deploy box runs
-  an XRPL validator on the same volume) the suite spends its wall clock in
-  `jbd2_log_wait_commit` — 881 s at 20% CPU, versus 167 s at 83% with `TMPDIR`
-  on a tmpfs. Same tests, same machine. The wrapper points `TMPDIR` at
-  `/dev/shm` when the box has room, and gets out of the way otherwise (an
-  explicit `TMPDIR` from you always wins).
+- **tmpfs**, which the wrapper picks. The suite's stores are SQLite, so every
+  commit `fsync`s. On a box whose checkout shares an ext4 journal with a busy
+  writer (the deploy box runs an XRPL validator on the same volume) the suite
+  spends its wall clock in `jbd2_log_wait_commit` — 881 s at 20% CPU, versus
+  167 s at 83% with `TMPDIR` on a tmpfs. Same tests, same machine. The wrapper
+  uses `/dev/shm` when it has room and proves executable files work there, and
+  gets out of the way on any doubt — an explicit `TMPDIR` from you always wins,
+  and a failed probe just means the default and a slower run.
 - **`-n auto`** (pytest-xdist), with `--dist loadfile` so a module's tests — and
   its module-level state — stay on one worker.
 

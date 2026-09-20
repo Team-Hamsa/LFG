@@ -15,24 +15,51 @@
 # with tempfile.mkdtemp(), and pytest's own basetemp is TMPDIR-derived too, so
 # pointing TMPDIR at a tmpfs moves every store the suite writes.
 #
-# The choice is advisory in both directions: an explicit TMPDIR from the
-# caller always wins, and a box without a usable /dev/shm just runs on the
-# default. Never silently required.
+# This wrapper picks TMPDIR and nothing else -- it does NOT add -n auto; the
+# caller (the pre-push hook, or you) passes the pytest flags. Every step below
+# is advisory: an explicit TMPDIR from the caller wins outright, and any probe
+# that fails leaves TMPDIR alone and runs on the default. A slower gate is a
+# fine outcome; a gate that refuses to start is not.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# MIN_FREE_KIB: the serial suite writes ~600 MB of store churn and a parallel
-# run multiplies that by the worker count, so refuse a tmpfs that could fill
-# mid-run (a full tmpfs surfaces as unrelated ENOSPC test failures).
+# The serial suite writes ~600 MB of store churn and a parallel run multiplies
+# that by the worker count, so refuse a tmpfs that could fill mid-run (a full
+# tmpfs surfaces as unrelated ENOSPC failures).
 MIN_FREE_KIB=$((4 * 1024 * 1024))
 
-if [[ -z "${TMPDIR:-}" && -d /dev/shm && -w /dev/shm ]]; then
-    free_kib="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $4}')"
-    if [[ -n "${free_kib}" && "${free_kib}" -ge "${MIN_FREE_KIB}" ]]; then
-        TMPDIR="/dev/shm/lfg-pytest-$(id -u)"
-        mkdir -p "$TMPDIR"
-        export TMPDIR
+# Echo a usable fast scratch dir, or fail. Called from an `if`, so errexit is
+# suspended inside it -- every step states its own failure explicitly.
+fast_tmpdir() {
+    local base=/dev/shm free dir probe
+    [[ -d $base && -w $base ]] || return 1
+
+    free="$(df -Pk "$base" 2>/dev/null | awk 'NR==2 {print $4}')" || return 1
+    [[ $free =~ ^[0-9]+$ ]] || return 1
+    (( free >= MIN_FREE_KIB )) || return 1
+
+    dir="$base/lfg-pytest-$(id -u)"
+    mkdir -p "$dir" 2>/dev/null || return 1
+
+    # TMPDIR also moves pytest's tmp_path, and parts of the suite create files
+    # under it and then EXECUTE them (the venv-python / worktree shim tests).
+    # A tmpfs mounted noexec -- common on hardened hosts and in containers --
+    # would fail those with PermissionError, so prove exec works rather than
+    # assuming it. Writability says nothing about the mount flags.
+    probe="$(mktemp "$dir/execprobe.XXXXXX" 2>/dev/null)" || return 1
+    if ! { printf '#!/bin/sh\nexit 0\n' >"$probe" && chmod +x "$probe" && "$probe"; } 2>/dev/null; then
+        rm -f "$probe"
+        return 1
+    fi
+    rm -f "$probe"
+
+    printf '%s\n' "$dir"
+}
+
+if [[ -z "${TMPDIR:-}" ]]; then
+    if fast_dir="$(fast_tmpdir)"; then
+        export TMPDIR="$fast_dir"
     fi
 fi
 
