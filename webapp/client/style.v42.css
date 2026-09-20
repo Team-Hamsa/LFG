@@ -871,15 +871,20 @@ button.back:hover { color: var(--text); border: none; }
   #app { max-width: 880px; }
   .card { padding: 26px 30px; }
   /* Labels here are dynamic and can get long ("🧱 Claim 1,234 BRIX",
-     "🎁 Pending (3)"). In a row, a label that wraps makes its button taller
+     "🎁 Offers (3)"). In a row, a label that wraps makes its button taller
      and align-items: stretch matches every sibling to it — one long label
      inflates the whole row. So keep labels on one line and let the ROW wrap
      instead. (The stacked mobile layout above is full-width and may wrap.) */
-  .actions { flex-direction: row; flex-wrap: wrap; justify-content: center; }
+  .actions { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 8px; }
   /* Natural width, not flex: 1 — an even split squeezes every button to
      ~110px, narrower than most of these labels. Buttons that don't fit move
-     to a second row at full legibility. */
-  .actions button { width: auto; flex: 0 1 auto; max-width: 280px; white-space: nowrap; }
+     to a second row at full legibility, so the padding here is tighter than
+     the stacked layout's to keep the whole set on one row. */
+  .actions button {
+    width: auto; flex: 0 1 auto; max-width: 280px;
+    white-space: nowrap; padding: 12px 14px;
+  }
+  .actions button.big { padding: 14px 16px; }
 }
 
 /* Side-by-side flow copy/visual needs the horizontal room, so it stays
