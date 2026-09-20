@@ -11,15 +11,15 @@
 # Runtime deps stay in requirements.txt.
 
 # Manages the pre-push hook gate (ruff, ruff-format, mypy, gitleaks, pytest).
-pre-commit==4.6.0
+pre-commit==4.6.2
 
 # Type checker (also pulled by the pre-commit mypy hook; pinned here so it can
 # be run directly during the Phase-B grind: `.venv/bin/mypy .`).
-mypy==1.20.2
+mypy==2.3.1
 
 # Linter/formatter (also run via pre-commit; pinned here for direct CLI use
 # during the Phase-B grind: `.venv/bin/ruff check --fix .`).
-ruff==0.15.17
+ruff==0.16.8
 
 # Parallel test execution for the pre-push/CI pytest gate (-n auto). The
 # suite is xdist-clean as of 2026-09-20: --dist loadfile keeps each module's
@@ -29,9 +29,9 @@ pytest-xdist==3.8.0
 
 # Type stubs for PyYAML (lfg_core/trait_config.py does `import yaml`); mypy
 # needs these installed or it fails CI with "Library stubs not installed".
-types-PyYAML==6.0.12.20260518
+types-PyYAML==6.0.12.20260906
 
 # Type stubs for oauthlib (surfaces/x_bot/x_api.py signs requests with
 # oauthlib.oauth1.Client); mypy needs these installed or it fails with
 # "Library stubs not installed".
-types-oauthlib==3.3.0.20260518
+types-oauthlib==3.3.0.20260724
