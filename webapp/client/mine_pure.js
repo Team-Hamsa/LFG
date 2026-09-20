@@ -224,6 +224,12 @@ function byPriceDesc(a, b) {
   return Number(b.price.amount) - Number(a.price.amount);
 }
 
+// Rows arrive newest-first from the server; a copy, ascending, without
+// mutating the caller's array.
+function byOldest(rows) {
+  return [...rows].sort((a, b) => String(a.created_ts ?? '').localeCompare(String(b.created_ts ?? '')));
+}
+
 export function buildMine({
   mine = {}, bids = {}, closet = {}, wallet = null, closetMarketEnabled = false,
 } = {}) {
@@ -252,9 +258,10 @@ export function buildMine({
       .map((b) => bidItem(b, { kind: 'acceptBid', label: 'Accept' }))
       .sort(byPriceDesc),
     ...(closet.bids_on_my_traits || []).map(holdingBidItem).sort(byPriceDesc),
-    // …then the user's own stuck actions, oldest first.
-    ...liveOrders
-      .filter((o) => o.state === 'pending_escrow')
+    // …then the user's own stuck actions, oldest first — the server returns
+    // both lists newest-first, and the thing that has been stuck longest is
+    // the one most worth finishing.
+    ...byOldest(liveOrders.filter((o) => o.state === 'pending_escrow'))
       .map((o) => ({
         ...orderItem(o, 'row'),
         state: null,
@@ -264,8 +271,7 @@ export function buildMine({
           payload: { id: o.id, side: o.side },
         },
       })),
-    ...fills
-      .filter((f) => fillNeedsUser(f, wallet))
+    ...byOldest(fills.filter((f) => fillNeedsUser(f, wallet)))
       .map((f) => {
         const row = fillItem(f, wallet);
         return f.state === 'failed'

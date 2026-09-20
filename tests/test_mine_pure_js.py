@@ -38,7 +38,12 @@ def build(mine=None, bids=None, closet=None, wallet="rMe", enabled=True):
 
 
 CHAR = {"nft_id": "0008AB", "nft_number": 1035, "image": "https://cdn/1035.png"}
-TRAIT_TOKEN = {"nft_id": "0009FF", "slot": "Hat", "value": "Wizard Hat", "image_url": "/api/layer?a"}
+TRAIT_TOKEN = {
+    "nft_id": "0009FF",
+    "slot": "Hat",
+    "value": "Wizard Hat",
+    "image_url": "/api/layer?a",
+}
 CLOSET_ASSET = {
     "slot": "Hat",
     "value": "Wizard Hat",
@@ -331,7 +336,9 @@ def test_history_rows_say_which_side_i_was_on():
     out = build(closet={"fills": [FILL_DONE]}, wallet="rMe")
     (item,) = out["history"]
     assert item["subtitle"] == "Bought · Complete"
-    sold = build(closet={"fills": [{**FILL_DONE, "buyer": "rOther", "seller": "rMe"}]}, wallet="rMe")
+    sold = build(
+        closet={"fills": [{**FILL_DONE, "buyer": "rOther", "seller": "rMe"}]}, wallet="rMe"
+    )
     assert sold["history"][0]["subtitle"] == "Sold · Complete"
 
 
@@ -377,3 +384,33 @@ def test_the_closet_market_being_off_simply_yields_empty_groups():
     assert out["selling"] == [] and out["buying"] == [] and out["needsYou"] == []
     assert out["history"] == []
     assert len(out["stuff"]["characters"]) == 1
+
+
+def test_stuck_actions_are_oldest_first_however_the_server_ordered_them():
+    """The server returns orders and fills newest-first; the thing that has
+    been stuck longest is the one most worth finishing."""
+    orders = [
+        {
+            **CLOSET_BID,
+            "id": "new",
+            "state": "pending_escrow",
+            "created_ts": "2026-09-19T10:00:00Z",
+        },
+        {
+            **CLOSET_BID,
+            "id": "old",
+            "state": "pending_escrow",
+            "created_ts": "2026-09-01T10:00:00Z",
+        },
+    ]
+    fills = [
+        {**FILL_DONE, "id": "fnew", "state": "failed", "created_ts": "2026-09-19T10:00:00Z"},
+        {**FILL_DONE, "id": "fold", "state": "failed", "created_ts": "2026-09-01T10:00:00Z"},
+    ]
+    out = build(closet={"orders": orders, "fills": fills})
+    assert [i["key"] for i in out["needsYou"]] == [
+        "order:old",
+        "order:new",
+        "fill:fold",
+        "fill:fnew",
+    ]
