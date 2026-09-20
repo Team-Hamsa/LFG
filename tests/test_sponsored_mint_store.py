@@ -16,7 +16,7 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import config
+from lfg_core import config, history_store
 from lfg_core import sponsored_mint as sm
 from tests.sponsored_helpers import prepare_and_forward, ready_history
 
@@ -658,3 +658,84 @@ def test_audit_archive_reverify_writes_row(tmp_path):
         ).fetchall()
     assert ("admin:42", "archive_reverify", "ok") in rows
     assert ("admin:42", "archive_reverify", "failed: genesis_mismatch") in rows
+
+
+def _gap(history, *, gap_after=5, now=101):
+    with sqlite3.connect(history) as conn:
+        history_store.invalidate_archive_continuity(
+            conn,
+            network="mainnet",
+            reason="transaction stream disconnected",
+            gap_after=gap_after,
+            invalidated_at=now,
+        )
+
+
+def _claims(db):
+    with sqlite3.connect(db) as conn:
+        return conn.execute("SELECT COUNT(*) FROM free_mint_claims").fetchone()[0]
+
+
+def test_catching_up_archive_reports_pending_not_unavailable(tmp_path):
+    """A certified archive with a bounded continuity gap (listener restart,
+    #402 catch-up in flight) must say "eligible, not ready" — the badge and
+    mint start tell the user to check back — and must write no claim."""
+    db, history = paths(tmp_path)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    _gap(history)
+
+    reserved = sm.reserve_if_eligible(
+        db, history, network="mainnet", wallet="rNew", session_id="s1", now=101
+    )
+    assert (reserved.sponsored, reserved.reason, reserved.claim) == (
+        False,
+        "eligibility_pending",
+        None,
+    )
+    preview = sm.preview_eligibility(db, history, network="mainnet", wallet="rNew", now=101)
+    assert (preview.sponsored, preview.reason) == (False, "eligibility_pending")
+    assert _claims(db) == 0
+    assert not sm.archive_is_usable(history, network="mainnet", now=101)
+
+
+def test_catching_up_archive_still_answers_what_it_can(tmp_path):
+    """A tagged row in a gapped archive is still real history (conclusively
+    ineligible), and campaign state still outranks the pending verdict."""
+    db, history = paths(tmp_path)
+    insert_tagged(history, "rKnown")
+    _gap(history)
+
+    assert (
+        sm.reserve_if_eligible(
+            db, history, network="mainnet", wallet="rNew", session_id="s0", now=101
+        ).reason
+        == "campaign_off"
+    )
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    assert (
+        sm.reserve_if_eligible(
+            db, history, network="mainnet", wallet="rKnown", session_id="s1", now=101
+        ).reason
+        == "ineligible"
+    )
+
+
+def test_stale_heartbeat_is_pending_but_uncertified_archive_is_unavailable(tmp_path, monkeypatch):
+    db, history = paths(tmp_path)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    later = 101 + config.SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS + 1
+    assert (
+        sm.reserve_if_eligible(
+            db, history, network="mainnet", wallet="rNew", session_id="s1", now=later
+        ).reason
+        == "eligibility_pending"
+    )
+
+    with sqlite3.connect(history) as conn:
+        conn.execute("UPDATE archive_state SET baseline_complete = 0")
+    assert (
+        sm.reserve_if_eligible(
+            db, history, network="mainnet", wallet="rNew", session_id="s2", now=101
+        ).reason
+        == "eligibility_unavailable"
+    )

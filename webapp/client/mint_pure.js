@@ -87,6 +87,12 @@ export function freeMintBadge(resp) {
     return { show: true, text: '🎁 A free mint is reserved for this wallet' };
   }
   if (resp.eligible) return { show: true, text: '🎁 Free mint available for this wallet' };
+  // Not a verdict: the archive has not proved this wallet has no tagged
+  // history yet, and a completed catch-up can still refuse it. Promise the
+  // check, not the mint.
+  if (resp.reason === 'eligibility_pending') {
+    return { show: true, text: '🎁 Still checking your free mint — come back in a few minutes.' };
+  }
   if (resp.reason === 'already_consumed') return { show: true, text: '🎁 You’ve already claimed your free mint' };
   if (resp.reason === 'at_capacity') return { show: true, text: '🎁 Free mints are all gone for this campaign' };
   return hidden;

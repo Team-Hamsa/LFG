@@ -14,7 +14,7 @@ import * as marketPure from './market_pure.js?v=32';
 import * as closetPure from './closet_market_pure.js?v=3';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js?v=25';
+import * as mintPure from './mint_pure.js?v=26';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js?v=32';
