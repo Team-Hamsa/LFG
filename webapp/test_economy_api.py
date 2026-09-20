@@ -889,6 +889,9 @@ def _mk_body_gate_layers(tmp_path):
         # deliberately absent from every test's frozen edition_bodies.
         ("male", "Body", ["Straight Casino"]),
         ("milady", "Body", ["Curved Light Milady"]),
+        # Body art in shared/ is returned by list_values for EVERY class, so
+        # it names no class of its own -- the fallback must not invent one.
+        ("shared", "Body", ["Ghost Shell"]),
     ]:
         d = tmp_path / "layers" / body / trait_type
         d.mkdir(parents=True, exist_ok=True)
@@ -1321,6 +1324,22 @@ def test_assemble_options_genesis_wins_over_layers_for_the_same_value(monkeypatc
 
     out = asyncio.get_event_loop().run_until_complete(go())
     assert out["body_class"] == {"Straight Casino": "skeleton"}
+
+
+def test_assemble_options_shared_body_art_names_no_class(monkeypatch, body_gate_store):
+    """Body art under shared/ is returned by list_values for every body class,
+    so it identifies no class at all. The fallback must leave such a value
+    unmapped (the Builder drops it) rather than handing it the first class in
+    sort order, which would then drive the commit-time affinity gate."""
+    conn = _options_conn({}, [("Body", "Ghost Shell", 1)])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == []
+    assert out["body_class"] == {}
 
 
 def test_start_assemble_body_outside_genesis_resolves_from_layers(monkeypatch, body_gate_store):
