@@ -14,26 +14,29 @@ discord.py==2.7.1
 xumm-sdk-py==1.0.4
 
 # XRP Ledger client libraries
-xrpl-py==5.0.0
+xrpl-py==5.2.0
 
 # BunnyCDN storage client library for file uploads
 bunnycdn-storage==0.4
 bunnycdnpython==0.0.8
 
-# NumPy (required by OpenCV)
+# NumPy (required by OpenCV). Held at the 2.2.x line: 2.3+ requires Python
+# >= 3.11 and 2.5+ requires 3.12, and this project runs 3.10 (see
+# .python-version, pyproject's mypy python_version and ruff target-version).
 numpy==2.2.6
 
 # Image processing
-opencv-python==4.13.0.92
-Pillow==12.2.0
+opencv-python==5.0.0.93
+Pillow==12.3.0
 ffmpeg-python==0.2.0  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
 qrcode[pil]==8.2  # For generating QR codes locally
 
-# Environment variable management
+# Environment variable management. Held at 0.21.1: xumm-sdk-py 1.0.4 pins
+# python-dotenv<=0.21.1, so 1.x is unresolvable until that SDK moves.
 python-dotenv==0.21.1
 
 # Async HTTP client
-aiohttp==3.14.1
+aiohttp==3.14.3
 
 # OAuth 1.0a request signing (X/Twitter API — surfaces/x_bot/x_api.py).
 # Already present transitively via xumm-sdk-py → requests-oauthlib, but we
@@ -42,7 +45,7 @@ oauthlib==3.3.1
 
 # Fernet at-rest encryption for per-user X OAuth2 tokens (#252,
 # lfg_service/x_oauth.py — a leaked DB file must not leak posting capability).
-cryptography==50.0.0
+cryptography==50.0.1
 
 # Voice support for Discord (optional)
 PyNaCl==1.6.2
