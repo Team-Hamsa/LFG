@@ -299,6 +299,37 @@ def normalize_equip_changes(body: dict[str, Any]) -> list[tuple[str, str]]:
     return changes
 
 
+async def _resolve_body_classes(
+    genesis: trait_economy.Genesis, held: set[str], store: Any
+) -> dict[str, str]:
+    """value -> layer-dir class for the Body values a Closet actually holds.
+
+    The frozen genesis (plus the supply ledger) is authoritative, but it only
+    knows a body value that is some EDITION's body-of-record. A harvested body
+    whose value never headlined an edition in that baseline has no entry --
+    and on a stack whose genesis froze a small slice of the collection that is
+    nearly every body, which silently emptied the Builder's body list
+    ("your Closet has no bodies", staging 2026-09-20). So fall back to the
+    layer tree, which is the runtime truth for what a body value renders as:
+    a value found under `<class>/Body/` resolves to that class. Only values
+    the genesis does not cover are looked up, classes are walked in sorted
+    order so a value present in two dirs resolves deterministically, and a
+    value with no art anywhere stays unmapped (the caller drops it).
+    """
+    mapped = {v: c for v, c in trait_economy.body_class_map(genesis).items() if v in held}
+    missing = held - set(mapped)
+    if not missing:
+        return mapped
+    for body_class in await store.list_bodies():
+        for value in await store.list_values(body_class, "Body"):
+            if value in missing:
+                mapped.setdefault(value, body_class)
+        missing -= set(mapped)
+        if not missing:
+            break
+    return mapped
+
+
 async def assemble_options(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
     """The Builder's data source for assembling a blank: caller-owned blank
     characters + every legal (body, slot, value) combination the caller's
@@ -318,16 +349,18 @@ async def assemble_options(conn: sqlite3.Connection, owner: str) -> dict[str, An
     genesis = trait_economy.effective_genesis(
         economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
     )
-    body_class_map = trait_economy.body_class_map(genesis)
 
     owned_assets = [
         (s, v) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
     ]
+    cfg = trait_config.get_config()
+    store = layer_store.get_layer_store()
+    body_class_map = await _resolve_body_classes(
+        genesis, {v for (s, v) in owned_assets if s == "Body"}, store
+    )
     bodies = sorted({v for (s, v) in owned_assets if s == "Body" and v in body_class_map})
     non_body_assets = [(s, v) for (s, v) in owned_assets if s != "Body"]
 
-    cfg = trait_config.get_config()
-    store = layer_store.get_layer_store()
     options: dict[str, dict[str, list[str]]] = {}
     for body_value in bodies:
         body_class = body_class_map[body_value]
@@ -425,7 +458,8 @@ async def start_assemble(
     user_token: str | None = None,
 ) -> EconomyWebSession:
     """Dress a caller-owned BLANK character in place. Loads the character by
-    nft_id, resolves its target body class from the effective genesis, runs the
+    nft_id, resolves its target body class the same way assemble_options does
+    (effective genesis, then the layer tree), runs the
     per-slot body-affinity gate (the same swap_compose.resolve_layer check the
     swap path uses), then schedules run_assemble. The blank precondition is
     enforced inside the flow (te.can_assemble); an unknown body raises here."""
@@ -435,7 +469,9 @@ async def start_assemble(
         genesis = trait_economy.effective_genesis(
             economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
         )
-        body_class = trait_economy.body_class_map(genesis).get(body)
+        body_class = (
+            await _resolve_body_classes(genesis, {body}, layer_store.get_layer_store())
+        ).get(body)
         if body_class is None:
             raise EconomyError(f"unknown body: {body}")
         for slot in trait_economy.NON_BODY_SLOTS:
