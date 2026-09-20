@@ -346,9 +346,8 @@ select option { background: var(--surface); color: var(--text); }
 /* --- Buttons ---
    One primary per view; it gets the loud yellow sticker. Secondaries get the
    same sticker frame in a calm dark fill, so a row of actions reads as one
-   family. Both keep a flatter radius than the base pill: `.actions` squeezes
-   its buttons to flex:1 on wide screens, and a 99px radius at that width
-   rounds a short label into a blob. */
+   family. Both keep a flatter radius than the base pill — at the widths these
+   buttons take in a row, a 99px radius rounds a short label into a blob. */
 
 button {
   font-family: 'Inter', sans-serif;
@@ -871,8 +870,16 @@ button.back:hover { color: var(--text); border: none; }
 @media (min-width: 760px) {
   #app { max-width: 880px; }
   .card { padding: 26px 30px; }
-  .actions { flex-direction: row; justify-content: center; }
-  .actions button { width: auto; flex: 1; max-width: 280px; }
+  /* Labels here are dynamic and can get long ("🧱 Claim 1,234 BRIX",
+     "🎁 Pending (3)"). In a row, a label that wraps makes its button taller
+     and align-items: stretch matches every sibling to it — one long label
+     inflates the whole row. So keep labels on one line and let the ROW wrap
+     instead. (The stacked mobile layout above is full-width and may wrap.) */
+  .actions { flex-direction: row; flex-wrap: wrap; justify-content: center; }
+  /* Natural width, not flex: 1 — an even split squeezes every button to
+     ~110px, narrower than most of these labels. Buttons that don't fit move
+     to a second row at full legibility. */
+  .actions button { width: auto; flex: 0 1 auto; max-width: 280px; white-space: nowrap; }
 }
 
 /* Side-by-side flow copy/visual needs the horizontal room, so it stays
