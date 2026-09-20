@@ -402,10 +402,21 @@ Database Tables:
 > final) and every **non-delivery mint** (swap remint, economy
 > assemble/extract, Trait Shop), whose offers are not simple issuer→user
 > transfers. `offer_delivery.ensure_offer` (#466) therefore stays the delivery
-> path for those, and is also the **fallback** when a folded mint fails
-> definitively — a destination with `lsfDisallowIncomingNFTokenOffer` fails the
-> whole folded NFTokenMint rather than just delivery, so `mint_one_unit` retries
-> unfolded rather than leave a paid mint with nothing minted.
+> path for those.
+>
+> **Folding is gated on the destination pre-flight, before the mint.** It
+> stakes the MINT on the offer being creatable — a destination with
+> `lsfDisallowIncomingNFTokenOffer`, or one that does not exist, fails the
+> whole folded `NFTokenMint` where an unfolded mint would have succeeded and
+> only delivery would have failed. `handle_mint_start` refuses both before
+> payment but fails OPEN on an unresolved `account_info` (#388/#408), so
+> `mint_one_unit` re-checks and folds only when delivery is PROVEN possible;
+> anything else mints unfolded. The gate is deliberately BEFORE the mint:
+> deciding afterwards would make `mint_nft`'s `None` the trigger for a second
+> `NFTokenMint`, and `None` is not proof the first failed — `_validated_result`
+> returns it whenever `meta.TransactionResult` is not `tesSUCCESS`, including a
+> malformed meta on a tx that DID commit. **Nothing in the mint path ever
+> retries a mint.**
 
 ### Key Data Structures
 

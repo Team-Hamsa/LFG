@@ -1107,38 +1107,51 @@ async def mint_one_unit(
             # details — a fake that still returns the legacy bare-string
             # contract simply yields offer_id=None and falls through to the
             # separate NFTokenCreateOffer below.
+            #
+            # Folding stakes the MINT on the offer being creatable: a
+            # destination that blocks incoming NFT offers
+            # (lsfDisallowIncomingNFTokenOffer) or does not exist fails the
+            # whole NFTokenMint, where an unfolded mint would have succeeded
+            # and only delivery would have failed. handle_mint_start refuses
+            # both BEFORE payment, but its pre-flight fails OPEN on an
+            # unresolved account_info (#388/#408), so decide HERE, from the
+            # ledger, and fold only when delivery is PROVEN possible.
+            #
+            # This is a pre-mint gate on purpose. Deciding afterwards — mint
+            # folded, then re-mint unfolded if it failed — would make
+            # mint_nft's None the trigger for a second NFTokenMint, and None
+            # is not always proof the first one failed: _validated_result
+            # returns None whenever meta.TransactionResult is not tesSUCCESS,
+            # INCLUDING a malformed/absent meta on a tx that did commit. That
+            # retry could mint a duplicate (CodeRabbit, PR #577).
+            fold_to: str | None = wallet_address
+            try:
+                preflight = await xrpl_ops.destination_preflight(wallet_address)
+            except Exception as e:  # noqa: BLE001 - transport/timeout -> unresolved
+                logging.warning(f"folded-mint pre-flight failed for {wallet_address}: {e}")
+                preflight = xrpl_ops.DestinationPreflight(None, None, None, None)
+            if not (
+                preflight.resolved
+                and preflight.exists is not False
+                and preflight.blocks_nft_offers is False
+            ):
+                # Not PROVEN deliverable. Mint unfolded exactly as before and
+                # let offer_delivery.ensure_offer own the delivery problem —
+                # a mint is never risked on an unproven destination.
+                logging.info(
+                    "not folding the delivery offer for %s "
+                    "(pre-flight could not prove delivery is possible)",
+                    wallet_address,
+                )
+                fold_to = None
             mint_result = await xrpl_ops.mint_nft(
                 metadata_cdn_url=metadata_cdn_url,
                 taxon=config.NFT_TAXON,
                 issuer=config.SWAP_ISSUER_ADDRESS,
                 platform=memos.platform_for_surface(platform),
-                destination=wallet_address,
+                destination=fold_to,
                 return_details=True,
             )
-            if mint_result is None:
-                # A folded mint stakes the MINT on the offer being creatable:
-                # a destination that blocks incoming NFT offers
-                # (lsfDisallowIncomingNFTokenOffer), or is unfunded, now fails
-                # the whole NFTokenMint rather than just delivery. handle_mint_
-                # start's pre-flight refuses both BEFORE payment, but it fails
-                # OPEN on an unresolved account_info (#388/#408) — so on a
-                # definitive failure, fall back to the unfolded mint and let
-                # offer_delivery.ensure_offer own the delivery problem exactly
-                # as it did before. Only a definitive failure reaches here:
-                # mint_nft re-raises IndeterminateResultError, so this can
-                # never re-mint a token that may already be on-ledger.
-                logging.warning(
-                    "folded XLS-52 mint for %s failed definitively; "
-                    "retrying as a plain mint + separate offer",
-                    wallet_address,
-                )
-                mint_result = await xrpl_ops.mint_nft(
-                    metadata_cdn_url=metadata_cdn_url,
-                    taxon=config.NFT_TAXON,
-                    issuer=config.SWAP_ISSUER_ADDRESS,
-                    platform=memos.platform_for_surface(platform),
-                    return_details=True,
-                )
         if isinstance(mint_result, xrpl_ops.MintNFTResult):
             nft_id = mint_result.nft_id
             mint_tx_hash = mint_result.tx_hash
