@@ -730,8 +730,8 @@ def test_the_partition_is_total_and_disjoint():
     assert len(keys) == len(set(keys)), "a row landed in two groups"
     # every input row produced exactly one item: 2 listings + 1 char + 1 token
     # + 1 closet asset + 1 my_bid + 1 incoming bid + 3 orders + 1 trait bid
-    # + 2 fills
-    assert len(keys) == 14
+    # + 2 fills = 13
+    assert len(keys) == 13
 
 
 def test_nothing_active_is_true_while_holdings_exist():

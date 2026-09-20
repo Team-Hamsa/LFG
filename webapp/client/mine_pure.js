@@ -177,6 +177,53 @@ function bidItem(bid, { kind, label }) {
   });
 }
 
+const FILL_STATE_TEXT = {
+  funds_pending: 'Waiting for funds', funded: 'Moving the trait', asset_moved: 'Paying the seller',
+  paid: 'Updating Closets', mirrored: 'Complete', refund_pending: 'Refunding', refunded: 'Refunded',
+  indeterminate: 'Confirming on-ledger', failed: 'Failed',
+};
+
+function fillItem(fill, wallet) {
+  const role = fill.buyer === wallet ? 'Bought' : 'Sold';
+  return item({
+    unit: 'row',
+    key: `fill:${fill.id}`,
+    imageUrl: fill.image_url || null,
+    title: traitTitle(fill.slot, fill.value),
+    subtitle: `${role} \u00b7 ${FILL_STATE_TEXT[fill.state] ?? fill.state}`,
+    price: { amount: fill.price_brix, currency: 'BRIX' },
+    action: { label: 'View', kind: 'viewClosetFill', payload: fill },
+  });
+}
+
+// A fill the buyer still owes money on is the user's move; a failed one is
+// theirs to look at. Everything else is the market working — history.
+function fillNeedsUser(fill, wallet) {
+  if (fill.state === 'failed') return true;
+  return fill.state === 'funds_pending' && fill.buyer === wallet;
+}
+
+function holdingBidItem(bid) {
+  const inWallet = bid.source === 'token';
+  return item({
+    unit: 'row',
+    key: `holdingbid:${bid.id}`,
+    imageUrl: bid.image_url || null,
+    title: traitTitle(bid.slot, bid.value),
+    price: { amount: bid.price_brix, currency: 'BRIX' },
+    badges: inWallet ? ['in your wallet'] : [],
+    action: {
+      label: inWallet ? 'Deposit & fill' : 'Fill',
+      kind: 'fillClosetBid',
+      payload: bid,
+    },
+  });
+}
+
+function byPriceDesc(a, b) {
+  return Number(b.price.amount) - Number(a.price.amount);
+}
+
 export function buildMine({
   mine = {}, bids = {}, closet = {}, wallet = null, closetMarketEnabled = false,
 } = {}) {
@@ -197,8 +244,36 @@ export function buildMine({
       .filter((o) => o.side === 'bid' && o.state !== 'pending_escrow')
       .map((o) => orderItem(o, 'row')),
   ];
-  const needsYou = [];
-  const history = [];
+  const fills = closet.fills || [];
+  // Incoming offers first — money waiting on a decision — grouped by kind
+  // before sorting, because ranking XRP against BRIX would be meaningless.
+  const needsYou = [
+    ...(bids.bids_on_my_nfts || [])
+      .map((b) => bidItem(b, { kind: 'acceptBid', label: 'Accept' }))
+      .sort(byPriceDesc),
+    ...(closet.bids_on_my_traits || []).map(holdingBidItem).sort(byPriceDesc),
+    // …then the user's own stuck actions, oldest first.
+    ...liveOrders
+      .filter((o) => o.state === 'pending_escrow')
+      .map((o) => ({
+        ...orderItem(o, 'row'),
+        state: null,
+        action: {
+          label: 'Finish signing',
+          kind: 'resumeClosetOrder',
+          payload: { id: o.id, side: o.side },
+        },
+      })),
+    ...fills
+      .filter((f) => fillNeedsUser(f, wallet))
+      .map((f) => {
+        const row = fillItem(f, wallet);
+        return f.state === 'failed'
+          ? row
+          : { ...row, action: { label: 'Finish paying', kind: 'resumeFill', payload: f } };
+      }),
+  ];
+  const history = fills.filter((f) => !fillNeedsUser(f, wallet)).map((f) => fillItem(f, wallet));
   const active = needsYou.length + selling.length + buying.length;
   const owned = active + history.length + stuff.characters.length + stuff.traits.length;
   return {

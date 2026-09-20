@@ -241,3 +241,139 @@ def test_my_native_bids_are_buying_rows():
     assert item["action"]["kind"] == "cancelBid"
     assert item["action"]["payload"]["offer_index"] == "B1"
     assert out["nothingActive"] is False
+
+
+INCOMING_NFT_BID = {
+    "offer_index": "B2",
+    "nft_id": "0008EF",
+    "nft_number": 2048,
+    "image": "https://cdn/2048.png",
+    "bidder": "rOther",
+    "amount_xrp": "14",
+}
+INCOMING_TRAIT_BID = {
+    "id": "o9",
+    "slot": "Eyes",
+    "value": "Laser",
+    "price_brix": "40",
+    "source": "closet",
+    "nft_id": None,
+    "image_url": "/api/layer?e",
+}
+FILL_DONE = {
+    "id": "f1",
+    "seller": "rOther",
+    "buyer": "rMe",
+    "slot": "Hat",
+    "value": "Wizard Hat",
+    "price_brix": "25",
+    "state": "mirrored",
+    "created_ts": "2026-09-18T10:00:00Z",
+    "image_url": "/api/layer?a",
+}
+
+
+def test_incoming_nft_bids_lead_needs_you_highest_first():
+    high = {**INCOMING_NFT_BID, "offer_index": "B3", "amount_xrp": "30"}
+    out = build(bids={"bids_on_my_nfts": [INCOMING_NFT_BID, high]})
+    assert [i["price"]["amount"] for i in out["needsYou"]] == ["30", "14"]
+    assert out["needsYou"][0]["unit"] == "row"
+    assert out["needsYou"][0]["action"]["kind"] == "acceptBid"
+
+
+def test_character_bids_group_before_trait_bids_never_sorted_across_currencies():
+    out = build(
+        bids={"bids_on_my_nfts": [INCOMING_NFT_BID]},
+        closet={"bids_on_my_traits": [INCOMING_TRAIT_BID]},
+    )
+    assert [i["price"]["currency"] for i in out["needsYou"]] == ["XRP", "BRIX"]
+
+
+def test_a_wallet_held_trait_bid_discloses_the_deposit_at_action_time():
+    token_bid = {**INCOMING_TRAIT_BID, "source": "token", "nft_id": "0009FF"}
+    out = build(closet={"bids_on_my_traits": [token_bid]})
+    (item,) = out["needsYou"]
+    assert item["action"]["label"] == "Deposit & fill"
+    assert item["badges"] == ["in your wallet"]
+    plain = build(closet={"bids_on_my_traits": [INCOMING_TRAIT_BID]})["needsYou"][0]
+    assert plain["action"]["label"] == "Fill"
+    assert plain["badges"] == []
+
+
+def test_a_half_signed_bid_is_something_only_the_user_can_finish():
+    # Only a BID is ever pending_escrow — an ask is off-ledger and opens
+    # instantly, so it has no signature to finish.
+    out = build(closet={"orders": [{**CLOSET_BID, "state": "pending_escrow"}]})
+    (item,) = out["needsYou"]
+    assert item["action"] == {
+        "label": "Finish signing",
+        "kind": "resumeClosetOrder",
+        "payload": {"id": "o2", "side": "bid"},
+    }
+    assert out["buying"] == []
+
+
+def test_a_fill_waiting_on_my_money_or_stuck_needs_me_everything_else_is_history():
+    fills = [
+        {**FILL_DONE, "id": "f2", "state": "funds_pending", "buyer": "rMe"},
+        {**FILL_DONE, "id": "f3", "state": "funds_pending", "buyer": "rOther", "seller": "rMe"},
+        {**FILL_DONE, "id": "f4", "state": "failed"},
+        FILL_DONE,
+    ]
+    out = build(closet={"fills": fills})
+    assert [i["key"] for i in out["needsYou"]] == ["fill:f2", "fill:f4"]
+    assert [i["action"]["kind"] for i in out["needsYou"]] == ["resumeFill", "viewClosetFill"]
+    assert sorted(i["key"] for i in out["history"]) == ["fill:f1", "fill:f3"]
+    assert all(i["unit"] == "row" for i in out["history"])
+
+
+def test_history_rows_say_which_side_i_was_on():
+    out = build(closet={"fills": [FILL_DONE]}, wallet="rMe")
+    (item,) = out["history"]
+    assert item["subtitle"] == "Bought · Complete"
+    sold = build(closet={"fills": [{**FILL_DONE, "buyer": "rOther", "seller": "rMe"}]}, wallet="rMe")
+    assert sold["history"][0]["subtitle"] == "Sold · Complete"
+
+
+def test_the_partition_is_total_and_disjoint():
+    out = build(
+        mine={
+            "listings": [CHAR_LISTING, TRAIT_LISTING],
+            "unlisted_characters": [CHAR],
+            "unlisted_trait_tokens": [TRAIT_TOKEN],
+            "closet_assets": [CLOSET_ASSET],
+        },
+        bids={"my_bids": [MY_BID], "bids_on_my_nfts": [INCOMING_NFT_BID]},
+        closet={
+            "orders": [ASK, CLOSET_BID, {**CLOSET_BID, "id": "o3", "state": "pending_escrow"}],
+            "bids_on_my_traits": [INCOMING_TRAIT_BID],
+            "fills": [FILL_DONE, {**FILL_DONE, "id": "f4", "state": "failed"}],
+        },
+    )
+    groups = (
+        out["needsYou"]
+        + out["selling"]
+        + out["buying"]
+        + out["history"]
+        + out["stuff"]["characters"]
+        + out["stuff"]["traits"]
+    )
+    keys = [i["key"] for i in groups]
+    assert len(keys) == len(set(keys)), "a row landed in two groups"
+    # every input row produced exactly one item: 2 listings + 1 char + 1 token
+    # + 1 closet asset + 1 my_bid + 1 incoming bid + 3 orders + 1 trait bid
+    # + 2 fills = 13
+    assert len(keys) == 13
+
+
+def test_nothing_active_is_true_while_holdings_exist():
+    out = build(mine={"unlisted_characters": [CHAR]})
+    assert out["ownsNothing"] is False
+    assert out["nothingActive"] is True
+
+
+def test_the_closet_market_being_off_simply_yields_empty_groups():
+    out = build(mine={"unlisted_characters": [CHAR]}, closet={}, enabled=False)
+    assert out["selling"] == [] and out["buying"] == [] and out["needsYou"] == []
+    assert out["history"] == []
+    assert len(out["stuff"]["characters"]) == 1
