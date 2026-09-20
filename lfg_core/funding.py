@@ -33,8 +33,14 @@ EXCHANGES = {
 # Every other hot wallet XRPScan labels for the same exchanges/custodians. The
 # hand-picked eight above missed most of them, so the sponsored-mint funder
 # gate read every second Coinbase/Binance/KuCoin customer as a sybil sibling
-# of the first (2026-09-19 campaign). Refresh from
-# api.xrpscan.com/api/v1/names/well-known when a new exchange shows up.
+# of the first (2026-09-19 campaign).
+#
+# The snapshot is NOT a verbatim copy of a third party's classification: it is
+# XRPScan's well-known list filtered to the exchanges and custodians reviewed
+# in scripts/refresh_exchange_funders.py, which regenerates this file and
+# prints every added/removed account for review. An entry naming any other
+# operator fails tests/test_funding.py, so a broadened upstream label cannot
+# silently widen this exemption.
 EXCHANGES.update(
     json.loads((Path(__file__).with_name("exchange_funders.json")).read_text())["accounts"]
 )
