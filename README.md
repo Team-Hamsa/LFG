@@ -454,7 +454,6 @@ collection (not a general tool). Full rationale per row in
 **Remaining** — synced automatically from [`roadmap`-labelled issues](../../issues?q=label%3Aroadmap)
 
 <!-- roadmap:start -->
-- [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
 - [ ] [#219 — feat: XLS-56 Batch: single-signature accept of multiple NFT offers](../../issues/219)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
 - [ ] [#405 — feat(brix): spend unclaimed daily-drip accruals as in-app platform credit](../../issues/405)
