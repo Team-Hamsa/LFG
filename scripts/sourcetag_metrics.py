@@ -59,6 +59,9 @@ OPERATOR_WALLETS = frozenset(
 HISTORICAL_SIGNING_ADDRESSES = frozenset(
     {
         "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ",  # mainnet issuer
+        # mainnet BRIX issuer: signs via its regular key (the distributor);
+        # its one tagged AccountSet (2026-09-18) counted it as a user.
+        "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px",
     }
 )
 
