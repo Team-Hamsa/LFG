@@ -53,6 +53,11 @@ FLAGS: dict[str, FlagInfo] = {
         " `ECONOMY_ENABLED`)",
         "on (default)",
     ),
+    "CLOSET_MARKET_ENABLED": FlagInfo(
+        "Closet Market — zero-signature trait asks + BRIX TokenEscrow bids"
+        " (gates new orders; also needs `CLOSET_MARKET_ENC_KEY`)",
+        "`1` since 2026-09-18 ([#443](../../issues/443))",
+    ),
     "BULK_MINT_UI_ENABLED": FlagInfo(
         "Activity bulk-mint quantity stepper (server bulk endpoints stay live regardless)",
         "on (`1`) in production and staging",

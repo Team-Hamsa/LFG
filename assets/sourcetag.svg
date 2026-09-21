@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 12,128 tagged transactions from 405 unique holders">
+<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 12,128 tagged transactions from 405 unique users">
 <rect x="8" y="8" width="718" height="320" rx="18" fill="#0A0A0A"/>
 <rect x="2" y="2" width="718" height="320" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
 <text x="24" y="34" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#F5F4F1">XRPL source tag · 2606160021</text>
-<text x="24" y="56" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#9C9A94">live on-ledger volume · auto-updated daily</text>
+<text x="24" y="56" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#9C9A94">tagged transactions · auto-updated daily</text>
 <rect x="24.0" y="72" width="328.0" height="60" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="40.0" y="84" width="30" height="5" rx="2.5" fill="#4890C0"/>
 <text x="40.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#4890C0">405</text>
-<text x="40.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">unique holders</text>
+<text x="40.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">unique users</text>
 <rect x="368.0" y="72" width="328.0" height="60" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="384.0" y="84" width="30" height="5" rx="2.5" fill="#D89030"/>
 <text x="384.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">12,128</text>

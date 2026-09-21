@@ -73,7 +73,7 @@ STATIC_BADGES = [
         None,
     ),
     (
-        "https://img.shields.io/badge/-WalletConnect%20signing-F66E19?style=flat-square"
+        "https://img.shields.io/badge/-Joey%20%C2%B7%20web%20signing-F66E19?style=flat-square"
         f"&logo={custom_logo('joey.png')}",
         "Signed in Joey Wallet over WalletConnect (web)",
         None,
