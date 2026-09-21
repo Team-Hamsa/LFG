@@ -104,6 +104,11 @@ STATIC_BADGES = [
         "Installable PWA",
         None,
     ),
+    (
+        "https://img.shields.io/badge/pitch%20deck-PDF-D84830?style=flat-square",
+        "Hackathon pitch deck (PDF)",
+        f"https://github.com/{REPO}/blob/main/assets/LFG-Hackathon-Deck.pdf",
+    ),
 ]
 
 

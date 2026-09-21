@@ -8,6 +8,9 @@ Every XRPL transaction and Xaman (XUMM) signing payload the app builds carries
 `SourceTag 2606160021`, the project's assigned Make Waves source tag — that is
 how transaction volume is credited to this entry.
 
+> The submitted pitch deck is committed as [`assets/LFG-Hackathon-Deck.pdf`](../assets/LFG-Hackathon-Deck.pdf)
+> (18 slides, 16:9; Sep 21, 2026 build).
+>
 > Line-of-code growth stats (the self-updating hackathon LoC bar) live in the
 > project [README](../README.md); they are regenerated on every push to `main`.
 
