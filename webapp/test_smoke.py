@@ -47,7 +47,6 @@ def test_routes_registered():
         "/api/config",
         "/api/token",
         "/api/me",
-        "/api/register",
         "/api/mint",
         "/api/mint/active",
         "/api/mint/bulk",
@@ -2140,3 +2139,11 @@ def test_equip_blank_character_maps_to_409(monkeypatch):
 
     body = json.loads(resp.body)
     assert body == {"error": trait_economy.BLANK_CHARACTER_ERROR, "code": "blank_character"}
+
+
+def test_unverified_register_route_is_gone():
+    # Wallets are bound only through a signed Xaman SignIn / proof-signed
+    # link, never by a bare address in a request body.
+    app = server.create_app()
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    assert "/api/register" not in paths
