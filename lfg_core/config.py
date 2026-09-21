@@ -365,11 +365,13 @@ def validate_dev_mode_config(dev_mode: bool, xrpl_network: str) -> None:
     caller the dev identity. The service calls this from create_app() so a
     misconfigured process fails fast instead of starting unauthenticated.
     """
-    if dev_mode and xrpl_network == "mainnet":
+    # Fail closed on the EFFECTIVE network: every value other than "testnet"
+    # (a typo, "prod", "devnet") selects mainnet endpoints (IS_TESTNET above).
+    if dev_mode and xrpl_network.strip().lower() != "testnet":
         raise ValueError(
-            "WEBAPP_DEV_MODE is on while XRPL_NETWORK is 'mainnet'. Dev mode "
-            "bypasses authentication on every route and must never run "
-            "against mainnet. Unset WEBAPP_DEV_MODE or use a test network."
+            f"WEBAPP_DEV_MODE is on while XRPL_NETWORK is {xrpl_network!r}. Dev "
+            "mode bypasses authentication on every route and may only run "
+            "against testnet. Unset WEBAPP_DEV_MODE or set XRPL_NETWORK=testnet."
         )
 
 

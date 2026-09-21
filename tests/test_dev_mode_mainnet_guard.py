@@ -7,14 +7,16 @@ from lfg_core import config
 from lfg_service import app as server
 
 
-def test_validate_dev_mode_refuses_mainnet():
+@pytest.mark.parametrize("network", ["mainnet", "prod", "devnet", ""])
+def test_validate_dev_mode_refuses_any_non_testnet_network(network):
+    # config treats every value but "testnet" as mainnet, so the guard must too
     with pytest.raises(ValueError, match="WEBAPP_DEV_MODE"):
-        config.validate_dev_mode_config(True, "mainnet")
+        config.validate_dev_mode_config(True, network)
 
 
 @pytest.mark.parametrize(
     ("dev_mode", "network"),
-    [(True, "testnet"), (True, "devnet"), (False, "mainnet"), (False, "testnet")],
+    [(True, "testnet"), (True, " Testnet "), (False, "mainnet"), (False, "prod")],
 )
 def test_validate_dev_mode_allows_everything_else(dev_mode, network):
     config.validate_dev_mode_config(dev_mode, network)
