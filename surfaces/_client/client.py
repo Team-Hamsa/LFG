@@ -227,11 +227,6 @@ class LFGServiceClient:
             result = await self._request(method, path, token=token, **kw)
             return result
 
-    async def register(self, user_id: str, username: str, wallet: str) -> dict[str, Any]:
-        return await self._user_request(
-            "POST", "/api/register", user_id, username=username, json={"wallet": wallet}
-        )
-
     async def me(self, user_id: str, *, username: str = "") -> dict[str, Any]:
         return await self._user_request("GET", "/api/me", user_id, username=username)
 

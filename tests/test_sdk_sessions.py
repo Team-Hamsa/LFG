@@ -16,7 +16,7 @@ def test_session_minted_once_and_reused():
         async with client:
             await client.me("42", username="neo")
             await client.me("42")
-            await client.register("42", "neo", "rWALLET")
+            await client.account("42", username="neo")
             assert app["state"]["session_hits"] == 1  # one mint for user 42, reused
         await server.close()
 
