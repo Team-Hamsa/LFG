@@ -7079,53 +7079,6 @@ async def handle_closet(request):
     return web.json_response(result)
 
 
-@require_auth
-async def handle_register(request):
-    user = request["user"]
-    platform = _platform(user)
-    body = await request.json()
-    wallet = (body.get("wallet") or "").strip()
-    if not is_valid_classic_address(wallet):
-        return web.json_response({"error": "invalid XRPL address"}, status=400)
-    # The legacy Users table is keyed by discord_id with no platform column, so
-    # only the discord platform may write it — a colliding numeric id from
-    # another platform would silently overwrite a discord user's wallet (and be
-    # mismigrated into identities as a discord row on the next startup). Non-
-    # discord platforms live in identities only; _resolve_wallet gates its legacy
-    # fallback on discord, so it never consults this table for them.
-    if platform == "discord":
-        if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
-            return web.json_response(
-                {"error": "registration failed", "code": "register_failed"}, status=500
-            )
-    linked = await asyncio.to_thread(
-        identity_store.link, platform, user["id"], user["name"], wallet
-    )
-    if not linked:
-        logging.error(
-            "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
-            platform,
-            user["id"],
-        )
-    _warm_funder_cache(wallet)
-    # Best-effort Closet issuance post-registration: kick off ensure_closet so the
-    # user's Closet NFToken is minted immediately on registration. This never blocks
-    # or fails the registration response — any error is logged and ignored.
-    closet_result: dict[str, Any] | None = None
-    if config.ECONOMY_ENABLED and not config.WEBAPP_DEV_MODE:
-        try:
-            closet_result = await economy_api.start_closet(
-                user["id"], wallet, user_token=await _push_token(user)
-            )
-        except Exception as e:
-            logging.warning(f"post-register ensure_closet failed for {wallet}: {e}")
-    resp: dict[str, Any] = {"ok": True, "wallet": wallet}
-    if closet_result is not None:
-        resp["closet_accept"] = closet_result.get("accept")
-        resp["closet_accept_push"] = closet_result.get("accept_push")
-    return web.json_response(resp)
-
-
 async def _request_return_url(request):
     """Optional XUMM return_url from the client's guild/channel context;
     bad/missing IDs simply mean no return button in Xaman (issue #14)."""
@@ -12068,7 +12021,6 @@ def create_app() -> web.Application:
     app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/logout", handle_logout)
     app.router.add_post("/api/wallet/disconnect", handle_wallet_disconnect)
-    app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     # /active must register BEFORE /{session_id}: aiohttp dispatches in
     # registration order, and the dynamic route would swallow it as an id.

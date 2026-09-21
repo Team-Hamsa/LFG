@@ -96,14 +96,6 @@ def build_mock_service(
             return bad
         return web.json_response({"id": "u", "username": "u", "wallet": "rMOCK"})
 
-    async def handle_register(request: web.Request) -> web.StreamResponse:
-        _count("/api/register")
-        bad = _require_session(request)
-        if bad is not None:
-            return bad
-        body = await request.json()
-        return web.json_response({"ok": True, "wallet": body.get("wallet")})
-
     async def handle_mint_start(request: web.Request) -> web.StreamResponse:
         _count("/api/mint")
         bad = _require_session(request)
@@ -246,7 +238,6 @@ def build_mock_service(
     app.router.add_post("/api/session", handle_session)
     app.router.add_get("/api/me", handle_me)
     app.router.add_get("/api/account", handle_account)
-    app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/swap", handle_swap_start)

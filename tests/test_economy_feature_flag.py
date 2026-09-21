@@ -96,23 +96,6 @@ def test_economy_posts_disabled_return_403(monkeypatch):
         _assert_disabled(_run(handler(_wallet_req({}))))
 
 
-def test_register_skips_closet_issuance_when_disabled(monkeypatch):
-    monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
-    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
-    monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
-    monkeypatch.setattr(app, "register_user", lambda uid, name, w: True)
-    monkeypatch.setattr(app.identity_store, "link", lambda *a: True)
-
-    def boom(*a, **k):
-        raise AssertionError("start_closet must not run with the economy disabled")
-
-    monkeypatch.setattr(app.economy_api, "start_closet", boom)
-    token = make_session_token({"id": "u1", "name": "u", "platform": "discord"})
-    resp = _run(app.handle_register(_Req(token, {"wallet": "rXRPL"})))
-    assert resp.status == 200
-    assert "closet_accept" not in json.loads(resp.body)
-
-
 def test_client_hides_dressup_when_economy_disabled():
     # No-build vanilla JS client: assert the source reads economy_enabled from
     # /api/config and hides the Dress Up entry point when it is false.
