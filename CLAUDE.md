@@ -661,7 +661,12 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
   server's stream never delivered a paid bulk mint. Mint and bulk-mint cancel
   refuse (409 `payment_received`, or 503 when history can't be read) while a
   matching unclaimed payment is on-ledger. The AMM quote and `account_nfts`
-  use the JSON-RPC pool. clio (`CLIO_WS_URL`) has no failover.
+  use the JSON-RPC pool. clio (`CLIO_WS_URL`) has no failover for the
+  clio-only methods (`nft_info`/`nft_exists`). Full-history lookups
+  (`funding.lookup_funder`) use `config.HISTORY_WS_URLS`: clio first, then the
+  public full-history nodes (`XRPL_HISTORY_WS_FALLBACK_URLS`), each refused on
+  mainnet unless it serves history back to ledger 32570 — never the JSON-RPC/WS
+  pools, whose prod primary is the pruned local validator.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
