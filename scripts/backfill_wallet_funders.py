@@ -262,8 +262,15 @@ def reverify(
 
 
 def _write_report(path: str, body: dict[str, object]) -> None:
-    with open(path, "w") as fh:
+    """Write via a temp file + os.replace, so a failed rewrite after the
+    commit leaves the previous (pre-change) report intact, never a truncated
+    one."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
         json.dump(body, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 if __name__ == "__main__":

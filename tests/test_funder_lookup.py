@@ -350,3 +350,17 @@ def test_brix_issuer_is_excluded_from_unique_users():
     from scripts import sourcetag_metrics as stm
 
     assert "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px" in stm.excluded_wallets()
+
+
+def test_report_rewrite_failure_keeps_the_previous_report(tmp_path, monkeypatch):
+    script = _script(monkeypatch)
+    path = str(tmp_path / "r.json")
+    script._write_report(path, {"applied": False})
+
+    def boom(*a, **k):
+        raise TypeError("not serializable")
+
+    monkeypatch.setattr(script.json, "dump", boom)
+    with pytest.raises(TypeError):
+        script._write_report(path, {"applied": True})
+    assert json.loads(open(path).read()) == {"applied": False}
