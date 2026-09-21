@@ -69,5 +69,5 @@ echo "Next steps:"
 echo "1. cp .env.example .env   (testnet template) and fill in the placeholders"
 echo "2. Point LAYER_SOURCE=local / LAYERS_DIR at your own trait art (layers/ is not in the repo)"
 echo "3. Run the backend first: python -m lfg_service.app"
-echo "Using an AI assistant? Point it at AGENTS.md."
+echo "Forking for your own collection? Point your AI assistant at AGENTS.md."
 

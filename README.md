@@ -262,7 +262,7 @@ LFG/
 │   └── client/             # No-build frontend (vanilla JS) — Activity + the live web app
 ├── scripts/                # Ops: onchain_listener, backfills, audits, economy CLIs
 ├── trait_config.yaml       # Declarative trait rules (z-order, affinity, swap matrix)
-├── AGENTS.md               # Guide for AI assistants: try, test, run, and change LFG
+├── AGENTS.md               # Fork runbook for AI assistants: launch your own collection on LFG
 └── docs/                   # ACTIVITY_SETUP.md, HACKATHON.md, ops/ + runbooks/, superpowers/ specs+plans
 ```
 
@@ -293,7 +293,7 @@ on every push to `deploy` that changes `webapp/client/`; the prod API answers it
 
 ## Quick start
 
-> 🤖 **Using an AI coding assistant?** Point it at [`AGENTS.md`](AGENTS.md): a guide written for LLMs covering how to try the live app, run the tests with no secrets, boot the backend on testnet, and the invariants any change must keep.
+> 🍴 **Launch your own collection on this codebase.** Fork the repo and point your AI coding assistant at [`AGENTS.md`](AGENTS.md). It is a phased runbook written for LLMs: the decisions to make up front, every place LFG's identity is baked in (SourceTag, issuer, CDN, taxons, branding), XRPL account/token/AMM setup, external accounts, a single-box deploy, and a testnet rehearsal checklist before mainnet.
 
 **Prerequisites:** Python 3.10+, `ffmpeg` on the system path (`apt-get install ffmpeg` / `brew install ffmpeg`; `.webm` trait layers need a build with `libvpx`), a Discord application (bot token + Client ID/Secret), [Xaman API credentials](https://apps.xumm.dev/), a BunnyCDN storage zone, and a funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing). To just run the test suite, Python + ffmpeg are enough.
 
