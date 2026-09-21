@@ -20,7 +20,7 @@ holder fill it.
 |---|---|
 | Where does BRIX flow on an ask fill? | Buyer → **app wallet** → seller (option 2). The app holds funds only for the forwarding step; every hop is on-ledger and memo-linked. |
 | Bids | **XRPL TokenEscrow** (XLS-85) of BRIX, `Destination` = app wallet, PREIMAGE-SHA-256 condition whose fulfillment only the backend holds. |
-| Fee | `CLOSET_MARKET_FEE_BPS`, default 700 (parity with the 7 % TransferFee). Operator intends to run it at 0. |
+| Fee | `CLOSET_MARKET_FEE_BPS`, default 700 (parity with the 7 % TransferFee). Production runs the default 7 % (decided 2026-09-21, #562); the ask and fill screens disclose it. |
 | Matching | **Auto-cross**: resting order sets the price; bid overshoot is refunded. |
 | On-chain visibility | Open orders mirrored into the Closet token's `lfg_closet` metadata by the existing async `NFTokenModify` sync. |
 
