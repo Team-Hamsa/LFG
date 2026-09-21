@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or XRP via a DEX buy-and-burn), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
+**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or in XRP with a best-effort LFGO buyback off the DEX order book: it burns 1 LFGO only when the book has one under the mint price, which it hasn't since 2026-08-21, and bulk mint makes no buyback at all), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
 
 ## Feature Workflow: Brainstorming → Spec → Plan → Issue Link
 
@@ -604,7 +604,7 @@ SourceTag = 2606160021
 
 This applies to every transaction type without exception — `NFTokenMint`,
 `NFTokenCreateOffer`, `NFTokenAcceptOffer`, `NFTokenBurn`, `NFTokenModify`,
-`Payment` (token + XRP), `TrustSet`, AMM trades (`buy_and_burn`), and any XUMM
+`Payment` (token + XRP), `TrustSet`, DEX/AMM buybacks (`buy_and_burn`), and any XUMM
 payload `txjson`. When adding a new transaction path, set `SourceTag` on the tx
 dict / payload before signing or submitting, or hackathon volume credit is lost.
 
@@ -1671,7 +1671,7 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
 
 ## Important Notes
 
-1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; the backend buys-and-burns the LFGO). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
+1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; single mints then try a best-effort DEX buyback of 1 LFGO capped at the XRP paid, burned only if it fills. There is no XRP/LFGO AMM, so it depends on order-book asks under the mint price. On-ledger: 16 buybacks succeeded 2026-07-15 → 08-20, and every attempt since 08-21 has failed `tecPATH_PARTIAL`, rejected at `simulate` from 08-24 on. Bulk mint never attempts one). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
 
 2. **Signing**: users sign their own transactions in Xaman (every surface) or Joey Wallet over WalletConnect (web-only sign-in + signing, #447) — the app never holds a *user's* key. The backend DOES hold hot keys: `SEED` (the issuer's regular key, submitted for `SIGNING_ACCOUNT`) signs mints, delivery/shop offers, `NFTokenModify`, burns and the AMM buy-and-burn, and `BRIX_DISTRIBUTOR_SEED` signs drip payouts — ~77% of tagged mainnet txs are backend-signed. Never write "no private keys in the app" in user-facing docs; the accurate claim is "no user keys".
 
