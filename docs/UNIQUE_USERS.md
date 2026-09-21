@@ -5,15 +5,15 @@ LFG reports two numbers for SourceTag `2606160021` on mainnet:
 | Metric | Value | What it counts |
 |---|---:|---|
 | `unique_wallets` | **718** | Distinct accounts that signed at least one SourceTag-tagged transaction, minus the project's own wallets |
-| `unique_actors` | **405** | The same 718 wallets after merging wallets opened by the same funder |
+| `unique_actors` | **403** | The same 718 wallets after merging wallets opened by the same funder |
 
 The README badge shows `unique_actors`. We think it is the defensible number,
 and it is the one we ask to be judged on. This page explains how we got from
-718 to 405: what we removed, what we kept, and why. It also shows how the
+718 to 403: what we removed, what we kept, and why. It also shows how the
 count changes under other reasonable definitions, because the organizers'
 method may differ from ours.
 
-Snapshot: the nightly metrics run of **2026-09-21 00:20 UTC**
+Snapshot: 2026-09-21, after a full funder backfill
 ([`metrics/sourcetag.json`](../metrics/sourcetag.json)), checked against the
 live archive when this page was written. The code is
 [`scripts/sourcetag_metrics.py`](../scripts/sourcetag_metrics.py)
@@ -46,7 +46,7 @@ not users, so these accounts are excluded from both user counts:
 The list is append-only in code. When a signing key rotates, the old address
 stays excluded, so a key change can't turn backend activity into "new users".
 
-## Step 3: merge wallets that share a funder (718 → 405)
+## Step 3: merge wallets that share a funder (718 → 403)
 
 On XRPL a new account exists only after another account sends it the reserve.
 We call the sender of that first incoming payment the wallet's **activation
@@ -62,19 +62,18 @@ Funder coverage for the 718 wallets:
 
 | Funder status | Wallets | Treatment |
 |---|---:|---|
-| Funded by a known exchange hot wallet | 200 | Each counts separately (see below) |
-| Funded by a non-exchange account | 475 | Grouped by funder → 200 funders |
-| No funder signal (first transaction wasn't an incoming payment) | 7 | Each counts separately |
-| Funder not yet looked up | 36 | Each counts separately (see below) |
+| Funded by a known exchange hot wallet | 211 | Each counts separately (see below) |
+| Funded by a non-exchange account | 489 | Grouped by funder → 212 funders |
+| No funder signal (first transaction wasn't an incoming payment) | 18 | Each counts separately (see below) |
 
-Group sizes among the 200 non-exchange funders:
+Group sizes among the 212 non-exchange funders:
 
 ```
 wallets per funder   1    2   3   4   5   6   7   9   11  12  14  18  22  95
-funders            149   24   9   5   2   1   1   2   1   1   1   2   1   1
+funders            159   26   9   5   2   1   1   2   1   1   1   2   1   1
 ```
 
-51 funders opened 2 or more of our wallets, covering 326 wallets in total.
+53 funders opened 2 or more of our wallets, covering 330 wallets in total.
 The largest group is **95 wallets** from one funder,
 `raYftkWz8dhwP3TjS2NDsW6EzFfKCizWH9`. That funder has no label, was created
 2026-05-03, and was itself funded by Bybit. The next largest groups have 22,
@@ -89,12 +88,13 @@ The largest group is **95 wallets** from one funder,
   holds 717 hot wallets. It is XRPScan's labelled-exchange list, filtered to
   exchanges and custodians we reviewed by hand. A test fails if an entry
   names any other kind of operator, so an unexpected upstream label can't
-  widen the exemption. Top exchanges among our users: Binance 65, Uphold 28,
-  Indodax 22, Coins.ph 21, Coinbase 14, Bitrue 12, Bybit 9, KuCoin 7.
-- **Wallets with no looked-up funder count individually.** This is
-  deliberate: a gap in our data should never make the number smaller. It
-  means 405 can overcount by at most 43 (the 36 unchecked wallets plus the 7
-  with no funder signal).
+  widen the exemption. Top exchanges among our users: Binance 66, Uphold 32,
+  Indodax 22, Coins.ph 21, Coinbase 16, Bitrue 14, Bybit 10, KuCoin 7.
+- **Wallets with no funder signal count individually.** This is
+  deliberate: a gap in our data should never make the number smaller. Every
+  wallet has now been looked up, and 18 have no funder signal (their first
+  transaction was not an incoming payment), so 403 can overcount by at most
+  18.
 - **Wallets whose only action was accepting an NFT count.** 625 of the 718
   wallets have signed only `NFTokenAcceptOffer`. Taking an NFT into your own
   wallet is a signed, on-ledger action by the user, and the organizers
@@ -103,7 +103,7 @@ The largest group is **95 wallets** from one funder,
 
 ### What we cut
 
-- **Wallet farms.** Merging by funder removed 313 wallets (718 → 405). Most
+- **Wallet farms.** Merging by funder removed 315 wallets (718 → 403). Most
   of them sit in a few large groups. 94 of the 95 wallets in the
   largest farm claimed a sponsored free mint.
 - **Where the farms came from.** 646 of the 718 wallets received a
@@ -112,7 +112,7 @@ The largest group is **95 wallets** from one funder,
   admission (#461): a funder check that applies across all campaigns, and a
   device check. Both apply to future campaigns only. We never burn NFTs a
   farm already holds; we only stop counting those wallets. Wallets that
-  never took a free mint come to 72, or 71 actors.
+  never took a free mint come to 72, or 69 actors.
 
 ## How the number changes under other rules
 
@@ -124,12 +124,12 @@ under other plausible rules, all from the same snapshot:
 | Raw distinct signers, project wallets excluded | 718 |
 | Merge only funders with ≥ 10 wallets | 528 |
 | Merge only funders with ≥ 4 wallets | 472 |
-| Merge funders with ≥ 2 wallets, no parent/child merge | 415 |
-| **Our rule (published)** | **405** |
-| Our rule, counting only `tesSUCCESS` transactions | 396 |
-| Our rule plus funder-of-funder chains (transitive) | 330 |
-| Our rule, wallets with ≥ 2 tagged txs | 102 |
-| Our rule, wallets that did more than accept an NFT / set a trust line | 63 |
+| Merge funders with ≥ 2 wallets, no parent/child merge | 413 |
+| **Our rule (published)** | **403** |
+| Our rule, counting only `tesSUCCESS` transactions | 394 |
+| Our rule plus funder-of-funder chains (transitive) | 327 |
+| Our rule, wallets with ≥ 2 tagged txs | 101 |
+| Our rule, wallets that did more than accept an NFT / set a trust line | 61 |
 
 On 2026-09-09 the organizers' leaderboard showed about 396 accounts for us,
 when our raw count was 660. Merging by activation funder reproduced that
