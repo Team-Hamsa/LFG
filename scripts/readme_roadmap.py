@@ -51,7 +51,7 @@ def fetch_issues() -> list[dict[str, Any]]:
             "--limit",
             "200",
             "--json",
-            "number,title,state,closedAt",
+            "number,title,state,stateReason,closedAt",
         ],
         check=True,
         capture_output=True,
@@ -89,8 +89,14 @@ def render(issues: list[dict[str, Any]]) -> list[str]:
     open_issues = sorted(
         (i for i in issues if i["state"] == "OPEN"), key=lambda i: int(i["number"])
     )
+    # Closed-as-not-planned (declined, duplicate, folded elsewhere) is not
+    # completed work, so it never lands in "Recently completed".
     closed_issues = sorted(
-        (i for i in issues if i["state"] != "OPEN"),
+        (
+            i
+            for i in issues
+            if i["state"] != "OPEN" and i.get("stateReason") not in ("NOT_PLANNED", "DUPLICATE")
+        ),
         key=lambda i: str(i.get("closedAt") or ""),
         reverse=True,
     )[:RECENT_COMPLETED_CAP]

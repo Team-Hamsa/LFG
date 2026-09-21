@@ -5,7 +5,7 @@ into the shared lfg_service backend, lfg_core beneath
 it (with the session-flow modules discovered live from lfg_core/*_flow.py,
 so a new flow module appears in the diagram automatically), the listener
 process group with its per-network SQLite stores, and the external systems
-(XRPL/Clio, Xaman, BunnyCDN + IPFS).
+(XRPL/Clio, Xaman + Joey, BunnyCDN).
 
 Stdlib only, no app-domain imports (runs on a bare CI runner with no .env,
 same posture as scripts/readme_dashboard.py). Deterministic — no timestamps,
@@ -144,7 +144,8 @@ def build_svg(flow_modules: list[str]) -> str:
         "lfg_core (" + ", ".join(flow_modules) + "). A separate listener "
         "process group streams the Clio transaction feed into per-network "
         "SQLite stores. External systems: XRP Ledger (Clio + rippled), Xaman "
-        "(XUMM) signing, and BunnyCDN + IPFS hosting."
+        "signing (and Joey Wallet over WalletConnect on the web), and BunnyCDN "
+        "hosting."
     )
     # The lfg_core card grows with the discovered flow modules; everything
     # below it (externals row, footer, canvas) shifts by the same delta, so a
@@ -170,7 +171,7 @@ def build_svg(flow_modules: list[str]) -> str:
     parts.append(
         f'<text x="{W - PAD}" y="36" text-anchor="end" font-family="{FONT}" '
         f'font-size="12" fill="{MUTED}">one backend &#183; every surface &#183; '
-        "no custody</text>"
+        "no user keys</text>"
     )
 
     # Row 1: five client surfaces
@@ -282,8 +283,8 @@ def build_svg(flow_modules: list[str]) -> str:
     # Row 4: external systems
     externals = [
         ("XRP Ledger", "Clio + rippled · NFToken txs", RED),
-        ("Xaman (XUMM)", "QR + push signing · no custody", ORANGE),
-        ("BunnyCDN + IPFS", "image + metadata hosting", BLUE),
+        ("Xaman + Joey", "Xaman QR/push · Joey on the web", ORANGE),
+        ("BunnyCDN", "image + metadata · legacy IPFS URIs", BLUE),
     ]
     ext_y, ext_h, ext_gap = 470 + delta, 66, 16
     ew = (AREA_W - ext_gap * (len(externals) - 1)) / len(externals)  # 270
@@ -298,7 +299,7 @@ def build_svg(flow_modules: list[str]) -> str:
     # Footer
     parts.append(
         f'<text x="{W / 2}" y="{h_total - 22}" text-anchor="middle" font-family="{FONT}" '
-        f'font-size="11.5" fill="{MUTED}">every XRPL transaction carries SourceTag '
+        f'font-size="11.5" fill="{MUTED}">every app transaction carries SourceTag '
         "2606160021 + provenance memos — users sign in their own Xaman or "
         "Joey wallet</text>"
     )
