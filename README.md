@@ -262,6 +262,7 @@ LFG/
 │   └── client/             # No-build frontend (vanilla JS) — Activity + the live web app
 ├── scripts/                # Ops: onchain_listener, backfills, audits, economy CLIs
 ├── trait_config.yaml       # Declarative trait rules (z-order, affinity, swap matrix)
+├── AGENTS.md               # Guide for AI assistants: try, test, run, and change LFG
 └── docs/                   # ACTIVITY_SETUP.md, HACKATHON.md, ops/ + runbooks/, superpowers/ specs+plans
 ```
 
@@ -291,6 +292,8 @@ on every push to `deploy` that changes `webapp/client/`; the prod API answers it
 ---
 
 ## Quick start
+
+> 🤖 **Using an AI coding assistant?** Point it at [`AGENTS.md`](AGENTS.md): a guide written for LLMs covering how to try the live app, run the tests with no secrets, boot the backend on testnet, and the invariants any change must keep.
 
 **Prerequisites:** Python 3.10+, `ffmpeg` on the system path (`apt-get install ffmpeg` / `brew install ffmpeg`; `.webm` trait layers need a build with `libvpx`), a Discord application (bot token + Client ID/Secret), [Xaman API credentials](https://apps.xumm.dev/), a BunnyCDN storage zone, and a funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing). To just run the test suite, Python + ffmpeg are enough.
 
