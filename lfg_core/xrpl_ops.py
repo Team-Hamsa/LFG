@@ -2690,26 +2690,21 @@ def _payment_matches(
         return False
     if tx.get("Destination") != destination:
         return False
-    # A validated tec... payment moved no funds and has no delivered_amount,
-    # so the DeliverMax fallback below would happily match it — refuse any
-    # explicit non-success result before looking at amounts (#197 review).
-    if isinstance(meta, dict):
-        tx_result = meta.get("TransactionResult")
-        if tx_result is not None and tx_result != "tesSUCCESS":
-            return False
-    # Prefer the validated delivered amount (also guards against partial
-    # payments); fall back to Amount (API v1) / DeliverMax (API v2).
-    amount = None
-    if isinstance(meta, dict):
-        amount = meta.get("delivered_amount") or meta.get("DeliveredAmount")
+    # Fail closed: only a validated tesSUCCESS meta carrying the delivered
+    # amount proves funds moved. A tec... payment moved nothing, and a missing
+    # meta or delivered_amount leaves only the tx's Amount/DeliverMax, which a
+    # partial payment can exceed — so none of those ever match (#197 review).
+    if not isinstance(meta, dict) or meta.get("TransactionResult") != "tesSUCCESS":
+        return False
+    amount = meta.get("delivered_amount") or meta.get("DeliveredAmount")
     if amount is None:
-        amount = tx.get("Amount", tx.get("DeliverMax"))
+        return False
     if currency == "XRP":
         # Native XRP amounts are drops strings; expected_amount is in XRP.
         if isinstance(amount, dict):
             return False
         try:
-            return Decimal(amount) >= Decimal(xrp_to_drops(Decimal(expected_amount)))  # type: ignore[arg-type]
+            return Decimal(amount) >= Decimal(xrp_to_drops(Decimal(expected_amount)))
         except (InvalidOperation, TypeError, ValueError):
             return False
     if not isinstance(amount, dict):
