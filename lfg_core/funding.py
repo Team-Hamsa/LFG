@@ -1,9 +1,17 @@
 """Wallet activation-funder intelligence for sybil-resistance gates.
 
-A wallet's funder is the ``Account`` of the earliest transaction that
-activated it (a Payment with the wallet as ``Destination``). Funders never
-change, so lookups are cached forever in the ``wallet_funders`` table of the
-app DB. Exchange hot wallets aggregate unrelated people and are never treated
+A wallet's funder is the ``Account`` of the transaction that created its
+AccountRoot (in practice the Payment that first sent it the reserve). Funders
+never change, so lookups are cached forever in the ``wallet_funders`` table of
+the app DB.
+
+The creating transaction is identified from its metadata, never by position:
+``account_tx`` lists every transaction that touches an address, so a wallet's
+oldest entry can predate its creation (another account naming it as a
+``SetRegularKey``, a failed payment to it), and a history-pruned node's oldest
+entry is just the oldest one it kept. Lookups go to the clio endpoint
+(``config.CLIO_WS_URL``, full history), never the JSON-RPC pool, whose primary
+in prod is a pruned local validator. Exchange hot wallets aggregate unrelated people and are never treated
 as a farm signal — that allowlist lives here so admission gates and the
 ops clustering script share one list.
 """
@@ -54,6 +62,14 @@ class FunderLookupError(Exception):
     """The funder could not be determined (RPC failure). Fail closed."""
 
 
+# account_tx pages scanned for the creating transaction before giving up. It
+# is usually on the first page, but an address that served as another
+# account's regular key before it was funded lists every transaction it
+# signed for that account first (rKDFM3…: hundreds).
+ACTIVATION_PAGE_LIMIT = 100
+ACTIVATION_MAX_PAGES = 50
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -91,25 +107,102 @@ def record_funder(
     )
 
 
-def lookup_funder(wallet: str) -> FunderResult:
-    """Resolve a wallet's activation funder from the ledger (one RPC).
+def lookup_funder(wallet: str, *, url: str | None = None) -> FunderResult:
+    """Resolve a wallet's activation funder from full ledger history.
 
-    Raises FunderLookupError on any transport/endpoint failure so callers
-    fail closed. Returns (None, None) for a wallet with no transactions.
+    Tries each of ``config.HISTORY_WS_URLS`` (clio first) in turn, or only
+    ``url`` when given, and returns the first funder found. ``actNotFound`` is
+    one endpoint's view (a lagging node can miss a just-funded account), so
+    (None, None) is returned only when EVERY endpoint says the account does
+    not exist. Raises FunderLookupError when no endpoint found a funder and
+    at least one could not answer, so callers fail closed.
     """
+    from lfg_core import config
+
+    last: FunderLookupError | None = None
+    endpoints = (url,) if url else config.HISTORY_WS_URLS
+    for endpoint in endpoints:
+        try:
+            result = _lookup_on(endpoint, wallet)
+        except FunderLookupError as e:
+            logging.warning(f"funder lookup for {wallet} on {endpoint} failed: {e}")
+            last = e
+            continue
+        if result != (None, None):
+            return result
+    if last is not None:
+        raise last
+    if not endpoints:
+        raise FunderLookupError("no history endpoint configured")
+    return None, None
+
+
+def _lookup_on(endpoint: str, wallet: str) -> FunderResult:
+    """One endpoint's answer: page ``account_tx`` oldest-first until a
+    transaction's metadata creates the wallet's AccountRoot. Raises
+    FunderLookupError on a transport or server error, on an endpoint without
+    full history, and when no creating transaction is found."""
+    from xrpl.clients import WebsocketClient
     from xrpl.models.requests import AccountTx
 
-    from lfg_core import xrpl_ops
-
+    marker: Any = None
     try:
-        client = xrpl_ops.rpc_client()
-        resp = client.request(AccountTx(account=wallet, forward=True, limit=1))
-        result = resp.result
+        with WebsocketClient(endpoint) as client:
+            for _ in range(ACTIVATION_MAX_PAGES):
+                resp = client.request(
+                    AccountTx(
+                        account=wallet, forward=True, limit=ACTIVATION_PAGE_LIMIT, marker=marker
+                    )
+                )
+                result = resp.result
+                if result.get("error") == "actNotFound":
+                    return None, None
+                if not resp.is_successful():
+                    raise FunderLookupError(str(result.get("error") or "unsuccessful account_tx"))
+                _require_full_history(result)
+                found = activation_in(result.get("transactions") or [], wallet)
+                if found is not None:
+                    return found
+                marker = result.get("marker")
+                if marker is None:
+                    break
+    except FunderLookupError:
+        raise
     except Exception as e:  # noqa: BLE001 - any transport failure fails closed
         raise FunderLookupError(str(e)) from e
-    if result.get("error") != "actNotFound" and not resp.is_successful():
-        raise FunderLookupError(str(result.get("error") or "unsuccessful account_tx"))
-    return parse_account_tx(result, wallet)
+    raise FunderLookupError(f"no transaction creating {wallet} found in its history")
+
+
+def _require_full_history(result: dict[str, Any]) -> None:
+    """Refuse a mainnet answer from a node that does not reach back to the
+    earliest ledger any node serves: a wallet created before its floor would
+    otherwise never find its creating transaction (or, if it was deleted and
+    re-created, find the wrong one)."""
+    from lfg_core import config, history_store
+
+    if config.XRPL_NETWORK != "mainnet":
+        return
+    floor = result.get("ledger_index_min")
+    if not isinstance(floor, int) or floor > history_store.EARLIEST_AVAILABLE_LEDGER:
+        raise FunderLookupError(f"endpoint lacks full history (ledger_index_min={floor})")
+
+
+def activation_in(transactions: list[dict[str, Any]], wallet: str) -> FunderResult | None:
+    """(signer, ledger) of the transaction whose metadata creates `wallet`'s
+    AccountRoot, or None if none of `transactions` does."""
+    for t in transactions:
+        meta = t.get("meta") or t.get("metaData")
+        if not isinstance(meta, dict) or meta.get("TransactionResult") != "tesSUCCESS":
+            continue
+        for node in meta.get("AffectedNodes") or []:
+            created = node.get("CreatedNode") or {}
+            if (
+                created.get("LedgerEntryType") == "AccountRoot"
+                and (created.get("NewFields") or {}).get("Account") == wallet
+            ):
+                tx = t.get("tx") or t.get("tx_json") or {}
+                return tx.get("Account"), t.get("ledger_index") or tx.get("ledger_index")
+    return None
 
 
 def warm_funder_cache(db_path: str, wallet: str, *, lookup: FunderLookup | None = None) -> bool:
@@ -144,22 +237,19 @@ def warm_funder_cache(db_path: str, wallet: str, *, lookup: FunderLookup | None 
 
 
 def parse_account_tx(result: dict[str, Any], wallet: str) -> FunderResult:
-    """Interpret an account_tx result for the wallet's activation funder.
+    """Interpret one complete account_tx result for the wallet's funder.
 
     (None, None) means the account does not exist (actNotFound) — genuinely
-    unfunded. An empty transactions list on an EXISTING account is a
-    partial-history endpoint, not an unfunded wallet, and fails closed so a
-    legitimate old account is never misclassified.
+    unfunded. An empty transactions list on an EXISTING account, or a list
+    with no transaction creating it, is a partial-history answer and fails
+    closed so a legitimate account is never misclassified.
     """
     if result.get("error") == "actNotFound":
         return None, None
     txs = result.get("transactions") or []
     if not txs:
         raise FunderLookupError("account_tx returned no transactions (partial-history endpoint?)")
-    t = txs[0]
-    tx = t.get("tx") or t.get("tx_json") or {}
-    ledger = t.get("ledger_index") or tx.get("ledger_index")
-    if tx.get("TransactionType") == "Payment" and tx.get("Destination") == wallet:
-        return tx.get("Account"), ledger
-    # Activated some other way (e.g. first tx is its own) — no funder signal.
-    return None, ledger
+    found = activation_in(txs, wallet)
+    if found is None:
+        raise FunderLookupError(f"no transaction creating {wallet} in this account_tx page")
+    return found

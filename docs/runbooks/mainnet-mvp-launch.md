@@ -242,8 +242,13 @@ issuer** (suggest ≥ 50 XRP) and watch for that error in logs.
   link lacks SourceTag; only used when the XUMM API is down.
 - `create_nft_offer` result polling is 3 attempts (`xrpl_ops.py:126–137`) —
   can report FAILED after a successful mint if tx lookup lags; manual recovery.
-- `buy_and_burn` on the XRP mint path is best-effort (`mint_flow.py:231`) —
+- `buy_and_burn` on the XRP mint path is best-effort (`mint_flow.py`) —
   persistent DEX failure accumulates XRP without burning LFGO; watch logs.
+  There is no XRP/LFGO AMM, so the buy relies on order-book asks at or under
+  `MINT_PRICE_XRP`. Mainnet status: 16 successes 2026-07-15 → 08-20, then
+  `tecPATH_PARTIAL` on every attempt (simulate-rejected, never submitted, since
+  08-24) because the cheapest ask rose to ~29 XRP. Bulk mint
+  (`bulk_mint_flow.py`) makes no buyback attempt at all.
 - Users table holds only 2 (testnet-era) rows — mainnet users re-register via
   the Xaman-verified `/register` flow.
 - A cancelled mint's XUMM payload stays signable in Xaman until it expires —

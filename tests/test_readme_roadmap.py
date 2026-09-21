@@ -103,3 +103,35 @@ def test_bullet_uses_escaped_title() -> None:
     assert readme_roadmap.bullet(issue, checked=False) == (
         r"- [ ] [#7 — bad \] title](../../issues/7)"
     )
+
+
+def test_render_excludes_not_planned_and_duplicate_closures() -> None:
+    issues = [
+        {
+            "number": 1,
+            "title": "shipped",
+            "state": "CLOSED",
+            "stateReason": "COMPLETED",
+            "closedAt": "2026-09-01T00:00:00Z",
+        },
+        {
+            "number": 2,
+            "title": "declined",
+            "state": "CLOSED",
+            "stateReason": "NOT_PLANNED",
+            "closedAt": "2026-09-02T00:00:00Z",
+        },
+        {
+            "number": 3,
+            "title": "dupe",
+            "state": "CLOSED",
+            "stateReason": "DUPLICATE",
+            "closedAt": "2026-09-03T00:00:00Z",
+        },
+        {"number": 4, "title": "legacy", "state": "CLOSED", "closedAt": "2026-09-04T00:00:00Z"},
+    ]
+    body = "\n".join(readme_roadmap.render(issues))
+    assert "[#1 " in body
+    assert "[#4 " in body  # no stateReason (older gh) still counts as completed
+    assert "[#2 " not in body
+    assert "[#3 " not in body

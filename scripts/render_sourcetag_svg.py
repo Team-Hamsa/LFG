@@ -89,21 +89,20 @@ def build_svg(data: dict[str, Any]) -> str:
     area_x, area_w = float(pad), 672.0
 
     label = (
-        f"XRPL source tag {tag}: {fmt(total)} tagged transactions "
-        f"from {fmt(wallets)} unique holders"
+        f"XRPL source tag {tag}: {fmt(total)} tagged transactions from {fmt(wallets)} unique users"
     )
 
     parts = [open_svg(w, h, label)]
     parts += sticker_card(card_w, card_h)
     parts += title_block(
-        pad, f"XRPL source tag · {tag}", "live on-ledger volume · auto-updated daily"
+        pad, f"XRPL source tag · {tag}", "tagged transactions · auto-updated daily"
     )
     parts += stat_tiles(
         area_x,
         72,
         area_w,
         [
-            (fmt(wallets), "unique holders", BLUE),
+            (fmt(wallets), "unique users", BLUE),
             (fmt(total), "tagged transactions", ORANGE),
         ],
     )

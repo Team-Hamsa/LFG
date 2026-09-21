@@ -80,13 +80,13 @@ Add to `.env` (in addition to the existing bot variables):
 DISCORD_CLIENT_ID=<application client id>
 DISCORD_CLIENT_SECRET=<application client secret>
 WEBAPP_SESSION_SECRET=<long random string>
-WEBAPP_PORT=8080
+WEBAPP_PORT=8176
 ```
 
 ## 3. Run the backend
 
 ```bash
-python -m lfg_service.app        # listens on WEBAPP_PORT (default 8080)
+python -m lfg_service.app        # listens on WEBAPP_PORT (default 8176)
 ```
 
 Verify it's up locally before tunnelling:
@@ -99,8 +99,8 @@ Discord requires the Activity to be served over **HTTPS**. For development, a
 tunnel works (point it at your `WEBAPP_PORT`):
 
 ```bash
-cloudflared tunnel --url http://localhost:8080
-# or: ngrok http 8080
+cloudflared tunnel --url http://localhost:8176
+# or: ngrok http 8176
 ```
 
 Copy the tunnel's HTTPS hostname into the `/` URL Mapping (§1d) **and** the
@@ -110,7 +110,7 @@ OAuth2 Redirect (§1b).
 every restart, and each change means re-editing two portal fields. To stop
 the churn, use a hostname that doesn't move:
 
-- **ngrok reserved domain** (paid): `ngrok http --domain=your-name.ngrok.app 8080`
+- **ngrok reserved domain** (paid): `ngrok http --domain=your-name.ngrok.app 8176`
 - **cloudflared named tunnel** (free, needs a domain on Cloudflare):
   `cloudflared tunnel route dns <tunnel> activity.yourdomain.com`
 - Or run the tunnel under pm2 so it survives reboots, and only re-paste the
@@ -128,8 +128,9 @@ your app. The flow inside the Activity:
 3. Optionally set the LFGO trustline (QR / Xaman deep link).
 4. Mint: pay 1 LFGO (QR), watch progress, then accept the NFT offer (QR).
 5. Trait Swapper: pick two of your collection NFTs (same body type), choose
-   traits to exchange, confirm — the originals are burned, re-crafted NFTs
-   are reminted and offered back (priced in BRIX); accept both via QR.
+   traits to exchange, pay the BRIX fee (QR) — traits are exchanged in place
+   via `NFTokenModify` (legacy non-mutable NFTs are burned and reminted as
+   mutable, then offered back for you to accept).
 
 ## Unified trait layer store (mint + swap)
 

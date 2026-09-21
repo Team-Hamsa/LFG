@@ -1432,7 +1432,13 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
    had nothing behind them, so dark art — every eyebrow — disappeared into the
    dark cards. Checkerboard for most traits; face traits (Eyes/Eyebrows/Mouth)
    sit on a faint default body so they read in context. */
-.trait-art {
+/* The doubled class is deliberate: it raises specificity to (0,2,0) so a
+   container rule like `.trait-chip img` or `.mine-row img` — (0,1,1), and
+   usually written with the `background` SHORTHAND, which resets
+   background-image — cannot silently strip the backdrop off trait art. That
+   is exactly how eyebrows stayed invisible in the Wanted book and the
+   Dressing Room strip after #557 fixed them on cards. */
+.trait-art.trait-art {
   background-color: #5a5a5a;
   background-image:
     linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%),
@@ -1440,7 +1446,7 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   background-size: 16px 16px;
   background-position: 0 0, 8px 8px;
 }
-.trait-art-face {
+.trait-art-face.trait-art-face {
   background-color: var(--surface-2);
   background-image:
     linear-gradient(rgba(34, 34, 34, .35), rgba(34, 34, 34, .35)),
@@ -1507,7 +1513,21 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   min-height: 40px; padding: 6px 12px; margin: 0;
   font-size: .78rem; font-weight: 700; border-radius: 8px;
 }
-.nft-card .mine-action { width: 100%; border-radius: 0; border: 0; border-top: 3px solid var(--ink); }
+/* A card footer button is flush inside .nft-card's `overflow: hidden`, so the
+   .secondary sticker ring (--sticker-sm = a 2px --paper ring + a 3px offset)
+   gets clipped by the card edge and reads as one or two stray white lines,
+   differing card to card. The footer keeps only the dark rule that separates
+   it from the caption. :active keeps its press feedback without the ring. */
+.nft-card .mine-action,
+.nft-card .mine-action:hover,
+.nft-card .mine-action:disabled {
+  width: 100%;
+  border-radius: 0;
+  border: 0;
+  border-top: 3px solid var(--ink);
+  box-shadow: none;
+}
+.nft-card .mine-action:active { box-shadow: none; transform: translateY(1px); }
 
 /* An inline group is bounded by its cap, so it must not also be a scroller —
    six nested scroll containers inside the page scroll is the mobile trap. */

@@ -14,7 +14,20 @@ readiness audit's funder_coverage check fails until it has been run):
 
 Idempotent and resumable: wallets already in wallet_funders are skipped, and
 every lookup commits immediately, so Ctrl-C and re-run is always safe. A
-failed lookup is reported and left missing (re-run to retry).
+failed lookup is reported and left missing (re-run to retry). A wallet that
+does not exist yet is not cached (same rule as the admission gate).
+
+Rows cached before the full-history fix may be wrong (a pruned endpoint's
+oldest retained transaction, or a transaction that touched the address before
+it existed, was taken as the activation). Re-check every cached row with:
+
+  .venv/bin/python scripts/backfill_wallet_funders.py --network mainnet \
+      --reverify                               # dry run: report the diffs
+  .venv/bin/python scripts/backfill_wallet_funders.py --network mainnet \
+      --reverify --apply                       # rewrite the rows that differ
+
+Both write the diff (old and new value per changed row) to --report before
+anything is changed. A row whose lookup fails is left untouched.
 """
 
 from __future__ import annotations
@@ -24,6 +37,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, ".")
 
@@ -52,10 +66,28 @@ def main() -> int:
             "history DB."
         ),
     )
+    ap.add_argument(
+        "--reverify",
+        action="store_true",
+        help="re-look-up every cached row against full history and report the ones that differ",
+    )
+    ap.add_argument(
+        "--apply", action="store_true", help="with --reverify: rewrite the rows that differ"
+    )
+    ap.add_argument(
+        "--report",
+        default=None,
+        help="with --reverify: diff report path (default reports/funder_reverify_<net>_<utc>.json)",
+    )
     a = ap.parse_args()
     if a.network != config.XRPL_NETWORK:
         print(f"--network {a.network} must match XRPL_NETWORK={config.XRPL_NETWORK}")
         return 2
+    if a.apply and not a.reverify:
+        print("--apply only applies to --reverify")
+        return 2
+    if a.reverify:
+        return reverify(a.app_db or app_db_path(a.network), a.network, a.apply, a.report)
 
     seed: dict[str, tuple[str | None, int | None]] = {}
     if a.seed_cache:
@@ -137,6 +169,11 @@ def main() -> int:
                 print(f"  [{i}/{len(wallets)}] {wallet}: lookup failed ({e}); re-run to retry")
                 failed += 1
                 continue
+        if funder is None and ledger is None:
+            # actNotFound: not funded yet. Caching it would refuse the wallet
+            # forever once it is funded.
+            print(f"  [{i}/{len(wallets)}] {wallet}: account does not exist; not cached")
+            continue
         funding.record_funder(conn, wallet, funder, ledger)
         conn.commit()
         label = funding.EXCHANGES.get(funder or "", "")
@@ -144,6 +181,96 @@ def main() -> int:
     conn.close()
     print(f"done; {failed} failed lookup(s) remain" if failed else "done; full coverage")
     return 1 if failed else 0
+
+
+def reverify(
+    db: str,
+    network: str,
+    apply: bool,
+    report: str | None,
+    lookup: funding.FunderLookup | None = None,
+) -> int:
+    """Re-look-up every cached wallet_funders row and report (and with
+    `apply`, rewrite) the ones whose cached value differs. The report is
+    written before any row changes. Returns 1 if any lookup failed."""
+    lookup = lookup or funding.lookup_funder
+    conn = sqlite3.connect(db)
+    funding.ensure_schema(conn)
+    rows = conn.execute(
+        "SELECT wallet, funder, ledger_index FROM wallet_funders ORDER BY wallet"
+    ).fetchall()
+    changes: list[dict[str, object]] = []
+    failed: list[dict[str, str]] = []
+    for i, (wallet, funder, ledger) in enumerate(rows, 1):
+        try:
+            new_funder, new_ledger = lookup(wallet)
+        except funding.FunderLookupError as e:
+            print(f"  [{i}/{len(rows)}] {wallet}: lookup failed ({e}); left as is")
+            failed.append({"wallet": wallet, "error": str(e)})
+            continue
+        # A row for an account that does not exist should never have been
+        # cached, even as (None, None); the fix is to delete it.
+        missing = (new_funder, new_ledger) == (None, None)
+        if not missing and (new_funder, new_ledger) == (funder, ledger):
+            continue
+        action = "delete" if missing else "update"
+        changes.append(
+            {
+                "wallet": wallet,
+                "action": action,
+                "old": {"funder": funder, "ledger_index": ledger},
+                "new": {"funder": new_funder, "ledger_index": new_ledger},
+            }
+        )
+        print(f"  [{i}/{len(rows)}] {wallet}: {funder} @ {ledger} -> {new_funder} @ {new_ledger}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = report or os.path.join("reports", f"funder_reverify_{network}_{stamp}.json")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    body: dict[str, object] = {
+        "network": network,
+        "checked": len(rows),
+        "apply_requested": apply,
+        # Flipped (and the report rewritten) only once the transaction below
+        # has committed, so an interrupted run never reads as applied.
+        "applied": False,
+        "changes": changes,
+        "failed": failed,
+    }
+    _write_report(path, body)
+    if apply:
+        with conn:
+            for c in changes:
+                new = c["new"]
+                assert isinstance(new, dict)
+                if c["action"] == "delete":
+                    conn.execute("DELETE FROM wallet_funders WHERE wallet = ?", (c["wallet"],))
+                else:
+                    conn.execute(
+                        "UPDATE wallet_funders SET funder = ?, ledger_index = ?,"
+                        " looked_up_at = CURRENT_TIMESTAMP WHERE wallet = ?",
+                        (new["funder"], new["ledger_index"], c["wallet"]),
+                    )
+        body["applied"] = True
+        _write_report(path, body)
+    conn.close()
+    verb = "rewrote" if apply else "would rewrite"
+    print(
+        f"checked {len(rows)}; {verb} {len(changes)}; {len(failed)} failed lookup(s); "
+        f"report: {path}"
+    )
+    return 1 if failed else 0
+
+
+def _write_report(path: str, body: dict[str, object]) -> None:
+    """Write via a temp file + os.replace, so a failed rewrite after the
+    commit leaves the previous (pre-change) report intact, never a truncated
+    one."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(body, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 if __name__ == "__main__":

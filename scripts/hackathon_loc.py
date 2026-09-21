@@ -26,6 +26,9 @@ CODE_PATHSPECS = [
     "*.html",
     ":(exclude)legacy/*",
     ":(exclude)backup/*",
+    # vendored third-party code (Telegram SDK, WalletConnect/Discord bundles)
+    ":(exclude)webapp/client/telegram-web-app.js",
+    ":(exclude)webapp/client/vendor/*",
 ]
 START_MARK = "<!-- hackathon-loc:start -->"
 END_MARK = "<!-- hackathon-loc:end -->"
@@ -66,7 +69,12 @@ def numstat() -> list[tuple[int, int, str]]:
 
 def is_test(path: str) -> bool:
     name = Path(path).name
-    return name.startswith("test_") or name.endswith("_test.py") or "/tests/" in path
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or path.startswith("tests/")
+        or "/tests/" in path
+    )
 
 
 def fmt(n: int) -> str:
@@ -144,7 +152,7 @@ def build_block(base: int) -> str:
             f"measured from `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
             f"by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
             f"data files (CSV/JSON manifests), dependency lists, and the "
-            f"legacy/backup trees. Regenerated on every push to `main`.",
+            f"legacy/backup trees and vendored third-party client code. Regenerated on every push to `main`.",
             END_MARK,
         ]
     )

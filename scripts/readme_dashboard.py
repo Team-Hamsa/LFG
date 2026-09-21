@@ -53,14 +53,29 @@ def count_tests() -> int:
 
 
 def count_modules() -> int:
-    """Tracked Python source files."""
+    """Tracked Python source files, excluding tests."""
     out = git("ls-files", "--", "*.py")
-    return len(out.splitlines())
+    return sum(1 for path in out.splitlines() if not _is_test_path(path))
+
+
+def _is_test_path(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return (
+        path.startswith(("tests/", "test/"))
+        or "/tests/" in path
+        or name.startswith("test_")
+        or name == "conftest.py"
+    )
+
+
+# Human commits only: merge commits and bot commits (the README/metrics
+# refreshes this very workflow pushes, dependabot) are excluded.
+HUMAN_COMMITS = ("--no-merges", "--perl-regexp", r"--author=^(?!.*\[bot\])")
 
 
 def count_commits() -> int:
-    """Commits landed since the pinned hackathon baseline."""
-    return int(git("rev-list", "--count", f"{BASELINE_SHA}..HEAD"))
+    """Human, non-merge commits landed since the pinned hackathon baseline."""
+    return int(git("rev-list", "--count", *HUMAN_COMMITS, f"{BASELINE_SHA}..HEAD"))
 
 
 def velocity() -> tuple[str, list[int]]:
@@ -70,7 +85,9 @@ def velocity() -> tuple[str, list[int]]:
     calendar day from the first commit day through the last, inclusive, so a
     quiet stretch mid-sprint reads as a run of zero-height bars.
     """
-    out = git("log", "--date=format:%Y-%m-%d", "--pretty=%ad", f"{BASELINE_SHA}..HEAD")
+    out = git(
+        "log", *HUMAN_COMMITS, "--date=format:%Y-%m-%d", "--pretty=%ad", f"{BASELINE_SHA}..HEAD"
+    )
     per_day: dict[str, int] = {}
     for day in out.splitlines():
         per_day[day] = per_day.get(day, 0) + 1

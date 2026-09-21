@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or XRP via a DEX buy-and-burn), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
+**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or in XRP with a best-effort LFGO buyback off the DEX order book: it burns 1 LFGO only when the book has one under the mint price, which it hasn't since 2026-08-21, and bulk mint makes no buyback at all), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
 
 ## Feature Workflow: Brainstorming → Spec → Plan → Issue Link
 
@@ -158,6 +158,7 @@ LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); m
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 XRPL_JSON_RPC_FALLBACK_URLS=<url,url>                       # optional (#493); comma-separated JSON-RPC failover endpoints tried after XRPL_JSON_RPC_URL on busy/unsynced/unreachable servers (never on tx results) — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
 XRPL_WS_FALLBACK_URLS=<wss-url,wss-url>                     # optional; websocket failover for the payment watcher, tried after XRPL_WS_URL — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
+XRPL_HISTORY_WS_FALLBACK_URLS=<wss-url,wss-url>             # optional; full-history endpoints tried after XRPL_CLIO_WS_URL for activation-funder lookups (funding.lookup_funder) — unset = the per-network public WS defaults; never point at a history-pruned node (mainnet lookups refuse one whose ledger_index_min > 32570)
 PAYMENT_REPOLL_SECONDS=10                                   # optional; how often a payment wait re-checks account history while listening (the stream alone can miss a payment)
 XRPL_RPC_BUSY_RETRY_BACKOFF=1,2.5                           # optional; when EVERY JSON-RPC endpoint answers busy (tooBusy/slowDown/5xx), wait each delay (s) and re-walk the pool — empty = no retry rounds; transport failures never retry
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
@@ -312,7 +313,9 @@ deployment are prescribed in `docs/ops/sponsored-free-mint.md`); automatic
 signer/issuer exclusions do not satisfy that check. Sponsored admission also stays disabled until startup
 recovery succeeds, while paid minting remains available after a recovery fault.
 **Funder-at-login:** every sign-in / wallet-link arm fires a best-effort
-`funding.warm_funder_cache` (one `account_tx`, cached forever in
+`funding.warm_funder_cache` (paged `account_tx` on clio / full-history
+`config.HISTORY_WS_URLS` — never the JSON-RPC pool, whose prod primary is a
+pruned validator — taking the tx whose meta CREATES the AccountRoot, cached forever in
 `wallet_funders`; unfunded results are never cached) so the sybil funder gate
 finds the funder locally at mint time, and `GET /api/mint/sponsored/eligibility`
 (authed) returns `{eligible, reason}` from `sponsored_mint.preview_eligibility`
@@ -604,7 +607,7 @@ SourceTag = 2606160021
 
 This applies to every transaction type without exception — `NFTokenMint`,
 `NFTokenCreateOffer`, `NFTokenAcceptOffer`, `NFTokenBurn`, `NFTokenModify`,
-`Payment` (token + XRP), `TrustSet`, AMM trades (`buy_and_burn`), and any XUMM
+`Payment` (token + XRP), `TrustSet`, DEX/AMM buybacks (`buy_and_burn`), and any XUMM
 payload `txjson`. When adding a new transaction path, set `SourceTag` on the tx
 dict / payload before signing or submitting, or hackathon volume credit is lost.
 
@@ -658,7 +661,12 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
   server's stream never delivered a paid bulk mint. Mint and bulk-mint cancel
   refuse (409 `payment_received`, or 503 when history can't be read) while a
   matching unclaimed payment is on-ledger. The AMM quote and `account_nfts`
-  use the JSON-RPC pool. clio (`CLIO_WS_URL`) has no failover.
+  use the JSON-RPC pool. clio (`CLIO_WS_URL`) has no failover for the
+  clio-only methods (`nft_info`/`nft_exists`). Full-history lookups
+  (`funding.lookup_funder`) use `config.HISTORY_WS_URLS`: clio first, then the
+  public full-history nodes (`XRPL_HISTORY_WS_FALLBACK_URLS`), each refused on
+  mainnet unless it serves history back to ledger 32570 — never the JSON-RPC/WS
+  pools, whose prod primary is the pruned local validator.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
@@ -1671,7 +1679,7 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
 
 ## Important Notes
 
-1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; the backend buys-and-burns the LFGO). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
+1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; single mints then try a best-effort DEX buyback of 1 LFGO capped at the XRP paid, burned only if it fills. There is no XRP/LFGO AMM, so it depends on order-book asks under the mint price. On-ledger: 16 buybacks succeeded 2026-07-15 → 08-20, and every attempt since 08-21 has failed `tecPATH_PARTIAL`, rejected at `simulate` from 08-24 on. Bulk mint never attempts one). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
 
 2. **Signing**: users sign their own transactions in Xaman (every surface) or Joey Wallet over WalletConnect (web-only sign-in + signing, #447) — the app never holds a *user's* key. The backend DOES hold hot keys: `SEED` (the issuer's regular key, submitted for `SIGNING_ACCOUNT`) signs mints, delivery/shop offers, `NFTokenModify`, burns and the AMM buy-and-burn, and `BRIX_DISTRIBUTOR_SEED` signs drip payouts — ~77% of tagged mainnet txs are backend-signed. Never write "no private keys in the app" in user-facing docs; the accurate claim is "no user keys".
 
