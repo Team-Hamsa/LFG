@@ -553,11 +553,12 @@ V1_STREAM_MSG = {
         "hash": "H1",
     },
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "delivered_amount": {
             "currency": "4C46474F00000000000000000000000000000000",
             "issuer": "rIssuer",
             "value": "1",
-        }
+        },
     },
 }
 
@@ -576,11 +577,12 @@ V2_STREAM_MSG = {
         "hash": "H2",
     },
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "delivered_amount": {
             "currency": "4C46474F00000000000000000000000000000000",
             "issuer": "rIssuer",
             "value": "1",
-        }
+        },
     },
 }
 
@@ -617,6 +619,38 @@ def test_payment_match_rejects_wrong_sender_and_partial():
     assert not _matches(xrp_payment)
 
 
+def test_payment_match_fails_closed_without_validated_meta():
+    """Only a tesSUCCESS meta with a delivered amount proves money moved: a
+    missing meta, a missing/failed TransactionResult or a missing
+    delivered_amount must never fall back to the tx's Amount/DeliverMax."""
+    import copy
+
+    no_meta = copy.deepcopy(V2_STREAM_MSG)
+    del no_meta["meta"]
+    assert not _matches(no_meta)
+
+    meta_not_dict = copy.deepcopy(V2_STREAM_MSG)
+    meta_not_dict["meta"] = "tesSUCCESS"
+    assert not _matches(meta_not_dict)
+
+    no_result = copy.deepcopy(V2_STREAM_MSG)
+    del no_result["meta"]["TransactionResult"]
+    assert not _matches(no_result)
+
+    failed = copy.deepcopy(V2_STREAM_MSG)
+    failed["meta"]["TransactionResult"] = "tecPATH_PARTIAL"
+    assert not _matches(failed)
+
+    no_delivered = copy.deepcopy(V2_STREAM_MSG)
+    del no_delivered["meta"]["delivered_amount"]
+    assert not _matches(no_delivered)
+
+    # rippled's canonical meta key is still honoured
+    canonical = copy.deepcopy(V2_STREAM_MSG)
+    canonical["meta"]["DeliveredAmount"] = canonical["meta"].pop("delivered_amount")
+    assert _matches(canonical)
+
+
 def test_payment_match_native_xrp():
     """The XRP mint/swap paths watch for native (drops string) payments."""
     msg = {
@@ -629,7 +663,7 @@ def test_payment_match_native_xrp():
             "DeliverMax": "10000000",
             "hash": "H3",
         },
-        "meta": {"delivered_amount": "10000000"},
+        "meta": {"TransactionResult": "tesSUCCESS", "delivered_amount": "10000000"},
     }
     tx, meta = xrpl_ops._extract_tx_and_meta(msg)
 

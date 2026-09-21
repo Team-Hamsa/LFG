@@ -1,33 +1,23 @@
 # surfaces/discord_bot/admin.py
 # Admin panel: AdminView, modals, burn helpers. Behavior unchanged (D1=B):
 # still calls lfg_core/db_helpers/rarity locally.  Relocated from main.py.
-import asyncio
 import logging
 import sqlite3
 import traceback
+from dataclasses import dataclass
 from typing import Any
 
 import discord
 from discord import Embed, TextStyle, app_commands
 from discord.ui import Button, Modal, TextInput, View
-from xrpl.models.transactions import NFTokenBurn
-from xrpl.transaction import submit_and_wait
-from xrpl.wallet import Wallet
 
 from lfg_core import config as core_config
+from lfg_core import memos, xrpl_ops
 from lfg_core import rarity as _rarity
-from lfg_core import xrpl_ops
-from lfg_core.config import SOURCE_TAG
 from surfaces._client.errors import ServiceError
 from surfaces.discord_bot import config, fee_cover_admin
 from surfaces.discord_bot.bot import svc, tree
 
-SEED = config.SEED
-# The JSON-RPC client comes from xrpl_ops.rpc_client(): the network-aware
-# endpoint list from lfg_core.config (XRPL_NETWORK / XRPL_JSON_RPC_URL +
-# XRPL_JSON_RPC_FALLBACK_URLS) with failover — same source every backend tx
-# uses, so admin burns hit mainnet on a mainnet deploy. (Was hardcoded to
-# testnet; Greptile P1 on #79.)
 ADMIN_LOG_CHANNEL_ID = config.ADMIN_LOG_CHANNEL_ID
 
 
@@ -45,47 +35,40 @@ async def _admin_interaction_check(interaction: discord.Interaction) -> bool:
     return True
 
 
-async def burn_nft(nft_id: str) -> bool:
-    """Burn an NFT using the issuer's seed"""
+BURN_BURNED = "burned"
+BURN_FAILED = "failed"
+BURN_INDETERMINATE = "indeterminate"
+
+
+@dataclass(frozen=True)
+class BurnOutcome:
+    status: str  # BURN_BURNED | BURN_FAILED | BURN_INDETERMINATE
+    tx_hash: str | None = None
+
+
+async def burn_nft(nft_id: str) -> BurnOutcome:
+    """Burn an issuer-held NFT with the issuer's burn authority.
+
+    Goes through lfg_core.xrpl_ops.burn_nft, the same builder every backend
+    burn uses: Account = SIGNING_ACCOUNT (the issuer; on mainnet SEED is its
+    regular key), network-aware JSON-RPC failover, SourceTag + provenance
+    memos (#54, platform discord-bot), the #58 pre-submit simulate, and a
+    sign-once submit confirmed from the ledger. No Owner is passed, so only a
+    token the issuer itself holds can be burned — never one in a user wallet.
+
+    An unconfirmable outcome is BURN_INDETERMINATE, not a failure: the burn
+    may have landed, so the caller must not report it as a clean failure."""
+    logging.info(f"Attempting to burn NFT: {nft_id}")
     try:
-        logging.info(f"Attempting to burn NFT: {nft_id}")
-
-        wallet = Wallet.from_seed(SEED)
-        client = xrpl_ops.rpc_client()
-
-        # Create NFTokenBurn transaction. Account is SIGNING_ACCOUNT, not the
-        # seed-derived address — on mainnet SEED holds the issuer's regular-key
-        # seed and the tx must run as the issuer.
-        burn_tx = NFTokenBurn(
-            account=core_config.SIGNING_ACCOUNT,
-            nftoken_id=nft_id,
-            source_tag=SOURCE_TAG,
-        )
-
-        # Pre-submit simulate pre-flight (#58): a deterministic engine result
-        # (e.g. tecNO_PERMISSION when the token moved) refuses for free instead
-        # of burning a fee. Runs on the UNSIGNED model, outside the lock.
-        rejected = await xrpl_ops.presubmit_simulate(burn_tx, client, "admin NFTokenBurn")
-        if rejected is not None:
-            logging.error(f"Burn of {nft_id} rejected by pre-submit simulate: {rejected}")
-            return False
-
-        # Submit and wait for validation
-        logging.info("Submitting burn transaction...")
-        async with xrpl_ops.submission_coordinator(core_config.SIGNING_ACCOUNT):
-            response = await asyncio.to_thread(submit_and_wait, burn_tx, client, wallet)
-
-        if response.result.get("meta", {}).get("TransactionResult") == "tesSUCCESS":
-            logging.info(f"Successfully burned NFT: {nft_id}")
-            return True
-        else:
-            logging.error(f"Failed to burn NFT. Response: {response.result}")
-            return False
-
-    except Exception as e:
-        logging.error(f"Error burning NFT: {e}")
-        logging.error(f"Full traceback: {traceback.format_exc()}")
-        return False
+        tx_hash = await xrpl_ops.burn_nft(nft_id, platform=memos.PLATFORM_DISCORD_BOT)
+    except xrpl_ops.IndeterminateResultError as e:
+        logging.error(f"Burn of {nft_id} submitted but its outcome is unknown ({e})")
+        return BurnOutcome(BURN_INDETERMINATE, e.tx_hash)
+    if tx_hash is None:
+        logging.error(f"Failed to burn NFT {nft_id} (definitive failure; see burn_nft logs)")
+        return BurnOutcome(BURN_FAILED)
+    logging.info(f"Successfully burned NFT: {nft_id} ({tx_hash})")
+    return BurnOutcome(BURN_BURNED, tx_hash)
 
 
 class BurnNFTModal(Modal, title="Burn NFT"):
@@ -181,9 +164,9 @@ class BurnConfirmView(View):
 
         try:
             # Attempt to burn the NFT
-            success = await burn_nft(self.nft_id)
+            outcome = await burn_nft(self.nft_id)
 
-            if success:
+            if outcome.status == BURN_BURNED:
                 conn = sqlite3.connect(core_config.DB_PATH)
                 cursor = conn.cursor()
 
@@ -255,6 +238,15 @@ class BurnConfirmView(View):
                 except Exception as e:
                     logging.error(f"Failed to send burn log: {e}")
 
+            elif outcome.status == BURN_INDETERMINATE:
+                # The burn may have landed: leave the LFG record untouched and
+                # say so, rather than reporting a failure that invites a retry.
+                await interaction.followup.send(
+                    f"⚠️ Burn of NFT #{self.nft_number} was submitted but its outcome "
+                    f"is unknown (tx {outcome.tx_hash or 'unknown'}). Check the ledger "
+                    "before retrying; the LFG record was left unchanged.",
+                    ephemeral=True,
+                )
             else:
                 await interaction.followup.send(
                     f"❌ Failed to burn NFT #{self.nft_number}. Check logs for details.",

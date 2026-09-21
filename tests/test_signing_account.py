@@ -206,13 +206,10 @@ def test_admin_burn_account_is_signing_account(monkeypatch):
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", ISSUER)
     captured: dict = {}
 
-    class _BurnResp:
-        result = {"meta": {"TransactionResult": "tesSUCCESS"}}
-
-    def fake_submit(tx, client, wallet):
+    async def fake_submit_and_confirm(tx, wallet, client, label, **kwargs):
         captured["tx"] = tx
-        return _BurnResp()
+        return {"hash": "B" * 64}
 
-    monkeypatch.setattr(admin, "submit_and_wait", fake_submit)
-    assert _run(admin.burn_nft("00080000ABCD")) is True
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit_and_confirm)
+    assert _run(admin.burn_nft("00080000ABCD")).status == admin.BURN_BURNED
     assert captured["tx"].account == ISSUER

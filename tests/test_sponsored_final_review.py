@@ -1252,8 +1252,6 @@ def test_concurrent_mint_offer_and_burn_share_transaction_account_coordinator(mo
 
     import surfaces.discord_bot.admin as discord_admin
 
-    monkeypatch.setattr(discord_admin, "submit_and_wait", fake_submit)
-
     async def run_all():
         return await asyncio.gather(
             xrpl_ops.prepare_sponsored_mint(
@@ -1288,5 +1286,5 @@ def test_concurrent_mint_offer_and_burn_share_transaction_account_coordinator(mo
     assert burn.state == "prepared"
     assert legacy_burn is not None
     assert regular_key != transaction_account
-    assert admin_burn is True
+    assert admin_burn.status == discord_admin.BURN_BURNED
     assert maximum_active == 1
