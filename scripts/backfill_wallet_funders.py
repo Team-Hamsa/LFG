@@ -226,18 +226,17 @@ def reverify(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = report or os.path.join("reports", f"funder_reverify_{network}_{stamp}.json")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(
-            {
-                "network": network,
-                "checked": len(rows),
-                "applied": apply,
-                "changes": changes,
-                "failed": failed,
-            },
-            fh,
-            indent=2,
-        )
+    body: dict[str, object] = {
+        "network": network,
+        "checked": len(rows),
+        "apply_requested": apply,
+        # Flipped (and the report rewritten) only once the transaction below
+        # has committed, so an interrupted run never reads as applied.
+        "applied": False,
+        "changes": changes,
+        "failed": failed,
+    }
+    _write_report(path, body)
     if apply:
         with conn:
             for c in changes:
@@ -251,6 +250,8 @@ def reverify(
                         " looked_up_at = CURRENT_TIMESTAMP WHERE wallet = ?",
                         (new["funder"], new["ledger_index"], c["wallet"]),
                     )
+        body["applied"] = True
+        _write_report(path, body)
     conn.close()
     verb = "rewrote" if apply else "would rewrite"
     print(
@@ -258,6 +259,11 @@ def reverify(
         f"report: {path}"
     )
     return 1 if failed else 0
+
+
+def _write_report(path: str, body: dict[str, object]) -> None:
+    with open(path, "w") as fh:
+        json.dump(body, fh, indent=2)
 
 
 if __name__ == "__main__":

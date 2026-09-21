@@ -249,7 +249,45 @@ def test_reverify_apply_rewrites_deletes_and_skips_failures(tmp_path, monkeypatc
             for w, f, lg in conn.execute("SELECT wallet, funder, ledger_index FROM wallet_funders")
         }
     assert rows == {"rA": (FUNDER, 50), "rFail": ("rKeep", 1)}
-    assert json.loads(report.read_text())["failed"][0]["wallet"] == "rFail"
+    body = json.loads(report.read_text())
+    assert body["failed"][0]["wallet"] == "rFail"
+    assert body["apply_requested"] is True
+    assert body["applied"] is True
+
+
+def test_reverify_report_is_not_marked_applied_if_the_write_fails(tmp_path, monkeypatch):
+    db = str(tmp_path / "app.db")
+    report = tmp_path / "r.json"
+    _seed(db, [("rA", "rWrong", 1)])
+    script = _script(monkeypatch)
+    monkeypatch.setattr(script.funding, "lookup_funder", lambda w: (FUNDER, 50))
+    real_connect = sqlite3.connect
+
+    class Boom:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __enter__(self):
+            return self._conn.__enter__()
+
+        def __exit__(self, *exc):
+            return self._conn.__exit__(*exc)
+
+        def execute(self, sql, *args):
+            if sql.startswith("UPDATE"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._conn.execute(sql, *args)
+
+    monkeypatch.setattr(script.sqlite3, "connect", lambda p: Boom(real_connect(p)))
+    with pytest.raises(sqlite3.OperationalError):
+        script.reverify(db, "mainnet", True, str(report))
+    body = json.loads(report.read_text())
+    assert body["apply_requested"] is True
+    assert body["applied"] is False
+    assert body["changes"][0]["wallet"] == "rA"
 
 
 def test_apply_requires_reverify(tmp_path, monkeypatch):
