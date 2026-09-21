@@ -6,6 +6,8 @@ surface process (Discord, Telegram, X) constructs one `LFGServiceClient` and
 shares it.
 
 ```python
+import asyncio
+
 from surfaces._client import LFGServiceClient
 
 async def mint_for(user_id: str, username: str) -> None:
@@ -20,6 +22,9 @@ async def mint_for(user_id: str, username: str) -> None:
 
         async for ev in svc.events(types=["mint.completed", "mint.failed"]):
             await announce(ev)   # reconnects internally; loop never exits on a drop
+
+
+asyncio.run(mint_for("42", "neo"))
 ```
 
 - **Auth:** the client holds the per-surface **service token**; it mints and
