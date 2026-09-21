@@ -8,16 +8,18 @@ shares it.
 ```python
 from surfaces._client import LFGServiceClient
 
-async with LFGServiceClient(BASE_URL, SERVICE_TOKEN, "discord") as svc:
-    session = await svc.signin_start(user_id, username=username)  # Xaman SignIn binds the wallet
-    final = await svc.wait_for_signin(user_id, session["uuid"])
-    if final.get("state") != "signed":
-        return  # declined, expired, or cancelled — nothing is linked
-    mint = await svc.start_mint(user_id)
-    final = await svc.wait_for_mint(user_id, mint["session_id"])
+async def mint_for(user_id: str, username: str) -> None:
+    async with LFGServiceClient(BASE_URL, SERVICE_TOKEN, "discord") as svc:
+        # Xaman SignIn proves the wallet and binds it to this user
+        session = await svc.signin_start(user_id, username=username)
+        signin = await svc.wait_for_signin(user_id, session["uuid"])
+        if signin.get("state") != "signed":
+            return  # declined, expired, or cancelled — nothing is linked
+        mint = await svc.start_mint(user_id)
+        final = await svc.wait_for_mint(user_id, mint["session_id"])
 
-    async for ev in svc.events(types=["mint.completed", "mint.failed"]):
-        await announce(ev)   # reconnects internally; loop never exits on a drop
+        async for ev in svc.events(types=["mint.completed", "mint.failed"]):
+            await announce(ev)   # reconnects internally; loop never exits on a drop
 ```
 
 - **Auth:** the client holds the per-surface **service token**; it mints and
