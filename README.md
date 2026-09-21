@@ -303,7 +303,7 @@ source .venv/bin/activate
 
 On macOS `setup.sh` exits without doing anything — create the venv by hand (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt && .venv/bin/pre-commit install --hook-type pre-push`).
 
-Then create a `.env` in the repo root (variable reference in the collapsed section below) and run a surface — start with `lfg_service`, the hub every other surface talks to. Trait art is not in the repo (`layers/` is gitignored), so point `LAYER_SOURCE=local` / `LAYERS_DIR` at your own tree:
+Then copy the testnet template — `cp .env.example .env` — and fill in its placeholders (full variable reference in the collapsed section below) and run a surface — start with `lfg_service`, the hub every other surface talks to. Trait art is not in the repo (`layers/` is gitignored), so point `LAYER_SOURCE=local` / `LAYERS_DIR` at your own tree:
 
 ```bash
 # The shared backend + Discord Activity host (run this first — port 8176)
