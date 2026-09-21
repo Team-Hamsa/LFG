@@ -246,6 +246,17 @@ def test_parse_account_tx_first_payment_is_funder():
             {
                 "ledger_index": 7,
                 "tx": {"TransactionType": "Payment", "Destination": "rW", "Account": "rF"},
+                "meta": {
+                    "TransactionResult": "tesSUCCESS",
+                    "AffectedNodes": [
+                        {
+                            "CreatedNode": {
+                                "LedgerEntryType": "AccountRoot",
+                                "NewFields": {"Account": "rW"},
+                            }
+                        }
+                    ],
+                },
             }
         ]
     }

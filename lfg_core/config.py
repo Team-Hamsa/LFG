@@ -175,6 +175,18 @@ WS_URLS = ws_urls(WS_URL, os.getenv("XRPL_WS_FALLBACK_URLS"), network=XRPL_NETWO
 # fail-closed Closet on-ledger verify gate reads as "not owned" and refuses the
 # op. Default to a clio host so those lookups work without per-deploy env tuning.
 CLIO_WS_URL = os.getenv("XRPL_CLIO_WS_URL", _default_clio)
+# Full-history websocket endpoints for lookups that page an account's whole
+# history (funding.lookup_funder): clio first, then the per-network public
+# full-history nodes (XRPL_HISTORY_WS_FALLBACK_URLS replaces those). Never the
+# WS_URL/JSON_RPC_URL pools: in prod their primary is a history-pruned local
+# validator, whose oldest retained transaction is not an account's first.
+HISTORY_WS_URLS = _ordered_urls(
+    CLIO_WS_URL,
+    os.getenv("XRPL_HISTORY_WS_FALLBACK_URLS"),
+    {"mainnet": MAINNET_WS_FALLBACK_URLS, "testnet": TESTNET_WS_FALLBACK_URLS}.get(
+        XRPL_NETWORK, ()
+    ),
+)
 
 # NFT settings
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))

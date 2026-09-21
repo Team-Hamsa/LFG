@@ -158,6 +158,7 @@ LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); m
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 XRPL_JSON_RPC_FALLBACK_URLS=<url,url>                       # optional (#493); comma-separated JSON-RPC failover endpoints tried after XRPL_JSON_RPC_URL on busy/unsynced/unreachable servers (never on tx results) — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
 XRPL_WS_FALLBACK_URLS=<wss-url,wss-url>                     # optional; websocket failover for the payment watcher, tried after XRPL_WS_URL — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
+XRPL_HISTORY_WS_FALLBACK_URLS=<wss-url,wss-url>             # optional; full-history endpoints tried after XRPL_CLIO_WS_URL for activation-funder lookups (funding.lookup_funder) — unset = the per-network public WS defaults; never point at a history-pruned node (mainnet lookups refuse one whose ledger_index_min > 32570)
 PAYMENT_REPOLL_SECONDS=10                                   # optional; how often a payment wait re-checks account history while listening (the stream alone can miss a payment)
 XRPL_RPC_BUSY_RETRY_BACKOFF=1,2.5                           # optional; when EVERY JSON-RPC endpoint answers busy (tooBusy/slowDown/5xx), wait each delay (s) and re-walk the pool — empty = no retry rounds; transport failures never retry
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
@@ -312,7 +313,9 @@ deployment are prescribed in `docs/ops/sponsored-free-mint.md`); automatic
 signer/issuer exclusions do not satisfy that check. Sponsored admission also stays disabled until startup
 recovery succeeds, while paid minting remains available after a recovery fault.
 **Funder-at-login:** every sign-in / wallet-link arm fires a best-effort
-`funding.warm_funder_cache` (one `account_tx`, cached forever in
+`funding.warm_funder_cache` (paged `account_tx` on clio / full-history
+`config.HISTORY_WS_URLS` — never the JSON-RPC pool, whose prod primary is a
+pruned validator — taking the tx whose meta CREATES the AccountRoot, cached forever in
 `wallet_funders`; unfunded results are never cached) so the sybil funder gate
 finds the funder locally at mint time, and `GET /api/mint/sponsored/eligibility`
 (authed) returns `{eligible, reason}` from `sponsored_mint.preview_eligibility`
