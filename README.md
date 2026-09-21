@@ -457,12 +457,10 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
 - [ ] [#405 — feat(brix): spend unclaimed daily-drip accruals as in-app platform credit](../../issues/405)
 - [ ] [#427 — Marketplace: surface incoming bids to the NFT owner (Xaman push + in-app)](../../issues/427)
-- [ ] [#428 — Marketplace: royalty-refund campaign for sales settled through LFG](../../issues/428)
 - [ ] [#444 — Epic: User Profiles — unified accounts across wallets, surfaces, and providers](../../issues/444)
 - [ ] [#454 — Wallet unlink: self-serve removal of a wallet_proof_links edge](../../issues/454)
 - [ ] [#455 — Xaman wallet-link arm: replace bare SignIn consent with a signed AccountSet proof](../../issues/455)
 - [ ] [#456 — WalletConnect signing on Telegram (and Discord Activity): identity-resolved session wallet + per-identity pairing](../../issues/456)
-- [ ] [#469 — Trait marketplace UX cleanup](../../issues/469)
 - [ ] [#473 — Joey browser extension arm: sign in + sign via injected provider (XLS-72d)](../../issues/473)
 - [ ] [#474 — feat: social sign-in (X, Discord, Google, Apple)](../../issues/474)
 - [ ] [#475 — feat: auto-post admin/campaign events to X with templated campaign image](../../issues/475)
@@ -472,8 +470,7 @@ collection (not a general tool). Full rationale per row in
 - [ ] [#489 — Trait marketplace: mobile layout — collapse filters behind a drawer](../../issues/489)
 - [ ] [#494 — feat: rarity transparency — show per-trait mint odds vs collection share, drift, and how the engine works](../../issues/494)
 - [ ] [#498 — Marketplace: batch cross-listing of external listings onto LFG (blocked on #219)](../../issues/498)
-- [ ] [#520 — Trait market: one browse for Closet asks and token listings, plus a seller record for project inventory (follow-up to #470)](../../issues/520)
-- [ ] [#548 — Move legacy NFT trait listings into the Closet market](../../issues/548)
+- [ ] [#548 — Closet market: run the house-stock migration on mainnet + owner opt-in 'Move to Closet market' for user trait listings](../../issues/548)
 - [ ] [#552 — feat: bounties for app activities (admin-controlled; BRIX/NFT/trait/XRP payouts)](../../issues/552)
 - [ ] [#553 — feat(market): XRP collection offers for characters (escrow-backed, like trait bids)](../../issues/553)
 - [ ] [#554 — feat: time-bounded bounties (most shares / most BRIX paid out) — bounties phase 2](../../issues/554)
@@ -482,6 +479,9 @@ collection (not a general tool). Full rationale per row in
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#469 — Trait marketplace UX cleanup](../../issues/469) (closed 2026-09-21)
+- [x] [#428 — Marketplace: royalty-refund campaign for sales settled through LFG](../../issues/428) (closed 2026-09-21)
+- [x] [#520 — Trait market: one browse for Closet asks and token listings, plus a seller record for project inventory (follow-up to #470)](../../issues/520) (closed 2026-09-21)
 - [x] [#503 — Closet Market: resume in-flight bid/buy/fill screens after reload (#443 follow-up)](../../issues/503) (closed 2026-09-19)
 - [x] [#488 — Trait marketplace: post-buy 'settling into your Closet' state](../../issues/488) (closed 2026-09-19)
 - [x] [#486 — Trait marketplace: explain the two-signature XRP on-ramp in the buy flow](../../issues/486) (closed 2026-09-19)
@@ -489,9 +489,6 @@ collection (not a general tool). Full rationale per row in
 - [x] [#470 — Closet-native trait listings: sell traits without minting a token first](../../issues/470) (closed 2026-09-17)
 - [x] [#463 — Joey browser-extension support via @joeywallet/wallet-sdk (XLS-72d injected provider)](../../issues/463) (closed 2026-09-17)
 - [x] [#399 — Sign in with Joey Wallet (WalletConnect)](../../issues/399) (closed 2026-09-17)
-- [x] [#443 — Closet Market: zero-signature trait asks + escrow-backed bids (replace Extract→List→Accept for Closet assets)](../../issues/443) (closed 2026-09-16)
-- [x] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499) (closed 2026-09-16)
-- [x] [#496 — feat(marketplace): buy offers / bids on traits in the trait marketplace](../../issues/496) (closed 2026-09-14)
 <!-- roadmap:end -->
 
 <details>
