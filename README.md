@@ -84,7 +84,7 @@ Short walkthroughs of each core flow (recorded July 2026 — the live app has mo
 <img src="assets/sourcetag.svg" alt="XRPL source tag 2606160021: tagged transaction volume and unique wallets, deduplicated by activation funder" width="728">
 </div>
 
-**→ [How we count unique users](docs/UNIQUE_USERS.md)**: 718 signing wallets, merged to 403 independent users by activation funder, with the count under other rules.
+**→ [How we count unique users](docs/UNIQUE_USERS.md)**: 717 signing wallets, merged to 402 independent users by activation funder, with the count under other rules.
 
 **→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it, plus a merged-PR changelog that regenerates on every merge.
 
