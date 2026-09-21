@@ -10,7 +10,9 @@ from surfaces._client import LFGServiceClient
 
 async with LFGServiceClient(BASE_URL, SERVICE_TOKEN, "discord") as svc:
     session = await svc.signin_start(user_id, username=username)  # Xaman SignIn binds the wallet
-    await svc.wait_for_signin(user_id, session["uuid"])
+    final = await svc.wait_for_signin(user_id, session["uuid"])
+    if final.get("state") != "signed":
+        return  # declined, expired, or cancelled — nothing is linked
     mint = await svc.start_mint(user_id)
     final = await svc.wait_for_mint(user_id, mint["session_id"])
 
