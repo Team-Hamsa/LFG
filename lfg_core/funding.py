@@ -111,20 +111,30 @@ def lookup_funder(wallet: str, *, url: str | None = None) -> FunderResult:
     """Resolve a wallet's activation funder from full ledger history.
 
     Tries each of ``config.HISTORY_WS_URLS`` (clio first) in turn, or only
-    ``url`` when given, until one answers. Returns (None, None) for an account
-    that does not exist (actNotFound). Raises FunderLookupError when no
-    endpoint could answer, so callers fail closed.
+    ``url`` when given, and returns the first funder found. ``actNotFound`` is
+    one endpoint's view (a lagging node can miss a just-funded account), so
+    (None, None) is returned only when EVERY endpoint says the account does
+    not exist. Raises FunderLookupError when no endpoint found a funder and
+    at least one could not answer, so callers fail closed.
     """
     from lfg_core import config
 
     last: FunderLookupError | None = None
-    for endpoint in (url,) if url else config.HISTORY_WS_URLS:
+    endpoints = (url,) if url else config.HISTORY_WS_URLS
+    for endpoint in endpoints:
         try:
-            return _lookup_on(endpoint, wallet)
+            result = _lookup_on(endpoint, wallet)
         except FunderLookupError as e:
             logging.warning(f"funder lookup for {wallet} on {endpoint} failed: {e}")
             last = e
-    raise last or FunderLookupError("no history endpoint configured")
+            continue
+        if result != (None, None):
+            return result
+    if last is not None:
+        raise last
+    if not endpoints:
+        raise FunderLookupError("no history endpoint configured")
+    return None, None
 
 
 def _lookup_on(endpoint: str, wallet: str) -> FunderResult:

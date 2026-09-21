@@ -171,6 +171,31 @@ def test_lookup_raises_when_every_endpoint_fails(monkeypatch):
         funding.lookup_funder(W)
 
 
+def test_act_not_found_on_one_endpoint_does_not_end_the_lookup(monkeypatch):
+    answers = {"wss://lagging.example": (None, None), "wss://synced.example": (FUNDER, 9)}
+    monkeypatch.setattr(config, "HISTORY_WS_URLS", tuple(answers))
+    monkeypatch.setattr(funding, "_lookup_on", lambda endpoint, wallet: answers[endpoint])
+    assert funding.lookup_funder(W) == (FUNDER, 9)
+
+
+def test_unfunded_only_when_every_endpoint_agrees(monkeypatch):
+    monkeypatch.setattr(config, "HISTORY_WS_URLS", ("wss://a.example", "wss://b.example"))
+    monkeypatch.setattr(funding, "_lookup_on", lambda endpoint, wallet: (None, None))
+    assert funding.lookup_funder(W) == (None, None)
+
+
+def test_act_not_found_plus_a_failure_fails_closed(monkeypatch):
+    def on(endpoint, wallet):
+        if endpoint == "wss://busy.example":
+            raise funding.FunderLookupError("tooBusy")
+        return (None, None)
+
+    monkeypatch.setattr(config, "HISTORY_WS_URLS", ("wss://a.example", "wss://busy.example"))
+    monkeypatch.setattr(funding, "_lookup_on", on)
+    with pytest.raises(funding.FunderLookupError, match="tooBusy"):
+        funding.lookup_funder(W)
+
+
 def test_history_endpoints_start_with_clio_and_take_env_fallbacks():
     urls = config._ordered_urls("wss://clio.example", "wss://full.example", ())
     assert urls == ("wss://clio.example", "wss://full.example")
