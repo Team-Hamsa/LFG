@@ -1,6 +1,6 @@
 {
   "archive_max_close_time": "2026-09-20T22:55:00+00:00",
-  "as_of": "2026-09-21T00:20:00+00:00",
+  "as_of": "2026-09-21T05:27:26+00:00",
   "by_type": {
     "AccountSet": 1,
     "EscrowCreate": 4,
@@ -351,7 +351,7 @@
   "network": "mainnet",
   "source_tag": 2606160021,
   "total_tagged_txs": 12128,
-  "unique_actors": 405,
+  "unique_actors": 403,
   "unique_wallets": 718,
   "xrp_payment_volume": {
     "in_drops": 440927099,
