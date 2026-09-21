@@ -152,7 +152,7 @@ def build_block(base: int) -> str:
             f"measured from `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
             f"by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
             f"data files (CSV/JSON manifests), dependency lists, and the "
-            f"legacy/backup trees. Regenerated on every push to `main`.",
+            f"legacy/backup trees and vendored third-party client code. Regenerated on every push to `main`.",
             END_MARK,
         ]
     )
