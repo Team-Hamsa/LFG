@@ -235,7 +235,10 @@ def test_eligibility_endpoint_fails_closed_before_recovery(_service_env, monkeyp
     assert json.loads(resp.text) == {"eligible": False, "reason": "eligibility_unavailable"}
 
 
-def test_eligibility_route_is_registered():
+def test_eligibility_route_is_registered(monkeypatch):
+    # _service_env runs dev mode on mainnet for the handler tests; create_app
+    # refuses that pairing, and route registration doesn't need dev mode.
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
     routes = {r.resource.canonical for r in server.create_app().router.routes() if r.resource}
     assert "/api/mint/sponsored/eligibility" in routes
 

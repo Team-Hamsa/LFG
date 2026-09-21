@@ -12046,6 +12046,8 @@ async def no_cache_mw(request, handler):
 
 
 def create_app() -> web.Application:
+    # Before anything else: dev mode disables auth, so never on mainnet.
+    config.validate_dev_mode_config(config.WEBAPP_DEV_MODE, config.XRPL_NETWORK)
     app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
     identity_store.ensure_revoked_sessions_table()

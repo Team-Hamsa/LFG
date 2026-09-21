@@ -71,37 +71,73 @@ def test_trustline_payload_stamps_source_tag(monkeypatch):
     assert captured["payload"]["txjson"]["SourceTag"] == SOURCE_TAG
 
 
-def test_admin_burn_stamps_source_tag(monkeypatch):
+def test_admin_burn_stamps_source_tag_and_memos(monkeypatch):
     # NB: do NOT importlib.reload(admin) — it re-runs @tree.command(name="admin")
-    # on the singleton tree (CommandAlreadyRegistered). A plain import is enough:
-    # burn_nft reads the module-level SEED/SOURCE_TAG, which every discord test
-    # fixture sets to a valid seed before admin is first imported.
+    # on the singleton tree (CommandAlreadyRegistered). A plain import is enough.
+    # The admin burn routes through lfg_core.xrpl_ops.burn_nft, so it carries
+    # the SourceTag AND the #54 provenance memos (platform discord-bot).
     _set_env(monkeypatch)
     import surfaces.discord_bot.admin as admin
+    from lfg_core import memos, xrpl_ops
 
     captured = {}
 
-    class _BurnResp:
-        result = {"meta": {"TransactionResult": "tesSUCCESS"}}
-
-    def fake_submit(tx, client, wallet):
+    async def fake_submit_and_confirm(tx, wallet, client, label, **kwargs):
         captured["tx"] = tx
-        return _BurnResp()
+        return {"hash": "B" * 64, "meta": {"TransactionResult": "tesSUCCESS"}}
 
-    monkeypatch.setattr(admin, "submit_and_wait", fake_submit)
-    ok = _run(admin.burn_nft("00080000ABCD"))
-    assert ok is True
-    assert captured["tx"].source_tag == SOURCE_TAG
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit_and_confirm)
+    outcome = _run(admin.burn_nft("00080000ABCD"))
+    assert outcome.status == admin.BURN_BURNED
+    assert outcome.tx_hash == "B" * 64
+    tx = captured["tx"]
+    assert tx.source_tag == SOURCE_TAG
+    assert tx.nftoken_id == "00080000ABCD"
+    assert tx.owner is None  # issuer-held tokens only — never a forced burn
+    decoded = memos.decode_memos(tx.to_xrpl()["Memos"])
+    assert decoded["platform"] == memos.PLATFORM_DISCORD_BOT
+    assert decoded["action"] == memos.ACTION_BURN
+    assert decoded["initiator"] == memos.INITIATOR_BACKEND
+
+
+def test_admin_burn_definitive_failure_is_failed(monkeypatch):
+    _set_env(monkeypatch)
+    import surfaces.discord_bot.admin as admin
+    from lfg_core import xrpl_ops
+
+    async def fake_submit_and_confirm(tx, wallet, client, label, **kwargs):
+        return None  # validated, definitive failure
+
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit_and_confirm)
+    outcome = _run(admin.burn_nft("00080000ABCD"))
+    assert outcome.status == admin.BURN_FAILED
+    assert outcome.tx_hash is None
+
+
+def test_admin_burn_unknown_outcome_is_indeterminate(monkeypatch):
+    """A submit whose outcome can't be confirmed is NOT a clean failure: the
+    burn may have landed, so the admin must be told, not told it failed."""
+    _set_env(monkeypatch)
+    import surfaces.discord_bot.admin as admin
+    from lfg_core import xrpl_ops
+
+    async def fake_submit_and_confirm(tx, wallet, client, label, **kwargs):
+        raise xrpl_ops.IndeterminateResultError("timeout", tx_hash="C" * 64)
+
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit_and_confirm)
+    outcome = _run(admin.burn_nft("00080000ABCD"))
+    assert outcome.status == admin.BURN_INDETERMINATE
+    assert outcome.tx_hash == "C" * 64
 
 
 def test_admin_burn_short_circuits_on_simulate_rejection(monkeypatch):
-    """#58: a deterministic simulate rejection returns False and never submits."""
+    """#58: a deterministic simulate rejection fails and never submits."""
     _set_env(monkeypatch)
     monkeypatch.setenv("PRESUBMIT_SIMULATE", "1")
     import surfaces.discord_bot.admin as admin
     from lfg_core import xrpl_ops
 
-    def never_submit(tx, client, wallet):
+    def never_submit(*args, **kwargs):
         raise AssertionError("submit_and_wait must not run after a simulate rejection")
 
     class _SimResp:
@@ -113,9 +149,9 @@ def test_admin_burn_short_circuits_on_simulate_rejection(monkeypatch):
         simulated["tx"] = tx
         return _SimResp()
 
-    monkeypatch.setattr(admin, "submit_and_wait", never_submit)
+    monkeypatch.setattr(xrpl_ops, "submit_and_wait", never_submit)
     monkeypatch.setattr(xrpl_ops, "simulate", fake_simulate)
-    ok = _run(admin.burn_nft("00080000ABCD"))
-    assert ok is False
+    outcome = _run(admin.burn_nft("00080000ABCD"))
+    assert outcome.status == admin.BURN_FAILED
     assert simulated["tx"].source_tag == SOURCE_TAG
     assert not simulated["tx"].is_signed()

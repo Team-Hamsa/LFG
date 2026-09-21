@@ -355,6 +355,26 @@ MARKET_ENABLED_DEFAULT = "1"
 MARKET_ENABLED = env_flag("MARKET_ENABLED", MARKET_ENABLED_DEFAULT)
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
+
+def validate_dev_mode_config(dev_mode: bool, xrpl_network: str) -> None:
+    """Refuse to serve dev mode against mainnet.
+
+    WEBAPP_DEV_MODE makes require_auth/require_wallet substitute a fixed dev
+    user and wallet on every authed route, i.e. no authentication at all.
+    That is a local-testing harness only; on mainnet it would hand every
+    caller the dev identity. The service calls this from create_app() so a
+    misconfigured process fails fast instead of starting unauthenticated.
+    """
+    # Fail closed on the EFFECTIVE network: every value other than "testnet"
+    # (a typo, "prod", "devnet") selects mainnet endpoints (IS_TESTNET above).
+    if dev_mode and xrpl_network.strip().lower() != "testnet":
+        raise ValueError(
+            f"WEBAPP_DEV_MODE is on while XRPL_NETWORK is {xrpl_network!r}. Dev "
+            "mode bypasses authentication on every route and may only run "
+            "against testnet. Unset WEBAPP_DEV_MODE or set XRPL_NETWORK=testnet."
+        )
+
+
 # Telegram Mini App (#89). All optional — the feature is OFF when unset:
 # an empty bot token makes POST /api/telegram/auth return 503. The service and
 # the Telegram bot read the same .env, so the bot token is available here.

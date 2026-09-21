@@ -25,7 +25,10 @@ STREAM_MSG = {
         "DeliverMax": {"currency": CUR, "issuer": "rIssuer", "value": "1"},
         "hash": "LEDGERH1",
     },
-    "meta": {"delivered_amount": {"currency": CUR, "issuer": "rIssuer", "value": "1"}},
+    "meta": {
+        "TransactionResult": "tesSUCCESS",
+        "delivered_amount": {"currency": CUR, "issuer": "rIssuer", "value": "1"},
+    },
 }
 
 
