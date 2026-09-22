@@ -10,11 +10,13 @@
 # downscaled to THUMB_SIZE and every animated format re-encoded as GIF, which
 # renders in a plain <img> everywhere.
 #
-# This module is pure path/mtime logic (no ffmpeg/gifski) so the service and
-# tests can use it without media tooling; scripts/make_layer_thumbs.py does the
-# actual conversion.
+# This module is path/mtime logic plus header-only PNG reads (no ffmpeg/gifski)
+# so the service and tests can use it without media tooling;
+# scripts/make_layer_thumbs.py does the actual conversion.
 
 import os
+
+from PIL import Image
 
 THUMBS_DIR = ".thumbs"
 THUMB_SIZE = 512
@@ -41,11 +43,32 @@ def thumb_path_for(src_path: str, base_dir: str) -> str | None:
     return os.path.join(base_dir, THUMBS_DIR, stem + thumb_ext)
 
 
+def _png_transparency(path: str) -> bool | None:
+    """Whether a PNG can show through: an alpha channel, or a palette/grey
+    tRNS chunk. Header-only (PIL stops before the pixel data); None when the
+    file can't be read as an image."""
+    try:
+        with Image.open(path) as im:
+            return im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    except (OSError, SyntaxError, ValueError):
+        return None
+
+
+def _lost_transparency(src: str, thumb: str) -> bool:
+    """A PNG thumb that is opaque although its source is not. Generators
+    before 2026-09-22 dropped palette PNGs' tRNS; those thumbs are newer than
+    their sources, so without this check they would never be rebuilt."""
+    if not src.lower().endswith(".png"):
+        return False  # animated sources become GIFs via gifski, alpha-checked
+    return _png_transparency(src) is True and _png_transparency(thumb) is False
+
+
 def scan(base_dir: str) -> tuple[list[tuple[str, str]], list[str]]:
     """Diff the layers tree against its .thumbs/ mirror.
 
     Returns (stale, orphans): `stale` is [(src, thumb)] pairs whose thumb is
-    missing or older than its source (mtime), `orphans` is thumb files whose
+    missing, older than its source (mtime), or opaque where the source PNG is
+    transparent (see _lost_transparency), `orphans` is thumb files whose
     source no longer exists in any format that maps to them. Hidden dirs
     (including .thumbs itself) are never treated as sources.
 
@@ -81,7 +104,7 @@ def scan(base_dir: str) -> tuple[list[tuple[str, str]], list[str]]:
             fresh = os.path.getmtime(thumb) >= os.path.getmtime(src)
         except OSError:
             fresh = False
-        if not fresh:
+        if not fresh or _lost_transparency(src, thumb):
             stale.append((src, thumb))
 
     orphans: list[str] = []
