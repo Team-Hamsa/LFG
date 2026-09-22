@@ -11,10 +11,12 @@
 #   pre-push   pre-commit exports PRE_COMMIT_FROM_REF/TO_REF: scan every commit
 #              in the pushed range, so a secret added and then deleted inside
 #              one push is still caught (it would still be in history).
-#   otherwise  CI's `run --all-files`, manual runs, a push that includes a root
-#              commit: scan every TRACKED file at HEAD, extracted with git
-#              archive. Never the working tree: the main checkout's gitignored
-#              .env holds the backend's live seeds.
+#   root push  a push carrying a root commit (pre-commit sets no refs, only
+#              PRE_COMMIT_REMOTE_NAME/LOCAL_BRANCH): scan the branch's commits
+#              that no remote-tracking ref has yet.
+#   otherwise  CI's `run --all-files`, manual runs: scan every TRACKED file at
+#              HEAD, extracted with git archive. Never the working tree: the
+#              main checkout's gitignored .env holds the backend's live seeds.
 #
 # Rules come from .gitleaks.toml beside this script (the default ruleset plus
 # XRPL family seeds). Findings are redacted because CI logs on this public repo
@@ -29,6 +31,14 @@ flags=(--config "$config" --redact --no-banner --verbose)
 if [[ -n "${PRE_COMMIT_FROM_REF:-}" && -n "${PRE_COMMIT_TO_REF:-}" ]]; then
     exec gitleaks git "${flags[@]}" \
         --log-opts="${PRE_COMMIT_FROM_REF}..${PRE_COMMIT_TO_REF}" \
+        "$root"
+fi
+
+# A push that carries a root commit gets no FROM/TO refs, only the remote and
+# local branch: scan that branch's commits no remote-tracking ref has yet.
+if [[ -n "${PRE_COMMIT_REMOTE_NAME:-}" && -n "${PRE_COMMIT_LOCAL_BRANCH:-}" ]]; then
+    exec gitleaks git "${flags[@]}" \
+        --log-opts="${PRE_COMMIT_LOCAL_BRANCH} --not --remotes=${PRE_COMMIT_REMOTE_NAME}" \
         "$root"
 fi
 

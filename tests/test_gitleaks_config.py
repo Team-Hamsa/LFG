@@ -282,6 +282,39 @@ def test_prepush_scans_only_the_pushed_range(tmp_path: Path) -> None:
     assert out.returncode == 0, out.stdout + out.stderr
 
 
+def test_root_push_scans_every_unpushed_commit(tmp_path: Path) -> None:
+    """A push carrying a root commit gets no FROM/TO refs from pre-commit, only
+    the remote name and local branch: scan the branch's unpushed history,
+    not HEAD's snapshot, which no longer holds the seed."""
+    repo = _repo(tmp_path)
+    _commit(repo, "wallet.env", f"SEED={generate_seed()}\n")
+    _commit(repo, "wallet.env", "SEED=\n")
+
+    out = _run_gate(
+        repo, PRE_COMMIT_REMOTE_NAME="origin", PRE_COMMIT_LOCAL_BRANCH="refs/heads/main"
+    )
+
+    assert out.returncode != 0, out.stdout + out.stderr
+    assert SEED_RULE in out.stdout + out.stderr
+
+
+def test_root_push_skips_commits_already_on_the_remote(tmp_path: Path) -> None:
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "-q", "--bare", str(remote))
+    repo = _repo(tmp_path)
+    _commit(repo, "wallet.env", f"SEED={generate_seed()}\n")
+    _commit(repo, "wallet.env", "SEED=\n")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-q", "origin", "main")
+    _commit(repo, "notes.md", "clean\n")
+
+    out = _run_gate(
+        repo, PRE_COMMIT_REMOTE_NAME="origin", PRE_COMMIT_LOCAL_BRANCH="refs/heads/main"
+    )
+
+    assert out.returncode == 0, out.stdout + out.stderr
+
+
 def test_all_files_mode_scans_tracked_tree(tmp_path: Path) -> None:
     """CI's `pre-commit run --all-files` sets no refs: scan HEAD's tree."""
     repo = _repo(tmp_path)
