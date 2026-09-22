@@ -42,6 +42,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    ape_face,
     archive_reverify,
     brix_drip,
     brix_payment,
@@ -88,6 +89,7 @@ from lfg_core import (
     trait_config,
     trait_economy,
     trait_images,
+    traits,
     xrpl_ops,
     xumm_ops,
 )
@@ -8981,6 +8983,45 @@ async def _swap_fee_quote(wallet: str) -> dict[str, Any] | None:
         return None
 
 
+def _swap_matrix(cfg: trait_config.TraitConfig) -> dict[str, Any]:
+    """The cross-body swap matrix, serialized so the client can mirror
+    swap_allowed() and only offer traits legal for the selected pair
+    (#30 Task 15) — swap_allowed() itself remains the server-side gate."""
+    return {
+        "universal_layers": sorted(cfg.universal_layers),
+        "pairs": [
+            {
+                "bodies": sorted(p.bodies),
+                "layers": sorted(p.layers) if p.layers is not None else None,
+                "layers_except": (sorted(p.layers_except) if p.layers_except is not None else None),
+            }
+            for p in cfg.swap_pairs
+        ],
+    }
+
+
+def _swap_preview_config(cfg: trait_config.TraitConfig) -> dict[str, Any]:
+    """What the swap chooser's before/after preview (webapp/client/swap_pure.js)
+    needs to stack each result the way swap_compose composes it: trait_order +
+    z_order, the same pair /api/economy hands the Build previews — repeated
+    here because /api/economy is gated on ECONOMY_ENABLED and swaps are not —
+    plus the ape_face rules (fixed nose, melt/xray face clipping) and the face
+    slots traits.fill_missing_face_traits rolls. Static config only, nothing
+    per-user."""
+    return {
+        "trait_order": swap_meta.TRAIT_ORDER,
+        "z_order": cfg.z_table(),
+        "face_traits": traits.FACE_TRAITS,
+        "ape_face": {
+            "top_traits": ape_face.TOP_TRAITS,
+            "nose_below_eyes": sorted(ape_face.NOSE_BELOW_EYES_VALUES),
+            "masked_bodies": sorted(ape_face.MASKED_BODY_VALUES),
+            "masked_traits": sorted(ape_face.MASKED_TRAITS),
+            "no_mask": ape_face.NO_MASK_VALUES,
+        },
+    }
+
+
 @require_wallet
 async def handle_nfts(request):
     """List the user's swappable collection NFTs (normalized metadata)."""
@@ -8992,27 +9033,14 @@ async def handle_nfts(request):
         logging.error(f"NFT listing failed: {e!r}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
     swap_fee = await _swap_fee_quote(request["wallet"])
-    # Serialize the cross-body swap matrix so the client can mirror
-    # swap_allowed() and only offer traits legal for the selected pair
-    # (#30 Task 15) — swap_allowed() itself remains the server-side gate.
     cfg = trait_config.get_config()
-    matrix = {
-        "universal_layers": sorted(cfg.universal_layers),
-        "pairs": [
-            {
-                "bodies": sorted(p.bodies),
-                "layers": sorted(p.layers) if p.layers is not None else None,
-                "layers_except": (sorted(p.layers_except) if p.layers_except is not None else None),
-            }
-            for p in cfg.swap_pairs
-        ],
-    }
     return web.json_response(
         {
             "nfts": nfts,
             "swappable_traits": swap_meta.SWAPPABLE_TRAITS,
             "swap_fee": swap_fee,
-            "swap_matrix": matrix,
+            "swap_matrix": _swap_matrix(cfg),
+            "swap_preview": _swap_preview_config(cfg),
         }
     )
 
@@ -11514,28 +11542,45 @@ async def handle_img(request):
     return _range_response(request, body, ctype)
 
 
+# The ape structural art ape_face.inject_and_mask adds at compose time — not
+# traits, so no (trait, value) addresses them. /api/layer?body=ape&asset=<key>
+# serves them for the swap preview; a closed map, never a caller's filename.
+_APE_LAYER_ASSETS = {"nose": ape_face.NOSE_ASSET, "mask": ape_face.MASK_ASSET}
+
+
 async def handle_layer(request):
     """Same-origin layer file for client-side compositing (CSP-safe).
     Resolves (body, trait, value) through the configured layer_store, which
-    serves from local disk or the CDN download cache."""
+    serves from local disk or the CDN download cache. `asset=nose|mask` (with
+    body=ape) serves the ape structural art instead."""
     body = request.query.get("body", "")
     trait = request.query.get("trait", "")
     value = request.query.get("value", "")
-    if (
+    asset = request.query.get("asset")
+    store = layer_store.get_layer_store()
+    if asset is not None:
+        if body != "ape" or asset not in _APE_LAYER_ASSETS:
+            return web.json_response({"error": "bad layer params"}, status=400)
+        # The exact lookup swap_compose.missing_layers / inject_and_mask make.
+        path = await store.resolve_asset(f"{body}/{_APE_LAYER_ASSETS[asset]}")
+    elif (
         not body
         or not trait
         or not value
         or any(len(x) > 128 or "/" in x or ".." in x for x in (body, trait, value))
     ):
         return web.json_response({"error": "bad layer params"}, status=400)
-    store = layer_store.get_layer_store()
-    # Resolve exactly like a real mint/swap/equip composes: own dir ->
-    # layers/shared/ -> matrix-permitted foreign body dir. Resolving against
-    # the requested body dir ALONE 404s every Closet asset whose art only
-    # exists under another body, and the Builder prunes those tiles client-side
-    # (layerMediaEl -> onMissing) — so traits the user owns and can legitimately
-    # wear silently vanish and can never be put back on a character.
-    path = await swap_compose.resolve_layer(store, trait_config.get_config(), body, trait, value)
+    else:
+        # Resolve exactly like a real mint/swap/equip composes: own dir ->
+        # layers/shared/ -> matrix-permitted foreign body dir. Resolving against
+        # the requested body dir ALONE 404s every Closet asset whose art only
+        # exists under another body, and the Builder prunes those tiles
+        # client-side (layerMediaEl -> onMissing) — so traits the user owns and
+        # can legitimately wear silently vanish and can never be put back on a
+        # character.
+        path = await swap_compose.resolve_layer(
+            store, trait_config.get_config(), body, trait, value
+        )
     if not path or not os.path.exists(path):
         # Empty, image-typed 404 rather than JSON: the Builder loads these
         # cross-origin as no-cors <img> tiles, and Firefox's Opaque Response
