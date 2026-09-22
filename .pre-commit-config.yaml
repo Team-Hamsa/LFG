@@ -29,6 +29,11 @@ repos:
     rev: v8.30.0
     hooks:
       - id: gitleaks
+        # The upstream entry scans the STAGED diff, which is empty at pre-push
+        # and in CI, so it passed everything. scripts/gitleaks-scan scans the
+        # pushed commits (pre-push) or HEAD's tracked tree (--all-files) with
+        # .gitleaks.toml, still using the binary pre-commit builds for the rev.
+        entry: scripts/gitleaks-scan
 
   - repo: local
     hooks:

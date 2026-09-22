@@ -121,8 +121,8 @@ def test_oauth_core_photos_vector_reproduces_documented_signature():
         "http://photos.example.net/photos?file=vacation.jpg&size=original",
         consumer_key="dpf43f3p2l4k3l03",
         consumer_secret="kd94hf93k423kf44",
-        access_token="nnch734d00sl2jdk",
-        access_secret="pfkkdhi9sl3r4s00",
+        access_token="nnch734d00sl2jdk",  # gitleaks:allow (published spec vector)
+        access_secret="pfkkdhi9sl3r4s00",  # gitleaks:allow (published spec vector)
         nonce="kllo9940pd9333jh",
         timestamp="1191242096",
     )

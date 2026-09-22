@@ -1,0 +1,63 @@
+# Secret-scan rules for the gate (scripts/gitleaks-scan, the gitleaks hook in
+# .pre-commit-config.yaml). gitleaks also picks this file up on its own when
+# run against the repo root, e.g. a one-off `gitleaks git .`.
+#
+# The default ruleset has no rule for XRPL family seeds (verified against
+# v8.30.0 on 2026-09-22: fresh ed25519 and secp256k1 seeds produced no
+# finding), so it is extended with one. Regression tests:
+# tests/test_gitleaks_config.py.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "xrpl-family-seed"
+description = "XRPL family seed: the base58 secret every key of a wallet derives from"
+# xrpl-py encodes an ed25519 seed as "sEd" + 28 characters and a secp256k1
+# seed as "s" + 28 (31 and 29 chars; fixed by the prefix bytes, checked over
+# 200k seeds each). The class is the XRPL base58 alphabet, which has no 0, O,
+# I or l. \b on both ends keeps it off longer base58 runs. Classic addresses
+# start with "r" and tx hashes / NFTokenIDs are hex, so none of them can match.
+regex = '''\bs(?:Ed)?[1-9A-HJ-NP-Za-km-z]{28}\b'''
+# The lowest Shannon entropy seen over 400k fresh seeds was 3.62. At 3.0 a
+# random seed still clears easily, while filler like sXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+# does not.
+entropy = 3.0
+tags = ["xrpl", "seed"]
+
+    [[rules.allowlists]]
+    # Checked 2026-09-22: none of these exists on mainnet or derives the
+    # address of any seed in the prod or staging .env. Exact values only. A
+    # fresh seed, in tests/ or anywhere else, is still a finding: generate one
+    # at test time with xrpl.core.keypairs.generate_seed() instead of adding
+    # it here.
+    description = "Public test fixtures committed before this rule existed"
+    regexes = [
+        # conftest.py / ci.yml SEED and the per-test env-guard preambles;
+        # derives rG31cLyErnqeVj2eomEjBZtq7PYaupGYzL (testnet only).
+        '''^sEdTM1uX8pu2do5XvTnutH6HsouMaM2$''',
+        # tests/test_discord_*.py and a few plan docs; derives
+        # rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD (testnet only).
+        '''^sEdSKaCy2JT7JaM7v95H9SxkhP9wS2r$''',
+        # docs/superpowers/plans/2026-06-12-variable-rarity-engine.md: fails
+        # the base58 checksum, so it is not a seed at all.
+        '''^sEdTM1uX8pu2do5XvTeSrXpPVPNVrk2$''',
+    ]
+
+# generic-api-key fires on field names containing "token" or "key", so public
+# ledger identifiers beside NFTokenID, RegularKey, NFTokenMinter or an
+# "owner" column read as API keys (76 findings on the tree at 2026-09-22,
+# none a secret). Both allowlists are scoped to that rule and to shapes a
+# secret doesn't take here.
+[[allowlists]]
+description = "XRPL classic addresses: public by definition"
+targetRules = ["generic-api-key"]
+regexes = ['''^r[1-9A-HJ-NP-Za-km-z]{24,34}$''']
+
+[[allowlists]]
+# Scoped to the field name because a bare 64-hex value could equally be a
+# private key or an HMAC secret.
+description = "64-hex ledger ids (NFTokenID, offer index) under an XRPL field name"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''(?i)\bnf_?token_?(?:id|buyoffer|selloffer)\b\W{1,4}[0-9a-f]{64}\b''']
