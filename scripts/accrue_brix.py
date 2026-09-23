@@ -15,8 +15,8 @@ next run. Safe to run repeatedly.
 
 Registered in ecosystem.prod.config.js / ecosystem.staging.config.js as
 lfg-brix-accrue / stg-brix-accrue. The slot is 00:40 UTC, not the 00:20 this
-docstring once suggested: 00:20 already holds lfg-economy-reconcile and
-lfg-sourcetag. Since #411 this job is a DB-only archive replay (no per-token
+docstring once suggested: 00:20 already holds lfg-economy-reconcile (and
+held lfg-sourcetag until 2026-09-23). Since #411 this job is a DB-only archive replay (no per-token
 RPC sweep), so the slot no longer needs to absorb real per-token lookup time,
 but the offset is left as-is. Manual equivalent:
 

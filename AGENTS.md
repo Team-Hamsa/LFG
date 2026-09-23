@@ -63,12 +63,11 @@ Requirements: Python 3.10+, `ffmpeg` (built with `libvpx` if you'll use
 and sends every SQLite store to a temp dir. Get to green **before** editing,
 so any later failure is yours.
 
-**Disable LFG's repo automation now.** Three workflows commit to `main` and
+**Disable LFG's repo automation now.** Two workflows commit to `main` and
 pull data from `Team-Hamsa/LFG`:
 
-- `hackathon-loc.yml`
+- `readme-sync.yml`
 - `roadmap-sync.yml`
-- `build-log-sync.yml`
 
 Delete them. Keep:
 
@@ -119,7 +118,7 @@ Actions stay disabled in a fork until the operator enables them.
   - Pick your own `CLOSET_TAXON` and `TRAIT_TAXON`.
 
   Otherwise new mints are never indexed. The collection-size cap, market, leaderboards and economy all read that index.
-- **`scripts/sourcetag_metrics.py`** hardcodes `REPO = "Team-Hamsa/LFG"`, `OPERATOR_WALLETS` and `HISTORICAL_SIGNING_ADDRESSES`. With `--push` it commits to that repo. Repoint all three, or never run it.
+- **`scripts/sourcetag_metrics.py`** hardcodes `OPERATOR_WALLETS` and `HISTORICAL_SIGNING_ADDRESSES`. Replace both with your own wallets before trusting its counts.
 - **Deployment paths:**
   - `ecosystem.*.config.js`: `CWD` is `/home/hamsa/…`, and every app has `--network` baked in.
   - `scripts/deployer.py`: `HOME`, and the `STACKS` checkouts, branches, ports and pm2 names.
@@ -339,7 +338,7 @@ deployer. **A fork doesn't need that.** The simplest viable setup:
 
    It needs a **clio** WebSocket (`XRPL_CLIO_WS_URL`; the default is Ripple's public clio), because `nft_info` exists only on clio.
 6. **Surfaces.** `python main.py` (Discord), `python run_telegram.py` (Telegram), `python run_x.py` (X; exits 0 when off).
-7. **pm2.** Copy `ecosystem.prod.config.js` and change `CWD` and the `--network` args. Delete the LFG-only apps: `lfg-sourcetag` and `lfg-funnel-health`. Keep the crons for the features you enabled (market sweep; economy reconcile → audit; Closet Market audit; drip accrual; balance snapshot). Then `pm2 start <file> && pm2 save && pm2 startup`.
+7. **pm2.** Copy `ecosystem.prod.config.js` and change `CWD` and the `--network` args. Delete the LFG-only app `lfg-funnel-health`. Keep the crons for the features you enabled (market sweep; economy reconcile → audit; Closet Market audit; drip accrual; balance snapshot). Then `pm2 start <file> && pm2 save && pm2 startup`.
 8. **Updates.** `git pull && pip install -r requirements.txt && pm2 restart <apps>`. Check `/api/health` shows no active sessions first: in-flight mint and swap sessions live in memory. `scripts/deployer.py` automates this, but it hardcodes LFG's paths, branches and ports (`HOME`, `STACKS`).
 9. **Web app on GitHub Pages** (`.github/workflows/pages.yml`):
    1. Set `WEB_API_BASE` to your public API origin.

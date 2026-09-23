@@ -2,8 +2,11 @@
 
 Pure renderer: reads one JSON file, writes one SVG. It touches no database and
 imports nothing from lfg_core, so it runs on a bare CI runner. Idempotent —
-the SVG is rewritten only when its content changes. Run by the same workflow
-that refreshes assets/hackathon_loc.svg and assets/dashboard.svg.
+the SVG is rewritten only when its content changes.
+
+Retired from CI when Make Waves closed (2026-09-21): its output is frozen as
+submitted and pinned by tests/test_hackathon_freeze.py, so running it now
+only shows how far the repo has moved since.
 """
 
 from __future__ import annotations

@@ -29,6 +29,22 @@ def test_render_orders_prs_within_month_newest_first():
     )
 
 
+def test_render_drops_prs_merged_after_the_freeze():
+    """Make Waves closed 2026-09-21; the changelog is frozen as submitted."""
+    late = [
+        {"number": 598, "title": "last sprint fix", "mergedAt": "2026-09-21T07:21:50Z"},
+        {"number": 601, "title": "post-deadline", "mergedAt": "2026-09-23T12:00:00Z"},
+    ]
+    lines = build_log_sync.render(PRS + late)
+    assert build_log_sync.FREEZE_AT == "2026-09-21T08:17:35Z"
+    assert any("[#598]" in line for line in lines)
+    assert not any("[#601]" in line for line in lines)
+    assert lines[0] == (
+        "_4 pull requests merged since 2026-06-21. "
+        "Frozen as submitted (2026-09-21) — see `scripts/build_log_sync.py`._"
+    )
+
+
 def test_escape_title_neutralises_link_breakout():
     assert build_log_sync.escape_title("x](https://evil) <b>") == r"x\](https://evil) \<b\>"
 

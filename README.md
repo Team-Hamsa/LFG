@@ -19,7 +19,7 @@
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
-<img src="https://img.shields.io/badge/tagged_txs-12%2C155-3E8DE3?style=flat-square" alt="12,155 SourceTag-tagged XRPL transactions">
+<img src="https://img.shields.io/badge/tagged_txs-12%2C141-3E8DE3?style=flat-square" alt="12,141 SourceTag-tagged XRPL transactions">
 <!-- badges:end -->
 
 <br><br>
@@ -74,7 +74,7 @@ Short walkthroughs of each core flow (recorded July 2026 — the live app has mo
 <img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
 </div>
 
-> **Baseline: Code written before the June 21 Make Waves hackathon began** measured from `e296308` (2026-06-19, 12,077 lines) by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees and vendored third-party client code. Regenerated on every push to `main`.
+> **Baseline: Code written before the June 21 Make Waves hackathon began** measured from `e296308` (2026-06-19, 12,077 lines) by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees and vendored third-party client code. Frozen as submitted to Make Waves (2026-09-21).
 <!-- hackathon-loc:end -->
 
 <div align="center">
@@ -87,7 +87,7 @@ Short walkthroughs of each core flow (recorded July 2026 — the live app has mo
 
 **→ [How we count unique users](docs/UNIQUE_USERS.md)**: 717 signing wallets, merged to 402 independent users by activation funder, with the count under other rules.
 
-**→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it, plus a merged-PR changelog that regenerates on every merge.
+**→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it, plus a changelog of every PR merged during the sprint.
 
 ---
 

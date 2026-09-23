@@ -1,4 +1,9 @@
-name: Hackathon LoC stats
+name: README sync
+
+# Regenerates the README blocks that track the code: badge row, feature-flags
+# table and architecture diagram. The Make Waves hackathon stats (LoC bar,
+# repo-vitals dashboard, SourceTag badge) used to refresh here too; they are
+# frozen as submitted on 2026-09-21 and pinned by tests/test_hackathon_freeze.py.
 
 on:
   push:
@@ -9,30 +14,28 @@ permissions:
   contents: write
 
 concurrency:
-  group: hackathon-loc
+  group: readme-sync
   cancel-in-progress: true
 
 jobs:
-  update-loc:
+  sync:
     runs-on: ubuntu-latest
     # Skip the run triggered by this workflow's own README commit
     if: github.actor != 'github-actions[bot]'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Update README LoC block
-        run: python3 scripts/hackathon_loc.py
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
 
       - name: Demo GIF staleness report (advisory)
         # Advisory only — exits 0 unless a README-referenced GIF is missing
         # from disk. Prints a per-GIF lag table when webapp/client/ has moved
         # past the captures by more than the grace window.
         run: python3 scripts/check_demo_staleness.py
-
-      - name: Update repo-vitals dashboard
-        run: python3 -m scripts.readme_dashboard
 
       - name: Update README badge row
         run: python3 -m scripts.readme_badges
@@ -43,17 +46,16 @@ jobs:
       - name: Update architecture diagram
         run: python3 -m scripts.render_architecture_svg
 
-      - name: Update SourceTag badge
-        # metrics/sourcetag.json is pushed nightly by a separate pm2 job, not
-        # this workflow — if it's missing or malformed, that's a real problem
-        # to surface, but it must not fail this job and block the unrelated
-        # README LoC / dashboard commits below.
-        continue-on-error: true
-        run: python3 -m scripts.render_sourcetag_svg
+      - name: Hackathon freeze guard
+        # This job pushes with GITHUB_TOKEN, which triggers no other workflow,
+        # so hackathon-freeze.yml never sees its commit. Check before committing.
+        run: |
+          python -m pip install --quiet pytest PyYAML==6.0.3
+          python -m pytest --noconftest -p no:cacheprovider -q tests/test_hackathon_freeze.py
 
       - name: Commit if changed
         run: |
-          git add README.md assets/hackathon_loc.svg assets/dashboard.svg assets/sourcetag.svg assets/architecture.svg
+          git add README.md assets/architecture.svg
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -64,13 +66,13 @@ jobs:
             # off doc commits via ci.yml's paths-ignore instead; this workflow
             # won't re-trigger itself (guarded by the github-actions[bot] actor
             # check above).
-            git commit -m "docs(README): refresh hackathon LoC stats"
+            git commit -m "docs(README): sync generated blocks"
             # Rebase-and-retry: this job races every other push to main, and a
             # plain `git push` fails outright ("cannot lock ref ... is at X but
             # expected Y") whenever anything else lands first -- 7 of the last
             # 15 runs failed that way, purely from merges landing close
             # together, leaving a red X on a green branch. The regenerated
-            # stats are a pure function of the tree, so rebasing and retrying
+            # blocks are a pure function of the tree, so rebasing and retrying
             # is always safe: there is nothing to reconcile, only a newer base
             # to recompute against.
             for attempt in 1 2 3 4 5; do
@@ -78,6 +80,6 @@ jobs:
               echo "push rejected (attempt $attempt); rebasing onto the new main"
               git pull --rebase --autostash origin main || exit 1
             done
-            echo "::error::could not push refreshed stats after 5 attempts"
+            echo "::error::could not push the synced README after 5 attempts"
             exit 1
           fi

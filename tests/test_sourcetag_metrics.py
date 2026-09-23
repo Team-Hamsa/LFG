@@ -161,14 +161,6 @@ def test_validate_payload_rejects_non_whitelisted_value_shapes(tmp_path):
         stm.validate_payload(payload)
 
 
-def test_push_refuses_to_call_gh_when_validation_fails():
-    def runner(cmd, **kw):
-        raise AssertionError("must not touch the network on an invalid payload")
-
-    with pytest.raises(ValueError):
-        stm.push_to_github(_valid_payload(sneaky="x"), runner=runner)
-
-
 def test_validate_payload_rejects_missing_required_key():
     payload = _valid_payload()
     del payload["excluded"]
@@ -182,89 +174,62 @@ def test_validate_payload_rejects_malformed_as_of():
         stm.validate_payload(payload)
 
 
-def test_is_unchanged_ignores_as_of():
-    a = {"total_tagged_txs": 5, "as_of": "2026-07-22T00:00:00+00:00"}
-    b = json.dumps({"total_tagged_txs": 5, "as_of": "2026-07-23T00:00:00+00:00"}, indent=2)
-    assert stm.is_unchanged(a, b) is True
-
-    c = json.dumps({"total_tagged_txs": 6, "as_of": "2026-07-22T00:00:00+00:00"}, indent=2)
-    assert stm.is_unchanged(a, c) is False
-    assert stm.is_unchanged(a, None) is False
-
-
-def test_push_skips_when_unchanged_and_makes_no_write_call():
-    calls = []
-    payload = _valid_payload()
-    # Same payload, differing only in as_of, as the "existing remote" content.
-    remote = _valid_payload(as_of="2026-07-21T00:00:00+00:00")
-
-    def runner(cmd, **kw):
-        calls.append(cmd)
-        import subprocess as sp
-
-        if "-X" in cmd and "PUT" in cmd:
-            raise AssertionError("must not PUT when unchanged")
-        body = json.dumps(
-            {
-                "sha": "abc123",
-                "content": stm._b64(stm._serialize(remote)),
-            }
-        )
-        return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
-
-    made = stm.push_to_github(payload, runner=runner)
-    assert made is False
-    assert any("GET" in c or "contents" in " ".join(c) for c in calls)
-
-
-def test_push_puts_with_existing_sha_when_changed():
-    seen = {}
-    remote = _valid_payload(total_tagged_txs=1)
-
-    def runner(cmd, **kw):
-        import subprocess as sp
-
-        if "PUT" in cmd:
-            seen["put"] = cmd
-            seen["input"] = kw.get("input")
-            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-        body = json.dumps(
-            {
-                "sha": "abc123",
-                "content": stm._b64(stm._serialize(remote)),
-            }
-        )
-        return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
-
-    made = stm.push_to_github(_valid_payload(total_tagged_txs=99), runner=runner)
-    assert made is True
-    assert "abc123" in seen["input"]
-    assert "main" in seen["input"]
-
-
-def test_push_creates_file_when_absent_remotely():
-    seen = {}
-
-    def runner(cmd, **kw):
-        import subprocess as sp
-
-        if "PUT" in cmd:
-            seen["input"] = kw.get("input")
-            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-        # gh exits non-zero on 404
-        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
-
-    made = stm.push_to_github(_valid_payload(total_tagged_txs=1), runner=runner)
-    assert made is True
-    assert '"sha"' not in seen["input"]
-
-
 def test_out_writes_file(tmp_path):
     path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    dest = tmp_path / "metrics" / "sourcetag.json"
+    dest = tmp_path / "snapshots" / "sourcetag.json"
     rc = stm.main(["--network", "testnet", "--db", path, "--out", str(dest)])
     assert rc == 0
     assert json.loads(dest.read_text())["total_tagged_txs"] == 1
+
+
+def test_push_flag_is_retired():
+    """Make Waves closed 2026-09-21 and metrics/sourcetag.json is frozen as
+    submitted. `--push` committed straight to main past every gate, so it is
+    gone, and a stale pm2 entry still passing it fails loudly instead."""
+    with pytest.raises(SystemExit) as exc:
+        stm.main(["--network", "testnet", "--push"])
+    assert exc.value.code == 2
+    assert not hasattr(stm, "push_to_github")
+
+
+def test_no_out_prints_without_touching_the_frozen_snapshot(tmp_path, monkeypatch, capsys):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    fake_cwd = tmp_path / "checkout"
+    fake_cwd.mkdir()
+    monkeypatch.chdir(fake_cwd)
+    rc = stm.main(["--network", "testnet", "--db", path, "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["total_tagged_txs"] == 1
+    assert list(fake_cwd.iterdir()) == []
+
+
+def test_out_refuses_to_write_a_payload_that_fails_validation(tmp_path, monkeypatch, capsys):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    dest = tmp_path / "out.json"
+
+    def reject(payload):
+        raise ValueError("unexpected key(s) in payload: ['sneaky']")
+
+    monkeypatch.setattr(stm, "validate_payload", reject)
+    rc = stm.main(["--network", "testnet", "--db", path, "--out", str(dest)])
+    assert rc == 2
+    assert not dest.exists()
+    assert "sneaky" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dest", ["metrics/sourcetag.json", "checkout/metrics/sourcetag.json"])
+def test_out_refuses_the_frozen_snapshot_path(tmp_path, monkeypatch, capsys, dest):
+    """metrics/sourcetag.json is frozen as submitted to Make Waves. Refuse it
+    in any checkout (worktrees included) before writing, not after."""
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    monkeypatch.chdir(tmp_path)
+    frozen = tmp_path / dest
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("frozen\n")
+    rc = stm.main(["--network", "testnet", "--db", path, "--out", dest])
+    assert rc == 2
+    assert frozen.read_text() == "frozen\n"
+    assert "frozen" in capsys.readouterr().err
 
 
 def test_missing_db_exits_nonzero_without_writing(tmp_path):
@@ -272,71 +237,6 @@ def test_missing_db_exits_nonzero_without_writing(tmp_path):
     rc = stm.main(["--network", "testnet", "--db", str(tmp_path / "nope.db"), "--out", str(dest)])
     assert rc != 0
     assert not dest.exists()
-
-
-def test_push_with_no_explicit_out_never_writes_default_path(tmp_path, monkeypatch):
-    """--push with no --out must never touch metrics/sourcetag.json under CWD —
-    that's the tracked-file-in-a-deployer-watched-checkout footgun (finding 1)."""
-    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    fake_cwd = tmp_path / "checkout"
-    fake_cwd.mkdir()
-    monkeypatch.chdir(fake_cwd)
-
-    def runner(cmd, **kw):
-        import subprocess as sp
-
-        if "PUT" in cmd:
-            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
-
-    monkeypatch.setattr(stm.subprocess, "run", runner)
-    rc = stm.main(["--network", "testnet", "--db", path, "--push"])
-    assert rc == 0
-    assert not (fake_cwd / "metrics" / "sourcetag.json").exists()
-    assert not stm.DEFAULT_OUT.exists()
-
-
-def test_push_without_out_still_prints_payload_when_json_flag_set(tmp_path, monkeypatch, capsys):
-    """--json --push with no --out must still print the payload (the --json
-    contract holds even when the local write is skipped)."""
-    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    fake_cwd = tmp_path / "checkout"
-    fake_cwd.mkdir()
-    monkeypatch.chdir(fake_cwd)
-
-    def runner(cmd, **kw):
-        import subprocess as sp
-
-        if "PUT" in cmd:
-            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
-
-    monkeypatch.setattr(stm.subprocess, "run", runner)
-    rc = stm.main(["--network", "testnet", "--db", path, "--push", "--json"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    # The push-status line ("pushed to main") follows the JSON on stdout, same
-    # as the local-write --json path — parse the leading JSON document only.
-    payload_out, _end = json.JSONDecoder().raw_decode(out)
-    assert payload_out["total_tagged_txs"] == 1
-    assert not (fake_cwd / "metrics" / "sourcetag.json").exists()
-
-
-def test_push_with_explicit_out_still_writes_locally(tmp_path, monkeypatch):
-    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    dest = tmp_path / "explicit" / "sourcetag.json"
-
-    def runner(cmd, **kw):
-        import subprocess as sp
-
-        if "PUT" in cmd:
-            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
-
-    monkeypatch.setattr(stm.subprocess, "run", runner)
-    rc = stm.main(["--network", "testnet", "--db", path, "--push", "--out", str(dest)])
-    assert rc == 0
-    assert dest.exists()
 
 
 def test_validate_payload_rejects_trailing_newline_via_dollar_sign():
@@ -434,30 +334,6 @@ def test_collect_commits_transaction_so_connection_is_reusable(tmp_path):
 
     second = stm.collect(path, "testnet")
     assert second["total_tagged_txs"] == 2
-
-
-def test_push_wraps_missing_gh_executable_with_diagnostic_message(tmp_path, monkeypatch, capsys):
-    """If `gh` isn't on PATH, subprocess.run raises FileNotFoundError (an
-    OSError) before push_to_github's own RuntimeError wrapping ever runs.
-    main() must catch that too, exit 1, and print something more useful than
-    the bare filename.
-
-    A monkeypatched fake runner can't reproduce this: push_to_github's
-    `runner: Any = subprocess.run` default is bound to the real function
-    object at def-time, so patching `stm.subprocess.run` (or the real
-    `subprocess.run`) afterwards doesn't change what the already-bound
-    default calls. So this test empties PATH, making the real
-    `subprocess.run(["gh", ...])` genuinely unable to find the executable —
-    the same failure mode the pm2 daemon hits when `gh` is missing.
-    """
-    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    monkeypatch.setenv("PATH", str(tmp_path))  # a dir with no `gh` in it
-
-    rc = stm.main(["--network", "testnet", "--db", path, "--push"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "gh" in err
-    assert len(err.strip()) > len("[Errno 2] No such file or directory: 'gh'")
 
 
 # ---------------------------------------------------------------------------

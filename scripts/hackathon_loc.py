@@ -4,9 +4,11 @@ Compares the pinned pre-hackathon baseline commit against HEAD, counting
 only code — Python, JS, CSS, HTML — and excluding docs, data
 files (CSV/JSON manifests), dependency/config files, and the legacy/backup
 trees. Writes a brand-kit SVG bar (assets/hackathon_loc.svg) plus a stats
-table between the README markers. Run by
-.github/workflows/hackathon-loc.yml on every push to main; safe to run
-locally from the repo root.
+table between the README markers.
+
+Retired from CI when Make Waves closed (2026-09-21): its output is frozen as
+submitted and pinned by tests/test_hackathon_freeze.py, so running it now
+only shows how far the repo has moved since.
 """
 
 from __future__ import annotations
@@ -152,7 +154,8 @@ def build_block(base: int) -> str:
             f"measured from `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
             f"by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
             f"data files (CSV/JSON manifests), dependency lists, and the "
-            f"legacy/backup trees and vendored third-party client code. Regenerated on every push to `main`.",
+            f"legacy/backup trees and vendored third-party client code. "
+            f"Frozen as submitted to Make Waves (2026-09-21).",
             END_MARK,
         ]
     )

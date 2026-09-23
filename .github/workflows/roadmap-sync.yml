@@ -29,10 +29,21 @@ jobs:
         with:
           ref: main
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
       - name: Sync roadmap block from roadmap-labelled issues
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.readme_roadmap
+
+      - name: Hackathon freeze guard
+        # This job pushes with GITHUB_TOKEN, which triggers no other workflow,
+        # so hackathon-freeze.yml never sees its commit. Check before committing.
+        run: |
+          python -m pip install --quiet pytest PyYAML==6.0.3
+          python -m pytest --noconftest -p no:cacheprovider -q tests/test_hackathon_freeze.py
 
       - name: Commit if changed
         run: |
@@ -40,7 +51,7 @@ jobs:
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            # No `[skip ci]` — see hackathon-loc.yml for why (it silently
+            # No `[skip ci]` — see readme-sync.yml for why (it silently
             # no-op'd Pages deploys on promote). ci.yml ignores README-only
             # commits via paths-ignore, and none of this workflow's triggers
             # fire on push, so it cannot retrigger itself.

@@ -7,10 +7,11 @@ month, newest first. This script regenerates that block from the live PR
 state (fetched with the `gh` CLI, so a token must be available — GH_TOKEN in
 Actions) so the build log can never silently fall behind the repo again.
 
-Run by .github/workflows/build-log-sync.yml whenever a PR merges into main,
-on a daily schedule, and on manual dispatch; safe to run locally from the
-repo root and idempotent (the file is only rewritten when the generated
-block changes). Mirrors scripts/readme_roadmap.py.
+Make Waves closed 2026-09-21 and the changelog is frozen as submitted: the
+workflow that ran this on every merge is gone, and PRs merged after FREEZE_AT
+are left out, so a manual run reproduces the frozen block instead of growing
+it. Safe to run locally from the repo root and idempotent (the file is only
+rewritten when the generated block changes). Mirrors scripts/readme_roadmap.py.
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ REPO = "Team-Hamsa/LFG"
 PR_URL = f"https://github.com/{REPO}/pull"
 # Hackathon sprint start — anything merged earlier is pre-sprint and left out.
 SINCE = "2026-06-21"
+# The repo state submitted to Make Waves (commit 48656477). Anything merged
+# later is post-hackathon and left out. Same Z-suffixed ISO form as gh's
+# mergedAt, so the two compare as strings.
+FREEZE_AT = "2026-09-21T08:17:35Z"
 
 
 def fetch_merged_prs() -> list[dict[str, Any]]:
@@ -99,7 +104,13 @@ def bullet(pr: dict[str, Any]) -> str:
 
 def render(prs: list[dict[str, Any]], since: str = SINCE) -> list[str]:
     """The generated block body: per-month headings, newest month and PR first."""
-    merged = [p for p in prs if p.get("mergedAt") and str(p["mergedAt"])[:10] >= since]
+    merged = [
+        p
+        for p in prs
+        if p.get("mergedAt")
+        and str(p["mergedAt"])[:10] >= since
+        and str(p["mergedAt"]) <= FREEZE_AT
+    ]
     by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for pr in merged:
         by_month[str(pr["mergedAt"])[:7]].append(pr)
@@ -107,7 +118,7 @@ def render(prs: list[dict[str, Any]], since: str = SINCE) -> list[str]:
     total = len(merged)
     lines = [
         f"_{total} pull requests merged since {since}. "
-        "Regenerated automatically on every merge — see `scripts/build_log_sync.py`._"
+        "Frozen as submitted (2026-09-21) — see `scripts/build_log_sync.py`._"
     ]
     for month in sorted(by_month, reverse=True):
         items = sorted(

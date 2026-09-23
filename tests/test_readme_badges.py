@@ -23,12 +23,6 @@ def test_build_badges_includes_dynamic_entries() -> None:
     assert len(lines) == len(readme_badges.STATIC_BADGES) + 5
 
 
-def test_build_badges_omits_tagged_txs_when_metrics_absent() -> None:
-    lines = readme_badges.build_badges(10, "2606160021", None)
-    assert not any("tagged_txs" in line for line in lines)
-    assert len(lines) == len(readme_badges.STATIC_BADGES) + 4
-
-
 def test_replace_block_is_idempotent() -> None:
     readme = "\n".join(
         [
@@ -53,47 +47,34 @@ def test_replace_block_requires_markers() -> None:
         readme_badges.replace_block("no markers here", ["<img>"])
 
 
-def test_tagged_tx_total_absent_file_omits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(readme_badges, "METRICS_PATH", tmp_path / "missing.json")
-    assert readme_badges.tagged_tx_total() is None
-
-
-def test_tagged_tx_total_malformed_file_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bad = tmp_path / "sourcetag.json"
-    bad.write_text("{not json")
-    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
-    with pytest.raises(SystemExit):
-        readme_badges.tagged_tx_total()
-
-
-def test_tagged_tx_total_non_integer_total_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bad = tmp_path / "sourcetag.json"
-    bad.write_text('{"total_tagged_txs": "1961"}')
-    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
-    with pytest.raises(SystemExit):
-        readme_badges.tagged_tx_total()
-
-
-def test_tagged_tx_total_boolean_total_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # JSON true/false parse as Python bools, which are ints — must be rejected
-    bad = tmp_path / "sourcetag.json"
-    bad.write_text('{"total_tagged_txs": true}')
-    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
-    with pytest.raises(SystemExit):
-        readme_badges.tagged_tx_total()
-
-
 def test_replace_block_handles_backslashes_in_content() -> None:
     # re.sub replacement escaping must not mangle literal backslashes/groups
     readme = f"{readme_badges.START_MARK}\nx\n{readme_badges.END_MARK}"
     out = readme_badges.replace_block(readme, [r"a\1\g<0>b"])
     assert r"a\1\g<0>b" in out
+
+
+def test_main_writes_the_frozen_hackathon_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tests / tagged_txs are frozen as submitted, whatever the live counts are.
+
+    Runs from an empty directory with no git repo and no metrics snapshot, so
+    any live counting would fail or drop the badge.
+    """
+    config_path = readme_badges.CONFIG_PATH.resolve()
+    readme = tmp_path / "README.md"
+    readme.write_text(f"{readme_badges.START_MARK}\nstale\n{readme_badges.END_MARK}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(readme_badges, "README_PATH", readme)
+    monkeypatch.setattr(readme_badges, "CONFIG_PATH", config_path)
+
+    assert readme_badges.main() == 0
+    text = readme.read_text()
+    assert "tests-5%2C397" in text
+    assert "tagged_txs-12%2C141" in text
+    assert readme_badges.FROZEN_TESTS == 5397
+    assert readme_badges.FROZEN_TAGGED_TXS == 12141
 
 
 def test_repo_readme_carries_markers() -> None:
