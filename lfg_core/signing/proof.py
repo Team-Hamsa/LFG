@@ -25,6 +25,7 @@ from xrpl.utils import str_to_hex
 
 from lfg_core import config, memos
 from lfg_core.signing import provenance
+from lfg_core.signing.key_authority import KeyAuthority
 
 NONCE_MEMO_TYPE = "lfg/nonce"
 SIGNIN_TTL = 300
@@ -157,6 +158,26 @@ def _nonce_from(memos_list: Any) -> str | None:
     return None
 
 
+def signing_key_address(tx_json: dict[str, Any]) -> str:
+    """The classic address of the key that signed a proof `verify_proof` accepted:
+    the account itself for its master key, otherwise its RegularKey."""
+    return derive_classic_address(str(tx_json["SigningPubKey"]).upper())
+
+
+def _check_signing_key(signer: str, account: str, authority: KeyAuthority | None) -> None:
+    """Agent users spec §2. `authority` None is the master-key-only rule."""
+    if signer == account:
+        if authority is not None and authority.lookup_ok and authority.master_disabled:
+            raise ProofError("master_disabled")
+        return
+    if authority is None:
+        raise ProofError("pubkey_account")
+    if not authority.lookup_ok:
+        raise ProofError("regular_key_unverified")
+    if signer != authority.regular_key:
+        raise ProofError("pubkey_account")
+
+
 def verify_proof(
     tx_json: Any,
     *,
@@ -164,8 +185,13 @@ def verify_proof(
     nonce: str,
     action: str,
     max_last_ledger: int | None = None,
+    authority: KeyAuthority | None = None,
 ) -> str:
-    """Return the classic address proven by `tx_json`, or raise `ProofError`."""
+    """Return the classic address proven by `tx_json`, or raise `ProofError`.
+
+    `authority` is the account's keys as the validated ledger reports them
+    (`xrpl_ops.key_authority`). Without it only the master key proves ownership.
+    """
     if not isinstance(tx_json, dict):
         raise ProofError("shape")
     if action not in _PROOF_ACTIONS:
@@ -255,8 +281,7 @@ def verify_proof(
         derived = derive_classic_address(pub)
     except Exception as e:  # malformed pubkey
         raise ProofError("pubkey") from e
-    if derived != account:
-        raise ProofError("pubkey_account")
+    _check_signing_key(derived, account, authority)
     if wallet_hint is not None and wallet_hint != account:
         raise ProofError("wallet_hint")
 
