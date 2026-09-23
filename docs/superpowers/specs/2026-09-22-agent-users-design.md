@@ -213,9 +213,10 @@ counts come from one read even while the listener writes. The handler reports
 `n_live = len(table)` (tokens with zero parsed pairs included, as the board
 counts them) and `counts` from `freq`.
 
-Values are as stored, with no normalization, including quirks such as the 988
-characters that store `Accessory` as `''`. A player optimizing against this
-endpoint sees exactly what the board scores. Network: `config.XRPL_NETWORK`.
+Values are the board's parsing, with no further normalization, including
+quirks such as the live characters that store an empty `Accessory` as `''`.
+A player optimizing against this endpoint sees exactly what the board scores.
+Network: `config.XRPL_NETWORK`.
 
 ## Testing
 
@@ -278,7 +279,14 @@ endpoint sees exactly what the board scores. Network: `config.XRPL_NETWORK`.
 1. **Wait for the fly's Phase 0 verdict** (operator decision). If the fly is
    shelved, the operator decides separately whether this PR is worth shipping
    on its own merits (RegularKey sign-in and revocation help any user).
-2. PR to `main`, reviewed by both bots; staging deploys through the deployer.
+2. **Three PRs** to `main` (operator decision, 2026-09-23), each reviewed by
+   both bots; staging deploys through the deployer:
+   - **A** `GET /api/rarity/supply` (§3);
+   - **B** RegularKey-aware proofs and revocation (§2);
+   - **C** the `agent` provider, client-signed dispatch and `platform=agent`
+     memos (§1).
+
+   The fly needs all three before its testnet rehearsal.
 3. Staging: set `AGENT_SIGNIN_ENABLED=1` in `~/LFG-staging/.env`, then
    `pm2 restart stg-activity --update-env`. An `.env`-only change moves no
    branch, so the deployer never restarts anything, and the flag is read at
@@ -297,3 +305,109 @@ endpoint sees exactly what the board scores. Network: `config.XRPL_NETWORK`.
 - Any agent-specific endpoint, privilege, allowlist or rate tier: agents are
   users.
 - Swap-chooser previews (separate task) and Builder pricing (operator's v2).
+
+## Amendment 1 (2026-09-23): verified against `main` at `0415a63a`
+
+Three code sweeps checked every reference above against current `main`. Facts
+the spec had wrong are corrected here; the **decisions** are marked, and the
+plans in `docs/superpowers/plans/2026-09-23-agent-users-{a,b,c}-*.md` follow
+this section wherever it and the text above disagree.
+
+### A (`/api/rarity/supply`)
+- `_nft_rarity` has no cache of its own; the 60 s caches live in
+  `lfg_service/app.py`. The endpoint gets its own per-network cache.
+- `json.loads` of an `attributes_json` of `null` raises `TypeError` in the
+  board today (only `ValueError` is caught). `live_trait_table` skips any
+  value that doesn't parse to a list, for the board and the endpoint alike.
+- CLAUDE.md has no endpoint list; the endpoint is documented next to the
+  `/api/leaderboard` API bullet.
+
+### B (RegularKey proofs and revocation)
+- `verify_proof` gains `authority: KeyAuthority | None = None`. `None` keeps
+  today's master-key-only rule, so every existing caller and test is
+  unchanged. No `KeyAuthority`, `RegularKey` or `lsfDisableMaster` handling
+  exists yet; `lsfDisableMaster` is read from `account_flags.disableMasterKey`
+  first, then the `Flags` bit `0x00100000`, as `disallows_incoming_nft_offers`
+  does for its flag.
+- `account_info` "not found" (`actNotFound`) counts as a successful lookup of
+  an account with no RegularKey and master enabled.
+- Today every `ProofError` is a 400 `bad_proof`. `regular_key_unverified`
+  becomes a **503** `{"code": "regular_key_unverified"}` (retryable); every
+  other refusal, `master_disabled` included, stays a 400 `bad_proof` with
+  the reason logged.
+- `_redeem_proof` is shared by sign-in and wallet linking, so the key rule
+  covers both (as §2 intends). The link flow's `on_verified` still runs only
+  after the key check.
+- `_finish_web_signin(wallet, provider, key_info=None)`: the new parameter is
+  optional (tests call it with two positional arguments).
+- **Decision: the revocation check lives in `require_auth`, not
+  `require_wallet`.** A check in `require_wallet` would miss every
+  `require_auth`-only endpoint (`/api/me`, status, cancel, regenerate, bulk
+  unit accept). `require_auth` wraps all of them. Dev mode keeps bypassing it.
+- **Decision: the revocation cache is seeded at sign-in, and a lookup error
+  with no cached answer is a 503 `key_unverified`.** "There is always a cached
+  answer" holds only within one process; after a restart the cache is empty.
+  Failing closed here matches sign-in's own `regular_key_unverified` rule.
+- Revoking uses the existing `revoke_session_token(token)`, which needs the
+  raw token; `require_auth` has it from the `Authorization` header.
+
+### C (`agent` provider, dispatch, memos)
+- The start response already carries `expires_at` and `provider`; the agent
+  arm returns the walletconnect arm's shape with `provider: "agent"`.
+- `_redeem_proof` returns only the wallet today, and `handle_web_signin_proof`
+  hard-codes `"walletconnect"`. `_redeem_proof` returns the row's provider (and
+  B's signer) so the handler labels the token from the row. Wallet-link rows
+  have no provider and keep verifying against `webapp` memos.
+- `sign_requests.create` gains `provider=None`; the column migrates with this
+  table's existing try/except "duplicate column name" pattern (`store.py`).
+- **Decision: wallet linking gets no agent arm** (out of scope). An agent
+  proves one wallet; its link start stays gated on `wc_enabled()`.
+- An unknown `provider` still falls through to the Xaman arm, as today.
+- Agent rows reuse `WalletConnectProvider` for dispatch; `get_provider` has no
+  `"agent"` entry and needs none. Only two `current_provider() == "walletconnect"`
+  checks exist (the two Closet Market refusals); every other `"walletconnect"`
+  literal (the sign-in and link arms, `/api/config`, the registry name,
+  `sign_mode`, the client's Joey restore) stays as it is. The refusal copy
+  "need Xaman for now" becomes provider-neutral.
+- **Provider source.** No session or job object has a `provider`. **Decision:
+  every memo site reads it from `signing_context.current_provider()`**, which
+  `require_auth` sets for the request and every task it spawns, through a new
+  `memos.platform_for(surface_platform)` helper (`PLATFORM_AGENT` when the
+  current provider is `agent`, otherwise today's value). No signatures change.
+- The 30 call sites: counts are right, but none pre-builds `memos_json`, and
+  **10 are backend-signed** (`mint_nft`, `create_nft_offer`/`ensure_offer`,
+  `modify_nft`, `burn_nft`, `prepare_sponsored_mint`, the shop's `mint_fn`
+  and `offer_fn`). They already stamp the surface platform (e.g. `webapp`),
+  so they switch the same way. The sponsored `NFTokenMint` gets relabelled
+  too; its recovery is by hash, not by memo.
+- Backend-signed economy ops: `modify_nft`, `mint_nft`, `burn_nft`,
+  `create_nft_offer` and `create_accept_offer_payload` already accept
+  `platform=`; only `build_economy_deps` never passes it. It gains
+  `platform=`, threaded to **every** op it builds (character and Closet
+  modifies, Closet/character/trait mints and burns, the offer and accept
+  functions), from `_schedule`, `start_closet` (which bypasses `_schedule`)
+  and batch harvest. `_accept_or_skip` builds *user-signed* accept payloads
+  that default to `backend`; an agent session labels them `agent`, humans
+  keep `backend`.
+- **Settlement sweeps** (`build_settlement_deps`) aren't session-initiated and
+  keep `backend`.
+- BRIX claims: `send_brix_claim` gains `platform=memos.PLATFORM_BACKEND`;
+  `_claim_one_wallet` gains `platform=`, and both `handle_brix_claim` and the
+  claim-all task (`_run_brix_claim_all`) pass the session's value. Test stubs
+  with the fixed signature are updated.
+- **Persistence (corrected).** Only bulk-mint jobs and burn2mint sessions
+  persist and resume; mint, swap, market and economy sessions are in memory.
+  **Decision:** those two persist the session's `provider` and wallet, and
+  their resume path restores `signing_context` from them. Today a resumed job
+  runs with the default context (Xaman), so a Joey user's resumed bulk mint
+  already dispatches to Xaman; this fixes that too.
+- Discovery contract, per flow (field that carries `lfg-wc://<id>`):
+  - mint payment `payment_link`, mint delivery accept `accept_deeplink`;
+  - bulk-mint payment `payment_link`, bulk unit accept `link`;
+  - pending-offer accept `link`;
+  - `POST /api/closet` accept `accept` (only while an offer is pending);
+  - harvest delivery accept `accept` on `GET /api/harvest/{id}` (legacy,
+    non-mutable characters only; a mutable harvest has no accept);
+  - BRIX trustline `uuid` and `xumm_url`.
+
+  Every id is `wc-`-prefixed, so the contract is `lfg-wc://wc-…`.
