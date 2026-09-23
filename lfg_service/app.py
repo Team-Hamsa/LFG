@@ -896,7 +896,7 @@ async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Respo
             status=503,
         )
     if not still:
-        revoke_session_token(token)
+        await asyncio.to_thread(revoke_session_token, token)
         return web.json_response(
             {"error": "signing key revoked", "code": "key_revoked"}, status=401
         )
