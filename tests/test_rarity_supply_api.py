@@ -164,3 +164,20 @@ def test_concurrent_cache_misses_share_one_scan(supply_env, monkeypatch):
     assert len(calls) == 1
     assert {r.status for r in responses} == {200}
     assert len({r.body for r in responses}) == 1
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_the_cache_is_stamped_when_the_scan_finishes(supply_env, monkeypatch):
+    finished = []
+    real = server._compute_trait_supply
+
+    def slow(network):
+        time.sleep(0.05)
+        payload = real(network)
+        finished.append(time.monotonic())
+        return payload
+
+    monkeypatch.setattr(server, "_compute_trait_supply", slow)
+    _get()
+    # stamped after the scan: a slow scan must not store an already-aged entry
+    assert server._SUPPLY_CACHE["testnet"][0] >= finished[0]

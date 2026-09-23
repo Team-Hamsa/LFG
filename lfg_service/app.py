@@ -2667,6 +2667,9 @@ async def handle_rarity_supply(request: web.Request) -> web.Response:
         payload = await asyncio.get_event_loop().run_in_executor(
             None, _compute_trait_supply, network
         )
+        # Stamp when the scan FINISHED: a slow scan must not store an entry that
+        # is already partly (or, past the TTL, wholly) expired.
+        now_mono = time.monotonic()
         for k in [k for k, (ts, _) in _SUPPLY_CACHE.items() if now_mono - ts >= _SUPPLY_CACHE_TTL]:
             del _SUPPLY_CACHE[k]
         _SUPPLY_CACHE[network] = (now_mono, payload)
