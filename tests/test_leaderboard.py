@@ -817,3 +817,24 @@ def test_live_trait_table_skips_unreadable_and_non_list_attributes():
         "nft_rarity", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
     )
     assert [r["nft_id"] for r in rows] == ["N4"]
+
+
+def test_live_trait_table_counts_each_pair_once_per_token():
+    _, o = _dbs()
+    _live(
+        o,
+        [
+            # the same pair listed twice in one token's metadata
+            (
+                "N1",
+                1,
+                "rA",
+                0,
+                '[{"trait_type": "Hat", "value": "Cap"}, {"trait_type": "Hat", "value": "Cap"}]',
+            ),
+            ("N2", 2, "rB", 0, '[{"trait_type": "Hat", "value": "Cap"}]'),
+        ],
+    )
+    table, freq = leaderboard.live_trait_table(o)
+    assert table["N1"] == (1, [("Hat", "Cap")])
+    assert freq == Counter({("Hat", "Cap"): 2})  # two tokens carry it, not three entries

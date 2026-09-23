@@ -4,6 +4,7 @@ cache, and parity with the nft_rarity board."""
 import asyncio
 import json
 import sqlite3
+import time
 
 import pytest
 from aiohttp import web
@@ -60,8 +61,10 @@ def supply_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ONCHAIN_DB_PATH", path)
     monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
     server._SUPPLY_CACHE.clear()
+    server._SUPPLY_LOCKS.clear()
     yield path
     server._SUPPLY_CACHE.clear()
+    server._SUPPLY_LOCKS.clear()
 
 
 def _get():
@@ -128,3 +131,36 @@ def test_supply_counts_reproduce_the_nft_rarity_board(supply_env):
         expected = round(sum(n_live / body["counts"][tt][v] for tt, v in pairs), 2)
         assert row["value"] == expected
     assert {r["nft_id"] for r in board} == {"N1", "N2", "N3"}
+
+
+def test_supply_route_is_registered():
+    routes = {
+        (r.method, getattr(r.resource, "canonical", "")): r.handler
+        for r in server.create_app().router.routes()
+    }
+    assert routes[("GET", "/api/rarity/supply")] is server.handle_rarity_supply
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_concurrent_cache_misses_share_one_scan(supply_env, monkeypatch):
+    calls = []
+    real = server._compute_trait_supply
+
+    def slow(network):
+        calls.append(network)
+        time.sleep(0.05)  # long enough for every request to arrive while it runs
+        return real(network)
+
+    monkeypatch.setattr(server, "_compute_trait_supply", slow)
+
+    async def burst():
+        reqs = [
+            make_mocked_request("GET", "/api/rarity/supply", app=web.Application())
+            for _ in range(5)
+        ]
+        return await asyncio.gather(*(server.handle_rarity_supply(r) for r in reqs))
+
+    responses = asyncio.get_event_loop().run_until_complete(burst())
+    assert len(calls) == 1
+    assert {r.status for r in responses} == {200}
+    assert len({r.body for r in responses}) == 1

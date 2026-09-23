@@ -554,11 +554,13 @@ def live_trait_table(
     """Every live collection token's trait pairs, and how many live tokens carry
     each (trait_type, value), from ONE read of `onchain_nfts`.
 
-    Shared by the `nft_rarity` board and GET /api/rarity/supply, so the counts a
-    player reads are exactly the ones the board scores, never two reads the
-    listener wrote between. Values are the board's parsing: `str()` of each JSON
-    value, so a missing value reads "None" and an empty Accessory stays "". A
-    live token whose attributes parse to no pairs still counts toward the table;
+    Shared by the `nft_rarity` board and GET /api/rarity/supply, so both parse
+    and count the same way, and each computation's scores and counts come from
+    one read, never two the listener wrote between. Values are the board's
+    parsing: `str()` of each JSON
+    value, so a missing value reads "None" and an empty Accessory stays "", and a
+    pair a token lists twice counts once. A live token whose attributes parse to
+    no pairs still counts toward the table;
     one whose JSON is unreadable, or isn't a list, is skipped.
     """
     rows = oconn.execute(
@@ -574,11 +576,14 @@ def live_trait_table(
             continue
         if not isinstance(attrs, list):
             continue
-        pairs = [
-            (str(t.get("trait_type")), str(t.get("value")))
-            for t in attrs
-            if isinstance(t, dict) and t.get("trait_type") is not None
-        ]
+        # dict.fromkeys: a pair metadata lists twice still counts once per token
+        pairs = list(
+            dict.fromkeys(
+                (str(t.get("trait_type")), str(t.get("value")))
+                for t in attrs
+                if isinstance(t, dict) and t.get("trait_type") is not None
+            )
+        )
         table[r["nft_id"]] = (r["nft_number"], pairs)
         freq.update(pairs)
     return table, freq
