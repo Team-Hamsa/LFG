@@ -827,6 +827,12 @@ chain on every request.
   cached full row set post-cache so passing it never invalidates the cache.
   Full result sets (up to rank 500) are cached for 60s keyed on
   `(network, board, period, start)`.
+- **Live trait supply:** `GET /api/rarity/supply` — public, no auth, cached 60s
+  per network. Returns `{network, as_of, n_live, counts: {trait_type: {value:
+  count}}}` over live collection tokens, from `leaderboard.live_trait_table`,
+  the same single read the `nft_rarity` board scores. Values are as the index
+  stores them (e.g. an empty Accessory is `""`); `n_live` includes live tokens
+  with no parsed traits.
 - **Conservation audit:** `scripts/audit_history.py --network <net>` cross-checks
   `nft_events` mint/burn counts (COUNT DISTINCT `nft_id`, tolerating
   re-derivation overlap) against the live-token count in the on-chain index —
