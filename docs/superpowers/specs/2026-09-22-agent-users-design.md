@@ -383,17 +383,21 @@ this section wherever it and the text above disagree.
 - Backend-signed economy ops: `modify_nft`, `mint_nft`, `burn_nft`,
   `create_nft_offer` and `create_accept_offer_payload` already accept
   `platform=`; only `build_economy_deps` never passes it. It gains
-  `platform=`, threaded to **every** op it builds (character and Closet
-  modifies, Closet/character/trait mints and burns, the offer and accept
-  functions), from `_schedule`, `start_closet` (which bypasses `_schedule`)
-  and batch harvest. `_accept_or_skip` builds *user-signed* accept payloads
+  `platform=None` (None = `memos.backend_platform()`, read from the signing
+  context when the deps are built, i.e. inside the request that starts the
+  session), passed to **every** op it builds (character and Closet modifies,
+  Closet/character/trait mints and burns, the offer and accept functions).
+  So `_schedule`, `start_closet` (which bypasses `_schedule`) and batch harvest
+  need no change. `_accept_or_skip` builds *user-signed* accept payloads
   that default to `backend`; an agent session labels them `agent`, humans
   keep `backend`.
-- **Settlement sweeps** (`build_settlement_deps`) aren't session-initiated and
-  keep `backend`.
-- BRIX claims: `send_brix_claim` gains `platform=memos.PLATFORM_BACKEND`;
-  `_claim_one_wallet` gains `platform=`, and both `handle_brix_claim` and the
-  claim-all task (`_run_brix_claim_all`) pass the session's value. Test stubs
+- **Settlement** (`build_settlement_deps`) isn't session-initiated and keeps
+  `backend`, pinned explicitly: it also runs inside a buyer's buy-status
+  request, where the context would otherwise say `agent`.
+- BRIX claims: `send_brix_claim` gains `platform=memos.PLATFORM_BACKEND`, and
+  `_claim_one_wallet` passes `memos.backend_platform()`. It runs inside the
+  request (`handle_brix_claim`) or inside the claim-all task, which inherited
+  the request's context, so both paths get the session's value. Test stubs
   with the fixed signature are updated.
 - **Persistence (corrected).** Only bulk-mint jobs and burn2mint sessions
   persist and resume; mint, swap, market and economy sessions are in memory.
