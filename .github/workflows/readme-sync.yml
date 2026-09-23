@@ -27,6 +27,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
       - name: Demo GIF staleness report (advisory)
         # Advisory only — exits 0 unless a README-referenced GIF is missing
         # from disk. Prints a per-GIF lag table when webapp/client/ has moved
@@ -41,6 +45,13 @@ jobs:
 
       - name: Update architecture diagram
         run: python3 -m scripts.render_architecture_svg
+
+      - name: Hackathon freeze guard
+        # This job pushes with GITHUB_TOKEN, which triggers no other workflow,
+        # so hackathon-freeze.yml never sees its commit. Check before committing.
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest --noconftest -p no:cacheprovider -q tests/test_hackathon_freeze.py
 
       - name: Commit if changed
         run: |

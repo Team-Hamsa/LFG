@@ -1,0 +1,32 @@
+name: Hackathon freeze guard
+
+# The Make Waves stats are frozen as submitted (2026-09-21). ci.yml skips
+# README.md and assets/** on push, so this runs the freeze test on EVERY push
+# to main, a web edit included. Commits pushed with GITHUB_TOKEN trigger no
+# workflow at all, so readme-sync.yml and roadmap-sync.yml also run the same
+# test before they commit.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Freeze guard
+        # --noconftest: the root conftest pins the whole app env; this test
+        # needs only the stdlib and pytest.
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest --noconftest -p no:cacheprovider -q tests/test_hackathon_freeze.py

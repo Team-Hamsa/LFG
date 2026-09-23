@@ -10,8 +10,9 @@ on:
     # a LoC-bot commit), that silently killed the Pages deploy on every promote.
     # paths-ignore scopes the skip to CI only, leaving pages.yml free to fire.
     # metrics/** and docs/HACKATHON.md are NOT ignored any more: their bots
-    # were retired when the Make Waves stats froze (2026-09-21), and a push
-    # that touches them should run tests/test_hackathon_freeze.py.
+    # were retired when the Make Waves stats froze (2026-09-21). The frozen
+    # files under README.md and assets/** are still checked on every push, by
+    # hackathon-freeze.yml.
     paths-ignore:
       - 'README.md'
       - 'assets/**'

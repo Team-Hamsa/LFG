@@ -109,3 +109,29 @@ def test_no_workflow_or_pm2_app_runs_a_retired_generator() -> None:
         if name in path.read_text()
     ]
     assert offenders == []
+
+
+def test_every_workflow_that_pushes_to_main_runs_the_guard_first() -> None:
+    # A commit pushed with GITHUB_TOKEN triggers no other workflow, so
+    # hackathon-freeze.yml never sees a bot commit: each writer must run the
+    # guard itself before it commits.
+    writers = [
+        path
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        if "git push" in path.read_text()
+    ]
+    assert writers, "found no workflow that pushes"
+    for path in writers:
+        text = path.read_text()
+        guard = text.find("tests/test_hackathon_freeze.py")
+        assert guard != -1, f"{path.name} pushes to main without running the freeze guard"
+        assert guard < text.find("git commit"), f"{path.name} runs the guard after committing"
+
+
+def test_a_guard_workflow_runs_on_every_push_to_main() -> None:
+    # ci.yml skips README.md and assets/** on push, so something unfiltered
+    # has to catch a web edit to a frozen file.
+    text = (ROOT / ".github" / "workflows" / "hackathon-freeze.yml").read_text()
+    assert "branches: [main]" in text
+    assert "paths:" not in text and "paths-ignore:" not in text
+    assert "tests/test_hackathon_freeze.py" in text

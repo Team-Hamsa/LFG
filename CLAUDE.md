@@ -782,7 +782,12 @@ chain on every request.
   `tests/test_hackathon_freeze.py` pins their bytes and fails the gate if any
   workflow or pm2 app runs a retired generator (`hackathon_loc`,
   `readme_dashboard`, `render_sourcetag_svg`, `build_log_sync`,
-  `sourcetag_metrics`). Their automation is gone: the README workflow is now
+  `sourcetag_metrics`). It runs in the pre-push gate, in PR CI, in
+  `hackathon-freeze.yml` on every push to `main` (no path filter, so a web
+  edit is caught), and inside `readme-sync.yml` / `roadmap-sync.yml` before
+  they commit — their `GITHUB_TOKEN` pushes trigger no other workflow, and
+  the test itself requires every pushing workflow to run it first.
+  Their automation is gone: the README workflow is now
   `readme-sync.yml` (badges, feature flags, architecture only),
   `build-log-sync.yml` was deleted, `lfg-sourcetag` was unregistered from pm2,
   and `readme_badges.FROZEN_*` hold the two badge counts. Never regenerate

@@ -244,7 +244,7 @@ paid on-chain by a dedicated distributor wallet only when explicitly claimed
 
 - **Two pm2 stacks, branch-driven** (`main` = staging/testnet, `deploy` = prod/mainnet) with a polling deployer and a confirmed-fast-forward `promote.sh` ([#223](https://github.com/Team-Hamsa/LFG/issues/223), [#230](https://github.com/Team-Hamsa/LFG/pull/230)); abandoned pre-money sessions expire so the deployer drain can complete ([#435](https://github.com/Team-Hamsa/LFG/pull/435)).
 - Nightly `backfill_market` drift sweep ([#375](https://github.com/Team-Hamsa/LFG/pull/375)), economy reconcile+audit crons with a Discord webhook ([#352](https://github.com/Team-Hamsa/LFG/pull/352)), public-edge funnel health monitor ([#344](https://github.com/Team-Hamsa/LFG/pull/344)), listener end-to-end harness ([#374](https://github.com/Team-Hamsa/LFG/pull/374)).
-- **Living SourceTag badge** — tagged volume, unique wallets, XRP payment volume in/out/other pushed nightly to `main` via the Contents API ([#321](https://github.com/Team-Hamsa/LFG/pull/321), [#417](https://github.com/Team-Hamsa/LFG/pull/417), [#422](https://github.com/Team-Hamsa/LFG/pull/422)).
+- **SourceTag badge** — tagged volume, unique wallets, XRP payment volume in/out/other, pushed nightly to `main` via the Contents API through the sprint and frozen as submitted on 2026-09-21 ([#321](https://github.com/Team-Hamsa/LFG/pull/321), [#417](https://github.com/Team-Hamsa/LFG/pull/417), [#422](https://github.com/Team-Hamsa/LFG/pull/422)).
 - Test suite isolated from the deployed `.env` (`LFG_SKIP_DOTENV`, [#368](https://github.com/Team-Hamsa/LFG/pull/368)); worktree-aware pre-push gate ([#373](https://github.com/Team-Hamsa/LFG/pull/373)).
 
 ## Payment & Signing Safety
@@ -294,11 +294,11 @@ claimed.
 ### Extractable out of LFG
 
 - **OPP-074 · Dev Utilities Pack** — `scripts/` holds an airdrop/drip payout engine with decidable failure (`LastLedgerSequence` margin + memo-keyed recovery), open-payload cancellation, balance snapshots, and idempotent backfills.
-- **OPP-019 · XRPL-native dApp Analytics** — `scripts/sourcetag_metrics.py` computes per-SourceTag tx counts, unique wallets and XRP payment volume (matched to XRPL Commons' own volume metric) and renders a self-updating badge; the public leaderboard API serves eight boards from the archive.
+- **OPP-019 · XRPL-native dApp Analytics** — `scripts/sourcetag_metrics.py` computes per-SourceTag tx counts, unique wallets and XRP payment volume (matched to XRPL Commons' own volume metric) and rendered the README badge (nightly through the sprint, frozen since 2026-09-21; the script is analytics-only now); the public leaderboard API serves eight boards from the archive.
 
 ## Living README
 
-The README maintains itself: auto-generated badge row ([#361](https://github.com/Team-Hamsa/LFG/pull/361)), roadmap block synced from `roadmap`-labelled issues ([#367](https://github.com/Team-Hamsa/LFG/pull/367)), feature-flag table generated from config defaults ([#370](https://github.com/Team-Hamsa/LFG/pull/370)), architecture diagram generated from code ([#371](https://github.com/Team-Hamsa/LFG/pull/371)), repository-layout and demo-GIF staleness guards in CI ([#369](https://github.com/Team-Hamsa/LFG/pull/369), [#372](https://github.com/Team-Hamsa/LFG/pull/372)) — and, as of this section, the merged changelog below.
+The README maintains itself: auto-generated badge row ([#361](https://github.com/Team-Hamsa/LFG/pull/361)), roadmap block synced from `roadmap`-labelled issues ([#367](https://github.com/Team-Hamsa/LFG/pull/367)), feature-flag table generated from config defaults ([#370](https://github.com/Team-Hamsa/LFG/pull/370)), architecture diagram generated from code ([#371](https://github.com/Team-Hamsa/LFG/pull/371)), repository-layout and demo-GIF staleness guards in CI ([#369](https://github.com/Team-Hamsa/LFG/pull/369), [#372](https://github.com/Team-Hamsa/LFG/pull/372)) — and, as of this section, the merged changelog below (frozen with the other hackathon stats on 2026-09-21).
 
 ## Merged changelog
 
