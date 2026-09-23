@@ -797,7 +797,7 @@ chain on every request.
 - **SourceTag metrics (analytics only):** `scripts/sourcetag_metrics.py
   --network mainnet [--json] [--out PATH]` reads the `source_tag` column of
   `history_<net>.db` and prints a snapshot; it writes a file only when
-  `--out` names one (never `metrics/sourcetag.json`, which is frozen). The
+  `--out` names one, and refuses `metrics/sourcetag.json` (frozen) in any checkout. The
   old `--push` to `main` is gone — a stale pm2 entry still passing it exits
   2. `unique_wallets` excludes the operator's
   wallets, `config.SIGNING_ACCOUNT`, and the script's durable

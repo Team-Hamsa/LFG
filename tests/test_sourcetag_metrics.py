@@ -176,7 +176,7 @@ def test_validate_payload_rejects_malformed_as_of():
 
 def test_out_writes_file(tmp_path):
     path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
-    dest = tmp_path / "metrics" / "sourcetag.json"
+    dest = tmp_path / "snapshots" / "sourcetag.json"
     rc = stm.main(["--network", "testnet", "--db", path, "--out", str(dest)])
     assert rc == 0
     assert json.loads(dest.read_text())["total_tagged_txs"] == 1
@@ -215,6 +215,21 @@ def test_out_refuses_to_write_a_payload_that_fails_validation(tmp_path, monkeypa
     assert rc == 2
     assert not dest.exists()
     assert "sneaky" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dest", ["metrics/sourcetag.json", "checkout/metrics/sourcetag.json"])
+def test_out_refuses_the_frozen_snapshot_path(tmp_path, monkeypatch, capsys, dest):
+    """metrics/sourcetag.json is frozen as submitted to Make Waves. Refuse it
+    in any checkout (worktrees included) before writing, not after."""
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    monkeypatch.chdir(tmp_path)
+    frozen = tmp_path / dest
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("frozen\n")
+    rc = stm.main(["--network", "testnet", "--db", path, "--out", dest])
+    assert rc == 2
+    assert frozen.read_text() == "frozen\n"
+    assert "frozen" in capsys.readouterr().err
 
 
 def test_missing_db_exits_nonzero_without_writing(tmp_path):

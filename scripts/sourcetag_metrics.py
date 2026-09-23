@@ -9,8 +9,7 @@ Make Waves closed 2026-09-21. The committed metrics/sourcetag.json and its
 rendered badge (assets/sourcetag.svg, scripts/render_sourcetag_svg.py) are
 frozen as submitted, so this script no longer publishes anywhere: the nightly
 `--push` to `main` is gone, and nothing is written unless `--out` names a
-path. Pointing `--out` at metrics/sourcetag.json trips
-tests/test_hackathon_freeze.py.
+path. `--out` refuses metrics/sourcetag.json in any checkout.
 """
 
 from __future__ import annotations
@@ -300,6 +299,10 @@ def collect(db_path: str, network: str, app_db: str | None = None) -> dict[str, 
     }
 
 
+# The committed snapshot's path, frozen as submitted. Matched by its last two
+# components so every checkout and worktree is covered.
+FROZEN_SNAPSHOT = ("metrics", "sourcetag.json")
+
 # Every snapshot is checked against this whitelist before it is written. Keep
 # it in lockstep with collect()'s payload: a new field must be added here
 # deliberately, which is the point.
@@ -433,6 +436,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--json", action="store_true", help="print the full payload")
     args = ap.parse_args(argv)
+
+    if args.out is not None and Path(args.out).resolve().parts[-2:] == FROZEN_SNAPSHOT:
+        print(
+            f"refusing to write {args.out}: metrics/sourcetag.json is frozen as "
+            "submitted to Make Waves (2026-09-21)",
+            file=sys.stderr,
+        )
+        return 2
 
     db_path = args.db or history_store.history_db_path(args.network)
     if not os.path.exists(db_path):
