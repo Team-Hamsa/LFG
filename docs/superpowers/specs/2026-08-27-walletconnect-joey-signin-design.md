@@ -108,6 +108,9 @@ seconds, so the worst case is 1 drop + fee.
    transaction can never be smuggled in as a "proof".
 3. `derive_classic_address(SigningPubKey) == Account`. RegularKey-signed proofs are
    NOT accepted in v1 (documented limitation).
+   > **Superseded 2026-09-23:** RegularKey-signed proofs are accepted, and
+   > RegularKey sessions end when the key is removed. See
+   > `2026-09-22-agent-users-design.md` §2.
 4. `keypairs.is_valid_message(encode_for_signing(tx), TxnSignature, SigningPubKey)`.
 5. Mark the row `consumed` (single use), then as today:
    `identity_store.link("web", wallet, wallet, wallet)`; issue a session token with
@@ -188,6 +191,9 @@ to a different wallet inherits this rule automatically.
 **Known gaps (documented, not solved):** #58 pre-simulate does not run on the Joey path
 (Joey autofills; the final tx is never seen before submit). RegularKey-signed accounts
 work for transactions (verified by `Account` on-ledger) but not for the pseudo-tx proof.
+  > **Superseded 2026-09-23:** RegularKey-signed proofs are accepted, and
+  > RegularKey sessions end when the key is removed. See
+  > `2026-09-22-agent-users-design.md` §2.
 `xrpl_signTransactionBatch` unused.
 
 ## 4. Client integration, error handling, surfaces

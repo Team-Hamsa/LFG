@@ -1741,10 +1741,19 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    provenance memos + `lfg/nonce`, closed field allowlist, Destination/Amount
    pinned) — Joey exposes no `signMessage` and its pipeline refuses zeroed
    pseudo-tx placeholders (the original `AccountSet`/`Fee:"0"` shape errored
-   inside Joey, verified live 2026-09-09). **RegularKey is
-   NOT accepted**: `verify_proof` derives the address from `SigningPubKey`
-   and requires it to equal `Account`, so only the master key can prove
-   ownership. A proved link is an append-only `wallet_proof_links` edge
+   inside Joey, verified live 2026-09-09). **RegularKey proofs** (agent users spec §2): `_redeem_proof` reads the
+   account's keys from the validated ledger (`xrpl_ops.key_authority`) before
+   `verify_proof`. The master key proves ownership unless `lsfDisableMaster` is
+   set; the AccountRoot's current RegularKey proves it too. On a failed lookup
+   the master key is still accepted and a RegularKey is refused with a
+   retryable 503 `regular_key_unverified`; any other key is `bad_proof`. The
+   rule runs before `on_verified`, so a refused link proof writes no edge. A
+   RegularKey session's token carries `key: "regular"` and `signer`;
+   `require_auth` (and `/api/events/me`) re-check at most once a minute per
+   wallet that the RegularKey is still that signer, denylist the token with a
+   401 `key_revoked` when it isn't, keep the last answer on a lookup error, and
+   fail closed with a 503 `key_unverified` when there is none (a restart since
+   sign-in). A proved link is an append-only `wallet_proof_links` edge
    (`identity.link_proof`, undirected, sorted-pair PK — repeats are a no-op;
    undo is an admin `DELETE`, there is no unlink endpoint). **Ops:**
    `REOWN_PROJECT_ID` unset (default) = feature off everywhere ("Connect with
