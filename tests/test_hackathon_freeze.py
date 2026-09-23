@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+WORKFLOWS = ROOT / ".github" / "workflows"
+GUARD = "tests/test_hackathon_freeze.py"
 
 FROZEN_FILES = {
     "assets/hackathon_loc.svg": "7fa02b402f652b4129aabdfabf3b7a0dd89cb6022ac5b763275c5c76e63d1a3a",
@@ -111,27 +115,97 @@ def test_no_workflow_or_pm2_app_runs_a_retired_generator() -> None:
     assert offenders == []
 
 
-def test_every_workflow_that_pushes_to_main_runs_the_guard_first() -> None:
+def _workflow(path: Path) -> dict[Any, Any]:
+    loaded = yaml.safe_load(path.read_text())
+    assert isinstance(loaded, dict), f"{path.name} is not a workflow mapping"
+    return loaded
+
+
+def _runs_guard(step: dict[str, Any]) -> bool:
+    run = str(step.get("run") or "")
+    return "pytest" in run and GUARD in run
+
+
+def unguarded_commits(workflow: dict[Any, Any]) -> list[str]:
+    """Jobs that `git commit` before any step has run the freeze guard.
+
+    Reads the parsed steps, so a comment that merely names the guard file
+    does not count as running it.
+    """
+    bad = []
+    for name, job in (workflow.get("jobs") or {}).items():
+        guarded = False
+        for step in job.get("steps") or []:
+            guarded = guarded or _runs_guard(step)
+            if "git commit" in str(step.get("run") or "") and not guarded:
+                bad.append(str(name))
+                break
+    return bad
+
+
+def guards_every_push_to_main(workflow: dict[Any, Any]) -> bool:
+    """True if the workflow runs the guard on every push to main, unfiltered."""
+    # YAML 1.1 reads a bare `on:` key as boolean True.
+    triggers = workflow.get("on", workflow.get(True))
+    push = triggers.get("push") if isinstance(triggers, dict) else None
+    if not isinstance(push, dict) or push.get("branches") != ["main"]:
+        return False
+    if "paths" in push or "paths-ignore" in push:
+        return False
+    return any(
+        _runs_guard(step)
+        for job in (workflow.get("jobs") or {}).values()
+        for step in job.get("steps") or []
+    )
+
+
+def test_every_workflow_that_commits_runs_the_guard_first() -> None:
     # A commit pushed with GITHUB_TOKEN triggers no other workflow, so
     # hackathon-freeze.yml never sees a bot commit: each writer must run the
     # guard itself before it commits.
-    writers = [
-        path
-        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-        if "git push" in path.read_text()
-    ]
-    assert writers, "found no workflow that pushes"
-    for path in writers:
-        text = path.read_text()
-        guard = text.find("tests/test_hackathon_freeze.py")
-        assert guard != -1, f"{path.name} pushes to main without running the freeze guard"
-        assert guard < text.find("git commit"), f"{path.name} runs the guard after committing"
+    workflows = {p.name: _workflow(p) for p in sorted(WORKFLOWS.glob("*.yml"))}
+    writers = [name for name, wf in workflows.items() if "git commit" in str(wf)]
+    assert writers, "found no workflow that commits"
+    offenders = {name: unguarded_commits(workflows[name]) for name in writers}
+    assert {name: jobs for name, jobs in offenders.items() if jobs} == {}
 
 
 def test_a_guard_workflow_runs_on_every_push_to_main() -> None:
     # ci.yml skips README.md and assets/** on push, so something unfiltered
     # has to catch a web edit to a frozen file.
-    text = (ROOT / ".github" / "workflows" / "hackathon-freeze.yml").read_text()
-    assert "branches: [main]" in text
-    assert "paths:" not in text and "paths-ignore:" not in text
-    assert "tests/test_hackathon_freeze.py" in text
+    assert guards_every_push_to_main(_workflow(WORKFLOWS / "hackathon-freeze.yml"))
+
+
+_GUARD_STEP = {"run": f"python -m pytest -q {GUARD}"}
+_COMMIT_STEP = {"run": "git commit -m x && git push"}
+
+
+@pytest.mark.parametrize(
+    ("steps", "flagged"),
+    [
+        ([_GUARD_STEP, _COMMIT_STEP], False),
+        ([_COMMIT_STEP, _GUARD_STEP], True),
+        ([{"name": f"see {GUARD}", "run": "echo hi"}, _COMMIT_STEP], True),
+        ([_COMMIT_STEP], True),
+    ],
+    ids=["guard-first", "guard-after-commit", "name-only-mention", "no-guard"],
+)
+def test_unguarded_commits_reads_steps_not_text(steps: list[Any], flagged: bool) -> None:
+    workflow = {"jobs": {"sync": {"steps": steps}}}
+    assert unguarded_commits(workflow) == (["sync"] if flagged else [])
+
+
+@pytest.mark.parametrize(
+    ("on", "ok"),
+    [
+        ({"push": {"branches": ["main"]}}, True),
+        ({"pull_request": {"branches": ["main"]}}, False),
+        ({"push": {"branches": ["main"], "paths-ignore": ["README.md"]}}, False),
+        ({"push": {"branches": ["main"], "paths": ["tests/**"]}}, False),
+        ({"push": {"branches": ["deploy"]}}, False),
+    ],
+    ids=["push-main", "pr-only", "paths-ignore", "paths", "other-branch"],
+)
+def test_guards_every_push_to_main_requires_an_unfiltered_push(on: Any, ok: bool) -> None:
+    workflow = {True: on, "jobs": {"guard": {"steps": [_GUARD_STEP]}}}
+    assert guards_every_push_to_main(workflow) is ok

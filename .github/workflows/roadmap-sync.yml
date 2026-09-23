@@ -42,7 +42,7 @@ jobs:
         # This job pushes with GITHUB_TOKEN, which triggers no other workflow,
         # so hackathon-freeze.yml never sees its commit. Check before committing.
         run: |
-          python -m pip install --quiet pytest
+          python -m pip install --quiet pytest PyYAML==6.0.3
           python -m pytest --noconftest -p no:cacheprovider -q tests/test_hackathon_freeze.py
 
       - name: Commit if changed
