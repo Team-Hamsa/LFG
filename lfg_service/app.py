@@ -520,6 +520,9 @@ async def handle_events_me(request: Any) -> Any:
     payload = verify_session_token(request.query.get("token", ""))
     if not payload:
         return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
+    refusal = await _regular_key_refusal(request.query.get("token", ""), payload)
+    if refusal is not None:
+        return refusal
     wallet = await _resolve_wallet(_platform(payload), payload["id"])
     if wallet is None:
         return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
@@ -850,6 +853,56 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
         )
 
 
+# --- RegularKey sessions (agent users spec §2, Amendment 1) -----------------
+# A token minted from a RegularKey proof carries key="regular" and the signing
+# key's address. Every authenticated request re-checks, at most once a minute
+# per wallet, that the account's RegularKey is still that signer. If the owner
+# removed or rotated it, the token is denylisted and the request refused. On a
+# lookup error the last answer stands, whatever its age; with no answer at all
+# (a restart since sign-in) the request fails closed with a retryable 503.
+REGULAR_KEY_RECHECK_SECONDS = 60.0
+_regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
+
+
+def _note_regular_key(wallet: str, regular_key: str | None) -> None:
+    _regular_keys[wallet] = (time.monotonic(), regular_key)
+
+
+async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
+    """Is `signer` still `wallet`'s RegularKey? None: no answer to go on."""
+    now = time.monotonic()
+    cached = _regular_keys.get(wallet)
+    if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
+        return cached[1] == signer
+    authority = await xrpl_ops.key_authority(wallet)
+    if authority.lookup_ok:
+        _regular_keys[wallet] = (now, authority.regular_key)
+        return authority.regular_key == signer
+    return None if cached is None else cached[1] == signer
+
+
+async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Response | None:
+    """None if this session may proceed, else the refusal. Master-key tokens (no
+    "key" claim) pass untouched."""
+    if payload.get("key") != "regular":
+        return None
+    still = await _regular_key_still_set(str(payload["id"]), str(payload.get("signer", "")))
+    if still is None:
+        return web.json_response(
+            {
+                "error": "could not check your signing key on-ledger; try again",
+                "code": "key_unverified",
+            },
+            status=503,
+        )
+    if not still:
+        revoke_session_token(token)
+        return web.json_response(
+            {"error": "signing key revoked", "code": "key_revoked"}, status=401
+        )
+    return None
+
+
 def require_auth(handler):
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
@@ -861,6 +914,9 @@ def require_auth(handler):
         user = verify_session_token(auth[7:])
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
+        refusal = await _regular_key_refusal(auth[7:], user)
+        if refusal is not None:
+            return refusal
         request["user"] = user
         # #447: the provider a user signed in with is ambient for the request
         # (and for tasks the handler spawns). Web sessions use the wallet as
@@ -9850,6 +9906,7 @@ async def _finish_web_signin(wallet: str, provider: str, signer: str | None = No
     user = {"id": wallet, "name": name, "platform": "web", "provider": provider}
     if signer is not None and signer != wallet:
         user.update(key="regular", signer=signer)
+        _note_regular_key(wallet, signer)  # the proof just verified it on-ledger
     token = make_session_token(user)
     return web.json_response(
         {
