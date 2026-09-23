@@ -162,9 +162,31 @@ def _runs_guard(step: dict[str, Any]) -> bool:
     return False
 
 
+# git global options that take their value as the next token.
+_GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+
+
+def _git_subcommand(tokens: list[str]) -> str | None:
+    """The subcommand of the first `git` in a command, skipping global options.
+
+    `git` need not lead (`if git push; then` splits to `if git push`).
+    """
+    if "git" not in tokens:
+        return None
+    args = iter(tokens[tokens.index("git") + 1 :])
+    for token in args:
+        if token in _GIT_VALUE_OPTIONS:
+            next(args, None)
+        elif not token.startswith("-"):
+            return token
+    return None
+
+
 def _writes(step: dict[str, Any]) -> bool:
     run = str(step.get("run") or "")
-    return "git commit" in run or "git push" in run
+    if "git commit" in run or "git push" in run:
+        return True
+    return any(_git_subcommand(tokens) in ("commit", "push") for tokens in _commands(run))
 
 
 def unguarded_commits(workflow: dict[Any, Any]) -> list[str]:
@@ -245,6 +267,10 @@ _COMMIT_STEP = {"run": "git commit -m x && git push"}
         ([{**_GUARD_STEP, "continue-on-error": True}, _COMMIT_STEP], True),
         ([_GUARD_STEP, {"run": "git push"}], False),
         ([{"run": "git push"}], True),
+        ([{"run": "git -C . push"}], True),
+        ([{"run": "git -c user.name=bot commit -m x"}], True),
+        ([{"run": "if git push; then exit 0; fi"}], True),
+        ([_GUARD_STEP, {"run": "git -C . push"}], False),
     ],
     ids=[
         "guard-first",
@@ -258,6 +284,10 @@ _COMMIT_STEP = {"run": "git commit -m x && git push"}
         "guard-continue-on-error",
         "push-after-guard",
         "push-without-guard",
+        "git-C-push",
+        "git-c-commit",
+        "push-inside-if",
+        "git-C-push-after-guard",
     ],
 )
 def test_unguarded_commits_reads_steps_not_text(steps: list[Any], flagged: bool) -> None:
