@@ -96,6 +96,7 @@ from lfg_core.log_hygiene import quiet_http_client_loggers
 from lfg_core.signing import context as signing_context
 from lfg_core.signing import proof as signing_proof
 from lfg_core.signing import store as sign_request_store
+from lfg_core.signing.key_authority import LOOKUP_FAILED
 from lfg_core.user_db import create_users_table, delete_user, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
@@ -735,6 +736,9 @@ def make_session_token(user: dict[str, Any]) -> str:
         # sibling token minted for the same user in the same second.
         "jti": secrets.token_hex(8),
     }
+    # A RegularKey session (agent users spec §2) carries the key that signed, so
+    # require_auth can end it when the owner removes or rotates that key.
+    payload.update({k: user[k] for k in ("key", "signer") if k in user})
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
@@ -9829,11 +9833,12 @@ async def handle_web_signin_start(request):
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
-async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
+async def _finish_web_signin(wallet: str, provider: str, signer: str | None = None) -> web.Response:
     """Link the proven wallet as a platform="web" identity and issue its token.
 
     Shared by both web sign-in arms: the XUMM SignIn poll and the
     WalletConnect signed-proof redemption (#447).
+    `signer` is the proof's signing key; a RegularKey marks the token (spec §2).
     """
     # A wallet already known from another surface keeps its display handle;
     # a brand-new one gets a readable shortened address.
@@ -9842,9 +9847,10 @@ async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
     if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
         return web.json_response({"error": "identity link failed"}, status=500)
     _warm_funder_cache(wallet)
-    token = make_session_token(
-        {"id": wallet, "name": name, "platform": "web", "provider": provider}
-    )
+    user = {"id": wallet, "name": name, "platform": "web", "provider": provider}
+    if signer is not None and signer != wallet:
+        user.update(key="regular", signer=signer)
+    token = make_session_token(user)
     return web.json_response(
         {
             "state": "signed",
@@ -9895,6 +9901,14 @@ async def _proof_creation_ledger() -> int | None:
         return None
 
 
+@dataclass(frozen=True)
+class RedeemedProof:
+    """What a redeemed ownership proof established."""
+
+    wallet: str  # the account proven
+    signer: str  # the key that signed: == wallet for the master key, else its RegularKey
+
+
 async def _redeem_proof(
     sign_id: str,
     tx_json: Any,
@@ -9904,7 +9918,7 @@ async def _redeem_proof(
     wallet_hint: str | None = None,
     expect_wallet: str | None = None,
     on_verified: Callable[[str], Awaitable[web.Response | None]] | None = None,
-) -> tuple[str, None] | tuple[None, web.Response]:
+) -> tuple[RedeemedProof, None] | tuple[None, web.Response]:
     """Load → validate → verify → consume one signed-proof row (#447).
 
     The single implementation shared by web sign-in and wallet linking, so the
@@ -9923,7 +9937,7 @@ async def _redeem_proof(
     retryable, and if the consume then loses the CAS race the side effect is
     already durable (it must therefore be idempotent).
 
-    Returns `(wallet, None)` on success, `(None, response)` otherwise.
+    Returns `(RedeemedProof, None)` on success, `(None, response)` otherwise.
     """
     row = await asyncio.to_thread(sign_request_store.get, sign_id)
     if row is None or row.get("purpose") != purpose:
@@ -9948,6 +9962,14 @@ async def _redeem_proof(
     # Proof Memos are otherwise unbounded — cap the body before verifying.
     if not isinstance(tx_json, dict) or len(json.dumps(tx_json)) > WC_PROOF_MAX_BYTES:
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    # Spec §2: one validated-ledger read of the account's keys, BEFORE verify_proof
+    # and so before on_verified, so a proof the key rule refuses never writes an edge.
+    account = tx_json.get("Account")
+    authority = (
+        await xrpl_ops.key_authority(account)
+        if isinstance(account, str) and is_valid_classic_address(account)
+        else LOOKUP_FAILED
+    )
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
         created_ledger = row.get("created_ledger")
@@ -9960,12 +9982,21 @@ async def _redeem_proof(
             max_last_ledger=(
                 created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
             ),
+            authority=authority,
         )
     except signing_proof.ProofError as e:
         # e.detail carries request-derived field names — repr() so control
         # characters cannot forge log lines.
         detail = f" ({e.detail!r})" if e.detail else ""
         logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}{detail}")
+        if e.reason == "regular_key_unverified":
+            return None, web.json_response(
+                {
+                    "error": "could not check the signing key on-ledger; try again",
+                    "code": "regular_key_unverified",
+                },
+                status=503,
+            )
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     if on_verified is not None:
         refusal = await on_verified(wallet)
@@ -9977,7 +10008,7 @@ async def _redeem_proof(
         return None, web.json_response(
             {"error": "already used", "code": "proof_replayed"}, status=409
         )
-    return wallet, None
+    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json)), None
 
 
 async def handle_web_signin_proof(request):
@@ -9993,7 +10024,7 @@ async def handle_web_signin_proof(request):
         )
     _prune_web_signin_payloads()
     body = await _json_body(request)
-    wallet, refusal = await _redeem_proof(
+    redeemed, refusal = await _redeem_proof(
         str(body.get("sign_id") or ""),
         body.get("tx_json"),
         purpose="signin",
@@ -10001,7 +10032,8 @@ async def handle_web_signin_proof(request):
     )
     if refusal is not None:
         return refusal
-    return await _finish_web_signin(cast(str, wallet), "walletconnect")
+    proven = cast(RedeemedProof, redeemed)
+    return await _finish_web_signin(proven.wallet, "walletconnect", signer=proven.signer)
 
 
 # --- Explicit wallet linking (#447) ------------------------------------------
@@ -10912,7 +10944,7 @@ async def handle_wallet_link_proof(request):
             return _link_failed_response()
         return None
 
-    wallet, refusal = await _redeem_proof(
+    redeemed, refusal = await _redeem_proof(
         str(body.get("sign_id") or ""),
         body.get("tx_json"),
         purpose="link",
@@ -10922,7 +10954,7 @@ async def handle_wallet_link_proof(request):
     )
     if refusal is not None:
         return refusal
-    return await _linked_response(session_wallet, cast(str, wallet))
+    return await _linked_response(session_wallet, cast(RedeemedProof, redeemed).wallet)
 
 
 @require_wallet

@@ -7,6 +7,7 @@
 # mock_economy.DEV_OWNER as the session wallet.
 import asyncio
 import json
+import sqlite3
 import time
 
 import pytest
@@ -17,6 +18,7 @@ from xrpl.wallet import Wallet
 import lfg_service.app as app
 from lfg_core import memos
 from lfg_core.signing import proof, store
+from lfg_core.signing.key_authority import NOT_FOUND, KeyAuthority
 from lfg_service import identity as identity_store
 
 # Real classic addresses: the Xaman arm gates on is_valid_classic_address.
@@ -79,12 +81,34 @@ def _stub_proof_creation_ledger(monkeypatch):
     monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger)
 
 
+@pytest.fixture(autouse=True)
+def ledger_keys(monkeypatch):
+    """No network from the proof endpoints: the account's keys as the ledger
+    reports them. Default: found, no RegularKey, master enabled."""
+    state = {"authority": NOT_FOUND}
+
+    async def _lookup(address):
+        return state["authority"]
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    return state
+
+
 def _sign(wallet, nonce, action=memos.ACTION_LINK):
     tx = proof.build_proof_tx(wallet.classic_address, nonce, action)
     # What Joey does before signing (autofill: true).
     tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
     tx["SigningPubKey"] = wallet.public_key
     tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), wallet.private_key)
+    return tx
+
+
+def _sign_as(account, signer, nonce, action):
+    """A proof for `account` signed with `signer`'s key (a RegularKey when they differ)."""
+    tx = proof.build_proof_tx(account, nonce, action)
+    tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
+    tx["SigningPubKey"] = signer.public_key
+    tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), signer.private_key)
     return tx
 
 
@@ -488,3 +512,27 @@ def test_a_signed_link_payload_is_not_reused(monkeypatch):
     second = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
     assert second["uuid"] == "u-link-2" != first["uuid"]
     assert CAPTURED["calls"] == 2  # a second payload really was minted
+
+
+def _proof_links():
+    with sqlite3.connect(identity_store.DATABASE) as conn:
+        return conn.execute("SELECT COUNT(*) FROM wallet_proof_links").fetchone()[0]
+
+
+def test_foreign_key_link_proof_writes_no_edge(monkeypatch):
+    b = _start_wc(monkeypatch)
+    other, foreign = Wallet.create(), Wallet.create()
+    tx = _sign_as(other.classic_address, foreign, b["nonce"], memos.ACTION_LINK)
+    r = _run(app.handle_wallet_link_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert r.status == 400 and _body(r)["code"] == "bad_proof"
+    assert _proof_links() == 0
+
+
+def test_regular_key_link_proof_links_the_account(monkeypatch, ledger_keys):
+    b = _start_wc(monkeypatch)
+    other, regular = Wallet.create(), Wallet.create()
+    ledger_keys["authority"] = KeyAuthority(regular.classic_address, False, True)
+    tx = _sign_as(other.classic_address, regular, b["nonce"], memos.ACTION_LINK)
+    r = _run(app.handle_wallet_link_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert r.status == 200 and _body(r)["wallet"] == other.classic_address
+    assert _proof_links() == 1
