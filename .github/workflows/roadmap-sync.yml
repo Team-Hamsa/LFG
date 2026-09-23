@@ -40,7 +40,7 @@ jobs:
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            # No `[skip ci]` — see hackathon-loc.yml for why (it silently
+            # No `[skip ci]` — see readme-sync.yml for why (it silently
             # no-op'd Pages deploys on promote). ci.yml ignores README-only
             # commits via paths-ignore, and none of this workflow's triggers
             # fire on push, so it cannot retrigger itself.

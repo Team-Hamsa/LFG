@@ -4,10 +4,12 @@ Computes a handful of headline numbers straight from git and the tracked
 file list — test count, module count, commits since the pinned hackathon
 baseline, and a fixed surface count — plus a commits-per-day velocity series,
 and bakes them into a sticker-style brand-kit SVG (assets/dashboard.svg). No
-README markers are used: every number lives inside the SVG. Run by the same CI
-that refreshes assets/hackathon_loc.svg on every push to main; safe to run
-locally from the repo root and idempotent (the SVG is only rewritten when its
-content changes).
+README markers are used: every number lives inside the SVG. Idempotent (the
+SVG is only rewritten when its content changes).
+
+Retired from CI when Make Waves closed (2026-09-21): its output is frozen as
+submitted and pinned by tests/test_hackathon_freeze.py, so running it now
+only shows how far the repo has moved since.
 """
 
 from __future__ import annotations

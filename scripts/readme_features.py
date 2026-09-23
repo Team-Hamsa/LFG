@@ -8,7 +8,7 @@ default can never leave the README claiming the old one; a flag whose default
 can no longer be parsed fails the run loudly (SystemExit) — that's the drift
 signal telling us the parser or the flag moved.
 
-Run by the same CI that refreshes the badge row (hackathon-loc.yml); safe to
+Run by the same CI that refreshes the badge row (readme-sync.yml); safe to
 run locally from the repo root and idempotent (README is only rewritten when
 the generated block changes).
 """

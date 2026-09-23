@@ -1,35 +1,36 @@
 """Regenerate the README badge row between the badges:start/end markers.
 
 Static identity badges (mainnet, surfaces, PWA, ...) are emitted verbatim so
-the whole row lives in one place; the data-driven ones are computed each run:
+the whole row lives in one place; the rest are:
 
-- tests        — live `def test_` count, same counter as the vitals dashboard
+- tests        — frozen at the Make Waves submission (see FROZEN_TESTS)
 - CI           — shields.io workflow-status endpoint (self-updating server-side)
 - license      — shields.io GitHub-license endpoint
 - SourceTag    — parsed from the `SOURCE_TAG` default in lfg_core/config.py
                  (regexed, not imported, so no runtime env is needed)
-- tagged txs   — total from metrics/sourcetag.json, the nightly pm2 snapshot;
-                 the badge is simply omitted while the file is absent
+- tagged txs   — frozen at the Make Waves submission (see FROZEN_TAGGED_TXS)
 
-Run by the same CI that refreshes assets/hackathon_loc.svg on every push to
-main; safe to run locally from the repo root and idempotent (README is only
-rewritten when the generated block changes).
+Run by the README sync workflow on every push to main; safe to run locally
+from the repo root and idempotent (README is only rewritten when the
+generated block changes).
 """
 
 from __future__ import annotations
 
 import base64
-import json
 import re
 import sys
 from pathlib import Path
 from urllib.parse import quote
 
-from scripts.readme_dashboard import count_tests
-
 README_PATH = Path("README.md")
 CONFIG_PATH = Path("lfg_core/config.py")
-METRICS_PATH = Path("metrics/sourcetag.json")
+
+# Make Waves closed 2026-09-21. These two badges show what the repo showed at
+# submission (commit 48656477) and never count live again;
+# tests/test_hackathon_freeze.py pins the rendered lines.
+FROZEN_TESTS = 5397
+FROZEN_TAGGED_TXS = 12141
 
 START_MARK = "<!-- badges:start -->"
 END_MARK = "<!-- badges:end -->"
@@ -123,31 +124,12 @@ def source_tag() -> str:
     return match.group(1)
 
 
-def tagged_tx_total() -> int | None:
-    """total_tagged_txs from the nightly metrics snapshot.
-
-    An absent file is expected before the first nightly snapshot lands and
-    omits the badge; a file that exists but can't be parsed is a real problem
-    and must fail the run rather than silently dropping the badge.
-    """
-    if not METRICS_PATH.exists():
-        return None
-    try:
-        data = json.loads(METRICS_PATH.read_text())
-    except (OSError, ValueError) as exc:
-        raise SystemExit(f"{METRICS_PATH} exists but is unreadable: {exc}") from exc
-    total = data.get("total_tagged_txs")
-    if not isinstance(total, int) or isinstance(total, bool):
-        raise SystemExit(f"{METRICS_PATH} has no integer total_tagged_txs (got {total!r})")
-    return total
-
-
 def badge(url: str, alt: str, href: str | None = None) -> str:
     img = f'<img src="{url}" alt="{alt}">'
     return f'<a href="{href}">{img}</a>' if href else img
 
 
-def build_badges(tests: int, tag: str, tagged_txs: int | None) -> list[str]:
+def build_badges(tests: int, tag: str, tagged_txs: int) -> list[str]:
     lines = [badge(url, alt, href) for url, alt, href in STATIC_BADGES]
     lines.append(
         badge(
@@ -176,14 +158,13 @@ def build_badges(tests: int, tag: str, tagged_txs: int | None) -> list[str]:
             f"XRPL SourceTag {tag}",
         )
     )
-    if tagged_txs is not None:
-        lines.append(
-            badge(
-                f"https://img.shields.io/badge/tagged_txs-{tagged_txs:,}".replace(",", "%2C")
-                + "-3E8DE3?style=flat-square",
-                f"{tagged_txs:,} SourceTag-tagged XRPL transactions",
-            )
+    lines.append(
+        badge(
+            f"https://img.shields.io/badge/tagged_txs-{tagged_txs:,}".replace(",", "%2C")
+            + "-3E8DE3?style=flat-square",
+            f"{tagged_txs:,} SourceTag-tagged XRPL transactions",
         )
+    )
     return lines
 
 
@@ -198,7 +179,7 @@ def replace_block(readme: str, block_lines: list[str]) -> str:
 
 def main() -> int:
     readme = README_PATH.read_text()
-    updated = replace_block(readme, build_badges(count_tests(), source_tag(), tagged_tx_total()))
+    updated = replace_block(readme, build_badges(FROZEN_TESTS, source_tag(), FROZEN_TAGGED_TXS))
     if updated != readme:
         README_PATH.write_text(updated)
         print("updated")

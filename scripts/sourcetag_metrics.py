@@ -3,28 +3,23 @@ has generated, and how many unique non-project wallets have signed one.
 
 Reads the `source_tag` column of the per-network ledger archive
 (history_<net>.db, maintained live by the pm2 listeners) and emits a small
-JSON snapshot. `--push` commits that snapshot to `main` via the GitHub
-Contents API. When `--push` is given and `--out` was NOT explicitly passed,
-the local write is skipped entirely (the default `--out` path is relative to
-CWD, and the documented pm2 registration runs with CWD = a checkout on
-`deploy` or `main` — writing there would locally-modify a tracked file every
-night and break `promote.sh`'s fast-forward merge). Pass `--out` explicitly
-(e.g. for a manual snapshot or the seed-snapshot workflow) to get the local
-file written in addition to the push.
+JSON snapshot: printed by default, written to a file only with `--out`.
 
-The snapshot is rendered into assets/sourcetag.svg by CI — see
-scripts/render_sourcetag_svg.py.
+Make Waves closed 2026-09-21. The committed metrics/sourcetag.json and its
+rendered badge (assets/sourcetag.svg, scripts/render_sourcetag_svg.py) are
+frozen as submitted, so this script no longer publishes anywhere: the nightly
+`--push` to `main` is gone, and nothing is written unless `--out` names a
+path. Pointing `--out` at metrics/sourcetag.json trips
+tests/test_hackathon_freeze.py.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
@@ -305,15 +300,8 @@ def collect(db_path: str, network: str, app_db: str | None = None) -> dict[str, 
     }
 
 
-REPO = "Team-Hamsa/LFG"
-REMOTE_PATH = "metrics/sourcetag.json"
-BRANCH = "main"
-DEFAULT_OUT = Path("metrics/sourcetag.json")
-
-
-# The nightly push lands on `main` of a public repo without passing through
-# the pre-push gate, so this whitelist is the only thing inspecting it. Keep it
-# in lockstep with collect()'s payload: a new field must be added here
+# Every snapshot is checked against this whitelist before it is written. Keep
+# it in lockstep with collect()'s payload: a new field must be added here
 # deliberately, which is the point.
 ALLOWED_KEYS = frozenset(
     {
@@ -340,11 +328,11 @@ _VOLUME_KEYS = frozenset({"in_drops", "out_drops", "other_drops"})
 
 
 def validate_payload(payload: dict[str, Any]) -> None:
-    """Refuse to publish anything outside the known schema.
+    """Refuse to write anything outside the known schema.
 
     Raises ValueError on the first violation. This is a publication guard, not
     a correctness check: it exists so a future change that starts folding raw
-    ledger JSON or an env value into the snapshot cannot silently push it.
+    ledger JSON or an env value into the snapshot cannot silently write it.
     """
     unexpected = set(payload) - ALLOWED_KEYS
     if unexpected:
@@ -418,80 +406,8 @@ def validate_payload(payload: dict[str, Any]) -> None:
         raise ValueError("as_of must be an ISO-8601 string")
 
 
-def _b64(text: str) -> str:
-    return base64.b64encode(text.encode()).decode()
-
-
 def _serialize(payload: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
-
-
-def is_unchanged(new: dict[str, Any], existing: str | None) -> bool:
-    """True when only `as_of` differs, so a quiet day produces no commit."""
-    if existing is None:
-        return False
-    try:
-        old = json.loads(existing)
-    except json.JSONDecodeError:
-        return False
-    return {k: v for k, v in old.items() if k != "as_of"} == {
-        k: v for k, v in new.items() if k != "as_of"
-    }
-
-
-def _fetch_remote(runner: Any) -> tuple[str | None, str | None]:
-    """(decoded_content, blob_sha) for the file on `main`; (None, None) if absent."""
-    proc = runner(
-        ["gh", "api", f"repos/{REPO}/contents/{REMOTE_PATH}?ref={BRANCH}"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        if "404" in (proc.stderr or "") or "Not Found" in (proc.stderr or ""):
-            return None, None
-        raise RuntimeError(f"gh api GET failed: {proc.stderr.strip()}")
-    body = json.loads(proc.stdout)
-    return base64.b64decode(body["content"]).decode(), body["sha"]
-
-
-def push_to_github(payload: dict[str, Any], runner: Any = None) -> bool:
-    """Commit the snapshot to `main` via the Contents API. True if committed.
-
-    Does not touch any working tree itself — it talks to GitHub over the
-    Contents API only. Callers running under `--push` are additionally
-    responsible for not writing the same content into a local checkout (see
-    `main()`), so that neither polling deployer sees local divergence. This
-    commit bypasses the local pre-push gate, so the payload is
-    schema-validated here BEFORE any network call.
-    """
-    if runner is None:
-        # Resolved at call time (not def time) so tests that monkeypatch
-        # `subprocess.run` on this module actually intercept the gh calls —
-        # a def-time default would freeze the real subprocess.run and let the
-        # tests hit the live GitHub API.
-        runner = subprocess.run
-    validate_payload(payload)
-    existing, sha = _fetch_remote(runner)
-    if is_unchanged(payload, existing):
-        return False
-
-    body: dict[str, Any] = {
-        "message": "chore(metrics): refresh SourceTag snapshot",
-        "content": _b64(_serialize(payload)),
-        "branch": BRANCH,
-    }
-    if sha:
-        body["sha"] = sha
-
-    proc = runner(
-        ["gh", "api", "-X", "PUT", f"repos/{REPO}/contents/{REMOTE_PATH}", "--input", "-"],
-        input=json.dumps(body),
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh api PUT failed: {proc.stderr.strip()}")
-    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -511,16 +427,11 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         default=None,
         help=(
-            "where to write the snapshot locally (default: metrics/sourcetag.json, "
-            "CWD-relative). If --push is given and --out is NOT explicitly set, the "
-            "local write is skipped entirely — writing into a checkout that a pm2 "
-            "deployer polls would locally-modify a tracked file every run and break "
-            "promote.sh's fast-forward merge. Pass --out explicitly to force a local "
-            "write alongside the push."
+            "write the snapshot to this path (default: print only; the committed "
+            "metrics/sourcetag.json is frozen as submitted to Make Waves)"
         ),
     )
-    ap.add_argument("--json", action="store_true", help="also print the payload")
-    ap.add_argument("--push", action="store_true", help="commit the snapshot to main via gh")
+    ap.add_argument("--json", action="store_true", help="print the full payload")
     args = ap.parse_args(argv)
 
     db_path = args.db or history_store.history_db_path(args.network)
@@ -537,38 +448,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"failed to read {db_path}: {exc}", file=sys.stderr)
         return 2
 
-    explicit_out = args.out is not None
-    skip_local_write = args.push and not explicit_out
-    out = Path(args.out) if explicit_out else DEFAULT_OUT
-
-    if skip_local_write:
-        if args.json:
-            print(_serialize(payload), end="")
-        else:
-            print(
-                f"{payload['total_tagged_txs']} tagged txs · "
-                f"{payload['unique_actors']} actors ({payload['unique_wallets']} wallets) "
-                f"→ (no local write; --push "
-                "with no explicit --out never touches a checkout)"
-            )
-    else:
+    summary = (
+        f"{payload['total_tagged_txs']} tagged txs · "
+        f"{payload['unique_actors']} actors ({payload['unique_wallets']} wallets)"
+    )
+    if args.out is not None:
+        try:
+            validate_payload(payload)
+        except ValueError as exc:
+            print(f"refusing to write {args.out}: {exc}", file=sys.stderr)
+            return 2
+        out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_serialize(payload))
-        if args.json:
-            print(_serialize(payload), end="")
-        else:
-            print(
-                f"{payload['total_tagged_txs']} tagged txs · "
-                f"{payload['unique_actors']} actors ({payload['unique_wallets']} wallets) → {out}"
-            )
-
-    if args.push:
-        try:
-            committed = push_to_github(payload)
-        except (RuntimeError, OSError) as exc:
-            print(f"failed to push metrics snapshot: {exc}", file=sys.stderr)
-            return 1
-        print("pushed to main" if committed else "already current, no commit")
+        summary += f" → {out}"
+    if args.json:
+        print(_serialize(payload), end="")
+    else:
+        print(summary)
     return 0
 
 

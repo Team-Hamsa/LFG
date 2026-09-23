@@ -253,7 +253,6 @@ refused. The old post-merge auto-restart hook is retired.
 | `lfg-telegram` | `stg-telegram` (stopped until staging TG token) |
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
-| `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
 | `lfg-brix-accrue` (cron 00:40) | `stg-brix-accrue` (cron 00:40, testnet) |
 | `lfg-market-sweep` (cron 03:30) | `stg-market-sweep` (cron 03:30, testnet) |
 | `lfg-economy-reconcile` (cron 00:20) → `lfg-economy-audit` (00:25) | `stg-economy-reconcile` / `stg-economy-audit` (testnet) |
@@ -774,18 +773,28 @@ chain on every request.
   ```bash
   pm2 start scripts/snapshot_balances.py --name lfg-snapshot --cron "10 0 * * *" --no-autorestart --interpreter .venv/bin/python -- --network mainnet
   ```
-- **SourceTag metrics badge:** `scripts/sourcetag_metrics.py --network mainnet
-  --push` reads the `source_tag` column of `history_<net>.db` and commits
-  `metrics/sourcetag.json` to `main` **via the GitHub Contents API**. When
-  `--push` is given and `--out` is NOT explicitly passed (the pm2 registration
-  below never passes it), the script skips the local write entirely — its
-  default `--out` is CWD-relative, and the pm2 process's CWD is a checkout a
-  polling deployer watches, so writing there would locally-modify a tracked
-  file every night and break `promote.sh`'s fast-forward. CI
-  (`hackathon-loc.yml`) then renders `assets/sourcetag.svg` via
-  `scripts/render_sourcetag_svg.py`. Registered as pm2 process
-  `lfg-sourcetag` (cron 00:20, `--no-autorestart` — pm2 shows it "stopped"
-  between runs; that is normal). `unique_wallets` excludes the operator's
+- **Hackathon stats are FROZEN (Make Waves closed 2026-09-21).** The LoC bar
+  (`assets/hackathon_loc.svg` + README block), repo-vitals dashboard
+  (`assets/dashboard.svg`), SourceTag badge (`assets/sourcetag.svg`,
+  `metrics/sourcetag.json`), the `tests`/`tagged_txs` badges and the
+  `docs/HACKATHON.md` changelog block show exactly what the repo showed at
+  submission (commit `48656477`, 2026-09-21 08:17 UTC).
+  `tests/test_hackathon_freeze.py` pins their bytes and fails the gate if any
+  workflow or pm2 app runs a retired generator (`hackathon_loc`,
+  `readme_dashboard`, `render_sourcetag_svg`, `build_log_sync`,
+  `sourcetag_metrics`). Their automation is gone: the README workflow is now
+  `readme-sync.yml` (badges, feature flags, architecture only),
+  `build-log-sync.yml` was deleted, `lfg-sourcetag` was unregistered from pm2,
+  and `readme_badges.FROZEN_*` hold the two badge counts. Never regenerate
+  them. To change one deliberately, update its pin in the same commit. The
+  generator scripts stay in the repo because the frozen blocks cite them.
+  The kit lives on in `Team-Hamsa/hackathon-stats` (private).
+- **SourceTag metrics (analytics only):** `scripts/sourcetag_metrics.py
+  --network mainnet [--json] [--out PATH]` reads the `source_tag` column of
+  `history_<net>.db` and prints a snapshot; it writes a file only when
+  `--out` names one (never `metrics/sourcetag.json`, which is frozen). The
+  old `--push` to `main` is gone — a stale pm2 entry still passing it exits
+  2. `unique_wallets` excludes the operator's
   wallets, `config.SIGNING_ACCOUNT`, and the script's durable
   `HISTORICAL_SIGNING_ADDRESSES` set — on a signer rotation the outgoing
   address MUST be added to that set permanently (never removed), or archived
@@ -794,31 +803,23 @@ chain on every request.
   deliberately do not (backend-signed mints are still the project's tagged
   volume). **`unique_actors` (#490)** is that same wallet set collapsed by
   activation funder — the #461 sybil rule (`funding.EXCHANGES`-funded and
-  funder-less wallets each still count as one) — and is the number the badge
-  renders, since it matches what the hackathon leaderboards report;
-  `unique_wallets` stays published beside it so the raw/deduped gap is
-  visible. Funder rows live in the **app DB** (`wallet_funders`), not the
-  history archive, and a missing row fails **open** (counts as its own
-  actor), so keep coverage current with `scripts/backfill_wallet_funders.py
-  --network mainnet --from-history` — otherwise the deduped number quietly
-  drifts back toward the raw one. `xrp_payment_volume` (`in_drops`/`out_drops`/`other_drops`) sums
+  funder-less wallets each still count as one) — and matches what the
+  hackathon leaderboards report; `unique_wallets` stays beside it so the
+  raw/deduped gap is visible. Funder rows live in the **app DB**
+  (`wallet_funders`), not the history archive, and a missing row fails
+  **open** (counts as its own actor), so keep coverage current with
+  `scripts/backfill_wallet_funders.py --network mainnet --from-history` —
+  otherwise the deduped number quietly drifts back toward the raw one.
+  `xrp_payment_volume` (`in_drops`/`out_drops`/`other_drops`) sums
   `meta.delivered_amount` of tagged `tesSUCCESS` XRP `Payment`s, split by
   whether the project's wallets are receiver / sender / neither — XRP only,
   IOU (BRIX/LFGO) payments are NOT valued; it exists to be compared against
   external "volume" dashboards (XRPL Commons' VMT, reverse-engineered
   2026-08-21 as exactly that sum). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
-  ripple epoch — no `946684800` correction applies here. The `--push` commit
-  bypasses the local pre-push gate, so `validate_payload`'s `ALLOWED_KEYS`
-  allowlist is the only thing inspecting what lands on `main` — add a new
-  payload field there deliberately when changing `collect()`'s shape. The pm2
-  daemon's PATH must include `gh`, and the token it runs as must resolve to a
-  human GitHub actor (not an Actions bot) — `hackathon-loc.yml`'s badge-render
-  step is gated on `github.actor != 'github-actions[bot]'`.
-  ```bash
-  pm2 start scripts/sourcetag_metrics.py --name lfg-sourcetag \
-    --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
-    -- --network mainnet --push
-  ```
+  ripple epoch — no `946684800` correction applies here. `--out` validates
+  the payload against `validate_payload`'s `ALLOWED_KEYS` allowlist before
+  writing — add a new field there deliberately when changing `collect()`'s
+  shape.
 - **API:** `GET /api/leaderboard?board=&period=&start=&me=` — public, no auth.
   `board` selects one of 8 boards (`users_nfts`, `users_swaps`,
   `users_builds`, `nft_swaps`, `brix_rich`, `brix_lp`, `brix_earned`,
@@ -900,7 +901,7 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   ```bash
   # daily accrual — registered in ecosystem.{prod,staging}.config.js as
   # lfg-brix-accrue / stg-brix-accrue at 00:40 UTC (00:20 is already taken by
-  # lfg-economy-reconcile + lfg-sourcetag). Manual equivalent:
+  # lfg-economy-reconcile). Manual equivalent:
   pm2 start scripts/accrue_brix.py --name lfg-brix-accrue \
     --cron "40 0 * * *" --no-autorestart --interpreter .venv/bin/python \
     -- --network mainnet
