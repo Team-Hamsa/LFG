@@ -45,6 +45,9 @@ Boards (this module):
   builds; they belong to the swap boards instead.
 - `nft_swaps`: swaps per *edition* (`modify` + burn-side legacy swaps, keyed
   on `nft_number` since a remint swap changes the token's `nft_id`).
+- `nft_rarity`: live tokens scored by trait rarity, sum of n_live / count(pair)
+  over each token's (trait_type, value) pairs, from `live_trait_table` (the
+  same read GET /api/rarity/supply reports).
 
 `system_accounts` (nft_issuer, brix_issuer, distributor, amm_account) are
 always excluded from user-keyed boards via `wallet NOT IN (...)`.
@@ -52,7 +55,9 @@ always excluded from user-keyed boards via `wallet NOT IN (...)`.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -540,6 +545,45 @@ def _board_brix_earned(
     return [_row(wallet=r["account"], value=r["value"]) for r in cur.fetchall()]
 
 
+LiveTraitTable = dict[str, tuple[int | None, list[tuple[str, str]]]]
+
+
+def live_trait_table(
+    oconn: sqlite3.Connection,
+) -> tuple[LiveTraitTable, Counter[tuple[str, str]]]:
+    """Every live collection token's trait pairs, and how many live tokens carry
+    each (trait_type, value), from ONE read of `onchain_nfts`.
+
+    Shared by the `nft_rarity` board and GET /api/rarity/supply, so the counts a
+    player reads are exactly the ones the board scores, never two reads the
+    listener wrote between. Values are the board's parsing: `str()` of each JSON
+    value, so a missing value reads "None" and an empty Accessory stays "". A
+    live token whose attributes parse to no pairs still counts toward the table;
+    one whose JSON is unreadable, or isn't a list, is skipped.
+    """
+    rows = oconn.execute(
+        "SELECT nft_id, nft_number, attributes_json FROM onchain_nfts"
+        " WHERE is_burned=0 AND attributes_json IS NOT NULL AND attributes_json != ''"
+    ).fetchall()
+    table: LiveTraitTable = {}
+    freq: Counter[tuple[str, str]] = Counter()
+    for r in rows:
+        try:
+            attrs = json.loads(r["attributes_json"])
+        except ValueError:
+            continue
+        if not isinstance(attrs, list):
+            continue
+        pairs = [
+            (str(t.get("trait_type")), str(t.get("value")))
+            for t in attrs
+            if isinstance(t, dict) and t.get("trait_type") is not None
+        ]
+        table[r["nft_id"]] = (r["nft_number"], pairs)
+        freq.update(pairs)
+    return table, freq
+
+
 def _nft_rarity(
     hconn: sqlite3.Connection,
     oconn: sqlite3.Connection,
@@ -548,35 +592,15 @@ def _nft_rarity(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    import json as _j
-    from collections import Counter
-
-    rows = oconn.execute(
-        "SELECT nft_id, nft_number, attributes_json FROM onchain_nfts"
-        " WHERE is_burned=0 AND attributes_json IS NOT NULL AND attributes_json != ''"
-    ).fetchall()
-    token_traits: dict[str, tuple[int | None, list[tuple[str, str]]]] = {}
-    freq: Counter[tuple[str, str]] = Counter()
-    for r in rows:
-        try:
-            attrs = _j.loads(r["attributes_json"])
-        except ValueError:
-            continue
-        pairs = [
-            (str(t.get("trait_type")), str(t.get("value")))
-            for t in attrs
-            if isinstance(t, dict) and t.get("trait_type") is not None
-        ]
-        token_traits[r["nft_id"]] = (r["nft_number"], pairs)
-        freq.update(pairs)
-    n_live = len(token_traits) or 1
+    table, freq = live_trait_table(oconn)
+    n_live = len(table) or 1
     scored = [
         _row(
             nft_id=nft_id,
             nft_number=number,
             value=round(sum(n_live / freq[p] for p in pairs), 2),
         )
-        for nft_id, (number, pairs) in token_traits.items()
+        for nft_id, (number, pairs) in table.items()
         if pairs
     ]
     scored.sort(key=lambda x: x["value"], reverse=True)
