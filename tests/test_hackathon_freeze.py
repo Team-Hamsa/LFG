@@ -20,6 +20,8 @@ commit and say why in the message.
 from __future__ import annotations
 
 import hashlib
+import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -102,8 +104,13 @@ def test_frozen_badge_is_in_readme(line: str) -> None:
     assert lines.count(line) == 1
 
 
+def _workflow_files(directory: Path) -> list[Path]:
+    # GitHub runs both extensions.
+    return sorted(p for p in directory.iterdir() if p.suffix in (".yml", ".yaml"))
+
+
 def test_no_workflow_or_pm2_app_runs_a_retired_generator() -> None:
-    automation = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    automation = _workflow_files(WORKFLOWS)
     automation += sorted(ROOT.glob("ecosystem*.config.js"))
     assert automation, "found no workflows or ecosystem files to check"
     offenders = [
@@ -121,25 +128,60 @@ def _workflow(path: Path) -> dict[Any, Any]:
     return loaded
 
 
+def _effective(unit: dict[str, Any]) -> bool:
+    """False for a job or step that is switched off or whose failure is ignored."""
+    return str(unit.get("if", True)).strip().lower() != "false" and unit.get(
+        "continue-on-error"
+    ) not in (True, "true")
+
+
+def _commands(run: str) -> list[list[str]]:
+    """Each shell command in a `run` block, as tokens (comments dropped)."""
+    commands = []
+    for line in run.splitlines():
+        for part in re.split(r"&&|\|\||;", line.split("#", 1)[0]):
+            try:
+                tokens = shlex.split(part)
+            except ValueError:
+                tokens = part.split()
+            if tokens:
+                commands.append(tokens)
+    return commands
+
+
 def _runs_guard(step: dict[str, Any]) -> bool:
+    """True only for an effective step that actually invokes pytest on the guard."""
+    if not _effective(step):
+        return False
+    for tokens in _commands(str(step.get("run") or "")):
+        invokes_pytest = tokens[0] == "pytest" or (
+            tokens[0] in ("python", "python3") and tokens[1:3] == ["-m", "pytest"]
+        )
+        if invokes_pytest and GUARD in tokens:
+            return True
+    return False
+
+
+def _writes(step: dict[str, Any]) -> bool:
     run = str(step.get("run") or "")
-    return "pytest" in run and GUARD in run
+    return "git commit" in run or "git push" in run
 
 
 def unguarded_commits(workflow: dict[Any, Any]) -> list[str]:
-    """Jobs that `git commit` before any step has run the freeze guard.
+    """Jobs that commit or push before an earlier step has run the freeze guard.
 
-    Reads the parsed steps, so a comment that merely names the guard file
-    does not count as running it.
+    Reads the parsed steps, so a comment or an echo that merely names the guard
+    does not count. The guard must be its own earlier step: a step that pushes
+    first and tests afterwards has already published by the time it tests.
     """
     bad = []
     for name, job in (workflow.get("jobs") or {}).items():
         guarded = False
         for step in job.get("steps") or []:
-            guarded = guarded or _runs_guard(step)
-            if "git commit" in str(step.get("run") or "") and not guarded:
+            if _writes(step) and not guarded:
                 bad.append(str(name))
                 break
+            guarded = guarded or _runs_guard(step)
     return bad
 
 
@@ -155,6 +197,7 @@ def guards_every_push_to_main(workflow: dict[Any, Any]) -> bool:
     return any(
         _runs_guard(step)
         for job in (workflow.get("jobs") or {}).values()
+        if _effective(job)
         for step in job.get("steps") or []
     )
 
@@ -163,8 +206,16 @@ def test_every_workflow_that_commits_runs_the_guard_first() -> None:
     # A commit pushed with GITHUB_TOKEN triggers no other workflow, so
     # hackathon-freeze.yml never sees a bot commit: each writer must run the
     # guard itself before it commits.
-    workflows = {p.name: _workflow(p) for p in sorted(WORKFLOWS.glob("*.yml"))}
-    writers = [name for name, wf in workflows.items() if "git commit" in str(wf)]
+    workflows = {p.name: _workflow(p) for p in _workflow_files(WORKFLOWS)}
+    writers = [
+        name
+        for name, wf in workflows.items()
+        if any(
+            _writes(step)
+            for job in (wf.get("jobs") or {}).values()
+            for step in job.get("steps") or []
+        )
+    ]
     assert writers, "found no workflow that commits"
     offenders = {name: unguarded_commits(workflows[name]) for name in writers}
     assert {name: jobs for name, jobs in offenders.items() if jobs} == {}
@@ -187,8 +238,27 @@ _COMMIT_STEP = {"run": "git commit -m x && git push"}
         ([_COMMIT_STEP, _GUARD_STEP], True),
         ([{"name": f"see {GUARD}", "run": "echo hi"}, _COMMIT_STEP], True),
         ([_COMMIT_STEP], True),
+        ([{"run": f"echo python -m pytest {GUARD}"}, _COMMIT_STEP], True),
+        ([{"run": f"git commit -m x && git push && python -m pytest {GUARD}"}], True),
+        ([{**_GUARD_STEP, "if": False}, _COMMIT_STEP], True),
+        ([{**_GUARD_STEP, "if": "false"}, _COMMIT_STEP], True),
+        ([{**_GUARD_STEP, "continue-on-error": True}, _COMMIT_STEP], True),
+        ([_GUARD_STEP, {"run": "git push"}], False),
+        ([{"run": "git push"}], True),
     ],
-    ids=["guard-first", "guard-after-commit", "name-only-mention", "no-guard"],
+    ids=[
+        "guard-first",
+        "guard-after-commit",
+        "name-only-mention",
+        "no-guard",
+        "echoed-command",
+        "same-step-guard-last",
+        "guard-if-false",
+        "guard-if-false-string",
+        "guard-continue-on-error",
+        "push-after-guard",
+        "push-without-guard",
+    ],
 )
 def test_unguarded_commits_reads_steps_not_text(steps: list[Any], flagged: bool) -> None:
     workflow = {"jobs": {"sync": {"steps": steps}}}
@@ -196,16 +266,35 @@ def test_unguarded_commits_reads_steps_not_text(steps: list[Any], flagged: bool)
 
 
 @pytest.mark.parametrize(
-    ("on", "ok"),
+    ("on", "job", "ok"),
     [
-        ({"push": {"branches": ["main"]}}, True),
-        ({"pull_request": {"branches": ["main"]}}, False),
-        ({"push": {"branches": ["main"], "paths-ignore": ["README.md"]}}, False),
-        ({"push": {"branches": ["main"], "paths": ["tests/**"]}}, False),
-        ({"push": {"branches": ["deploy"]}}, False),
+        ({"push": {"branches": ["main"]}}, {}, True),
+        ({"pull_request": {"branches": ["main"]}}, {}, False),
+        ({"push": {"branches": ["main"], "paths-ignore": ["README.md"]}}, {}, False),
+        ({"push": {"branches": ["main"], "paths": ["tests/**"]}}, {}, False),
+        ({"push": {"branches": ["deploy"]}}, {}, False),
+        ({"push": {"branches": ["main"]}}, {"if": False}, False),
+        ({"push": {"branches": ["main"]}}, {"continue-on-error": True}, False),
     ],
-    ids=["push-main", "pr-only", "paths-ignore", "paths", "other-branch"],
+    ids=[
+        "push-main",
+        "pr-only",
+        "paths-ignore",
+        "paths",
+        "other-branch",
+        "job-if-false",
+        "job-continue-on-error",
+    ],
 )
-def test_guards_every_push_to_main_requires_an_unfiltered_push(on: Any, ok: bool) -> None:
-    workflow = {True: on, "jobs": {"guard": {"steps": [_GUARD_STEP]}}}
+def test_guards_every_push_to_main_requires_an_unfiltered_push(
+    on: Any, job: dict[str, Any], ok: bool
+) -> None:
+    workflow = {True: on, "jobs": {"guard": {**job, "steps": [_GUARD_STEP]}}}
     assert guards_every_push_to_main(workflow) is ok
+
+
+def test_workflow_scan_covers_both_extensions(tmp_path: Path) -> None:
+    (tmp_path / "a.yml").write_text("x: 1\n")
+    (tmp_path / "b.yaml").write_text("x: 1\n")
+    (tmp_path / "notes.md").write_text("")
+    assert [p.name for p in _workflow_files(tmp_path)] == ["a.yml", "b.yaml"]
