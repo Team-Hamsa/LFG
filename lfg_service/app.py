@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 import uuid as uuid_lib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
@@ -872,7 +872,33 @@ REGULAR_KEY_RECHECK_SECONDS = 60.0
 REGULAR_KEY_RETRY_SECONDS = 15.0
 _regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
 _regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
-_regular_key_locks: dict[str, asyncio.Lock] = {}  # wallet -> its one in-flight recheck
+
+
+@dataclass
+class _RecheckLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0  # holders + waiters; the entry is dropped when this reaches 0
+
+
+_regular_key_locks: dict[str, _RecheckLock] = {}  # wallet -> its in-flight recheck
+
+
+@contextlib.asynccontextmanager
+async def _recheck_lock(wallet: str) -> AsyncIterator[None]:
+    """Serialize one wallet's rechecks. The entry exists only while a recheck is in
+    flight or waiting (everything here runs on the event loop, so the count is
+    exact), so the registry never outgrows the wallets being rechecked right now."""
+    entry = _regular_key_locks.get(wallet)
+    if entry is None:
+        entry = _regular_key_locks[wallet] = _RecheckLock()
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _regular_key_locks.get(wallet) is entry:
+            del _regular_key_locks[wallet]
 
 
 def _note_regular_key(
@@ -885,6 +911,18 @@ def _note_regular_key(
     current = _regular_keys.get(wallet)
     if current is None or at >= current[0]:
         _regular_keys[wallet] = (at, regular_key)
+    _sweep_regular_keys(time.monotonic())
+
+
+def _sweep_regular_keys(now: float) -> None:
+    """Drop answers older than a session's lifetime (every token that could still
+    need one was minted after it, and re-seeded it) and lapsed failure back-offs."""
+    for w, (checked, _) in list(_regular_keys.items()):
+        if now - checked > SESSION_TTL:
+            del _regular_keys[w]
+    for w, failed in list(_regular_key_failed_at.items()):
+        if now - failed >= REGULAR_KEY_RETRY_SECONDS:
+            del _regular_key_failed_at[w]
 
 
 async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
@@ -894,7 +932,7 @@ async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
         return cached[1] == signer
     # One ledger read per wallet at a time: concurrent stale rechecks wait for
     # it and then judge their own signer against what it recorded (#603 review).
-    async with _regular_key_locks.setdefault(wallet, asyncio.Lock()):
+    async with _recheck_lock(wallet):
         now = time.monotonic()
         cached = _regular_keys.get(wallet)
         if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:

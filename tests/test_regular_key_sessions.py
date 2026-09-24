@@ -251,3 +251,19 @@ def test_concurrent_stale_rechecks_share_one_ledger_read(monkeypatch, answer):
     results = _run(burst())
     assert calls == [ACCOUNT]  # one read, not five
     assert results == [True] * 5  # each waiter judged its signer against the shared result
+
+
+def test_a_wallets_recheck_lock_is_dropped_once_nothing_is_in_flight(ledger):
+    app._note_regular_key(ACCOUNT, SIGNER, time.monotonic() - 3600)  # stale: forces a read
+    assert _run(app._regular_key_still_set(ACCOUNT, SIGNER)) is True
+    assert app._regular_key_locks == {}
+
+
+def test_answers_older_than_a_session_are_swept_on_the_next_write():
+    long_ago = time.monotonic() - app.SESSION_TTL - 1
+    app._note_regular_key("rGONE", SIGNER, long_ago)  # no token can still refer to it
+    app._regular_key_failed_at["rGONE"] = long_ago
+    app._note_regular_key(ACCOUNT, SIGNER)
+    assert "rGONE" not in app._regular_keys
+    assert "rGONE" not in app._regular_key_failed_at
+    assert app._regular_keys[ACCOUNT][1] == SIGNER
