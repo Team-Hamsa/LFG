@@ -250,7 +250,7 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
             config.TRAIT_TAXON,
             flags=config.TRAIT_NFT_FLAGS,
             action=memos.ACTION_SHOP_BUY,
-            platform=memos.platform_for_surface(session.platform),
+            platform=memos.platform_for(session.platform),
         )
         if not nft_id:
             session.fail("failed to mint your trait token; nothing was charged")
@@ -288,7 +288,7 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
                 session.buyer,
                 amount=offer_amount,
                 expiration=expiration,
-                platform=memos.platform_for_surface(session.platform),
+                platform=memos.platform_for(session.platform),
                 action=memos.ACTION_SHOP_BUY,
             )
         except Exception:

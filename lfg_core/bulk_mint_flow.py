@@ -278,7 +278,7 @@ class BulkMintJob:
             issuer=p["issuer"],
             return_url=self.return_url,
             user_token=self.push_user_token,
-            platform=memos.platform_for_surface(self.platform),
+            platform=memos.platform_for(self.platform),
             # Sender-verified on-ledger (see MintSession.prepare_payment):
             # only this wallet may sign, or the payment is unclaimable.
             account=self.wallet_address,
@@ -551,7 +551,7 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
         unit.nft_id,
         job.wallet_address,
         attempts=1,
-        platform=memos.platform_for_surface(job.platform),
+        platform=memos.platform_for(job.platform),
     )
     if result.status == "failed":
         unit.state = MINTED

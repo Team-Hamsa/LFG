@@ -296,7 +296,7 @@ async def start_next_burn(session: Burn2MintSession, *, nft_info: Any = None) ->
         burn.nft_id,
         return_url=session.return_url,
         user_token=session.push_user_token,
-        platform=memos.platform_for_surface(session.platform),
+        platform=memos.platform_for(session.platform),
     )
     if not payload:
         burn.state = B_FAILED

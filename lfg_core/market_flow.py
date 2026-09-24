@@ -899,7 +899,7 @@ async def advance_trait_sell_session(
             session.nft_id,
             market_ops.brix_amount_dict(session.amount_brix),
             user_token=session.push_user_token,
-            platform=memos.platform_for_surface(session.platform),
+            platform=memos.platform_for(session.platform),
         )
         if not payload:
             session.state = FAILED

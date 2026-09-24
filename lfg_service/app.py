@@ -2171,7 +2171,7 @@ async def _start_brix_trustline(wallet, user):
         config.BRIX_ISSUER,
         config.BRIX_TRUSTLINE_LIMIT,
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response(
@@ -3933,7 +3933,7 @@ async def handle_market_list_start(request):
         offer_amount,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -4012,7 +4012,7 @@ async def handle_market_cancel_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -4187,14 +4187,14 @@ async def handle_market_buy_start(request):
             market_ops.xrp_to_drops_str(price_xrp_quote),
             return_url=return_url,
             user_token=push_user_token,
-            platform=memos.platform_for_surface(_platform(user)),
+            platform=memos.platform_for(_platform(user)),
         )
     else:
         payload = await xumm_ops.create_accept_offer_payload(
             offer_index,
             return_url=return_url,
             user_token=push_user_token,
-            platform=memos.platform_for_surface(_platform(user)),
+            platform=memos.platform_for(_platform(user)),
             action=memos.ACTION_BUY,
             # A marketplace sell offer has no Destination, so any account
             # could otherwise sign this and buy the NFT into itself. The
@@ -4428,7 +4428,7 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
         session.offer_index,
         return_url=session.return_url,
         user_token=session.push_user_token,
-        platform=memos.platform_for_surface(session.platform),
+        platform=memos.platform_for(session.platform),
         action=memos.ACTION_BUY,
         account=session.wallet_address,
     )
@@ -4983,7 +4983,7 @@ async def handle_market_bid_start(request):
         expiration,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -5100,7 +5100,7 @@ async def handle_market_bid_accept_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -5243,7 +5243,7 @@ def _build_shop_deps(
         payload = await xumm_ops.create_accept_offer_payload(
             offer_index,
             user_token=user_token,
-            platform=memos.platform_for_surface(platform),
+            platform=memos.platform_for(platform),
             action=memos.ACTION_SHOP_BUY,
             # The shop offer is Destination-locked to the buyer and priced in
             # their BRIX/XRP — pin the payload so only they can sign it.
@@ -6684,7 +6684,7 @@ async def handle_closet_bid_create(request):
         last_ledger_sequence=lls,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         # Ambiguous: the request may have reached the wallet. Keep the
@@ -6802,7 +6802,7 @@ async def handle_closet_ask_buy(request):
         send_max_drops=market_ops.xrp_to_drops_str(quote) if pay_with == "XRP" else None,
         return_url=xumm_ops.discord_return_url(None, None),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         # Ambiguous: the payment may still land. Leave the fill funds_pending
@@ -8089,7 +8089,7 @@ async def handle_bulk_mint_unit_accept(request):
         unit.offer_id,
         return_url=return_url,
         user_token=job.push_user_token,
-        platform=memos.platform_for_surface(job.platform),
+        platform=memos.platform_for(job.platform),
         account=job.wallet_address,
     )
     if not payload:
@@ -8454,7 +8454,7 @@ async def handle_pending_offer_accept(request):
         offer_index,
         return_url=return_url,
         user_token=await _push_token(request["user"]),
-        platform=memos.platform_for_surface(_platform(request["user"])),
+        platform=memos.platform_for(_platform(request["user"])),
         account=wallet,
     )
     if not payload:
