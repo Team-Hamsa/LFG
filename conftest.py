@@ -258,6 +258,7 @@ def _reset_xumm_status_cache() -> None:
         # failed-lookup back-offs are module state too.
         app_mod._regular_keys.clear()
         app_mod._regular_key_failed_at.clear()
+        app_mod._regular_key_locks.clear()
 
 
 @pytest.fixture(autouse=True)

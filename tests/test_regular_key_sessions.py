@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -228,3 +229,25 @@ def test_noting_an_older_answer_never_overwrites_a_newer_one():
     assert app._regular_keys[ACCOUNT] == (checked, SIGNER)
     app._note_regular_key(ACCOUNT, OTHER, checked + 1.0)  # read after it
     assert app._regular_keys[ACCOUNT] == (checked + 1.0, OTHER)
+
+
+@pytest.mark.parametrize("answer", [KeyAuthority(SIGNER, False, True), LOOKUP_FAILED])
+def test_concurrent_stale_rechecks_share_one_ledger_read(monkeypatch, answer):
+    calls = []
+
+    async def _slow_lookup(address):
+        calls.append(address)
+        await asyncio.sleep(0.05)  # every other request arrives while this is in flight
+        return answer
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _slow_lookup)
+    app._note_regular_key(ACCOUNT, SIGNER, time.monotonic() - 3600)  # stale answer on record
+
+    async def burst():
+        return await asyncio.gather(
+            *(app._regular_key_still_set(ACCOUNT, SIGNER) for _ in range(5))
+        )
+
+    results = _run(burst())
+    assert calls == [ACCOUNT]  # one read, not five
+    assert results == [True] * 5  # each waiter judged its signer against the shared result

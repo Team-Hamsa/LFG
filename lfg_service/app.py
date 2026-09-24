@@ -872,6 +872,7 @@ REGULAR_KEY_RECHECK_SECONDS = 60.0
 REGULAR_KEY_RETRY_SECONDS = 15.0
 _regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
 _regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
+_regular_key_locks: dict[str, asyncio.Lock] = {}  # wallet -> its one in-flight recheck
 
 
 def _note_regular_key(
@@ -888,30 +889,36 @@ def _note_regular_key(
 
 async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
     """Is `signer` still `wallet`'s RegularKey? None: no answer to go on."""
-    now = time.monotonic()
     cached = _regular_keys.get(wallet)
-    if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
+    if cached is not None and time.monotonic() - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
         return cached[1] == signer
-    failed_at = _regular_key_failed_at.get(wallet)
-    if failed_at is not None and now - failed_at < REGULAR_KEY_RETRY_SECONDS:
-        # Still backing off a recent failure: ride the last answer (whatever
-        # its age) rather than repeat the RPC failover walk.
-        return None if cached is None else cached[1] == signer
-    authority = await xrpl_ops.key_authority(wallet)
-    # Re-read after the await: a fresher answer (e.g. the sign-in seed, or a
-    # concurrent recheck) may have landed while this lookup was in flight, and
-    # it must decide this request as well as the cache (#603 review).
-    current = _regular_keys.get(wallet)
-    if authority.lookup_ok:
-        _regular_key_failed_at.pop(wallet, None)
-        if current is not None and current[0] > now:
-            return current[1] == signer
-        # Stamped with when THIS lookup started, so a slower lookup that
-        # started earlier can never clobber it.
-        _note_regular_key(wallet, authority.regular_key, now)
-        return authority.regular_key == signer
-    _regular_key_failed_at[wallet] = now
-    return None if current is None else current[1] == signer
+    # One ledger read per wallet at a time: concurrent stale rechecks wait for
+    # it and then judge their own signer against what it recorded (#603 review).
+    async with _regular_key_locks.setdefault(wallet, asyncio.Lock()):
+        now = time.monotonic()
+        cached = _regular_keys.get(wallet)
+        if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
+            return cached[1] == signer
+        failed_at = _regular_key_failed_at.get(wallet)
+        if failed_at is not None and now - failed_at < REGULAR_KEY_RETRY_SECONDS:
+            # Still backing off a recent failure: ride the last answer (whatever
+            # its age) rather than repeat the RPC failover walk.
+            return None if cached is None else cached[1] == signer
+        authority = await xrpl_ops.key_authority(wallet)
+        # Re-read after the await: a fresher answer (e.g. a sign-in seed) may
+        # have landed while this lookup was in flight, and it must decide this
+        # request as well as the cache (#603 review).
+        current = _regular_keys.get(wallet)
+        if authority.lookup_ok:
+            _regular_key_failed_at.pop(wallet, None)
+            if current is not None and current[0] > now:
+                return current[1] == signer
+            # Stamped with when THIS lookup started, so a slower lookup that
+            # started earlier can never clobber it.
+            _note_regular_key(wallet, authority.regular_key, now)
+            return authority.regular_key == signer
+        _regular_key_failed_at[wallet] = now
+        return None if current is None else current[1] == signer
 
 
 async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Response | None:
