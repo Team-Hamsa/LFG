@@ -165,6 +165,7 @@ PRESUBMIT_SIMULATE=1                                        # optional (#58); pr
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
 WC_SURFACES=web,telegram                                    # optional (#447); surfaces that show "Connect with Joey" (discord-activity needs URL Mappings first)
+AGENT_SIGNIN_ENABLED=0                                          # optional (agent users §1); the "agent" web sign-in provider for bots holding their own key — 0 = off
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -623,7 +624,8 @@ from both).
 **closed enum** (constants, never free strings — an unknown value raises):
 - `initiator` — `user` (Xaman-signed) | `backend` (issuer-wallet-signed)
 - `platform` — `discord-bot` | `discord-activity` | `telegram` | `twitter` |
-  `webapp` | `backend` (backend-signed op with no user surface)
+  `webapp` | `agent` (a bot using the `agent` sign-in provider — agent users
+  spec §1) | `backend` (backend-signed op with no user surface)
 - `action` — `mint` / `create-offer` / `accept-offer` / `cancel-offer` / `burn`
   / `modify` / `trait-swap-fee` / `buy-and-burn` / `trustset` / `payment` /
   `list` / `buy` / economy `harvest`/`assemble`/`equip`/`extract`/`deposit`
@@ -1741,8 +1743,8 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    client-reported hash on-ledger (validated, Account, type, closed field
    allowlist, Flags masked for `tfFullyCanonicalSig`, hash not reused, tx
    postdates the row) before a row is trusted "signed"; `sweep_sign_requests`
-   runs in `_settlement_sweep_loop` (now started when `ECONOMY_ENABLED or
-   config.wc_enabled()`). Sign-in/linking prove ownership via
+   runs in `_settlement_sweep_loop` (always started; `sweep_sign_requests`
+   runs every pass). Sign-in/linking prove ownership via
    `lfg_core/signing/proof.py`: a SIGNED, NEVER-SUBMITTED 1-drop Payment to
    the NAME-reservation blackhole `rrrrrrrrrrrrrrrrrNAMEtxvNvQ`
    (Joey-autofilled Fee/Sequence/LastLedgerSequence — required, range-checked;
@@ -1786,6 +1788,15 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    pre-submit `simulate` pre-flight does not run on the Joey path (the client
    submits directly); the Xaman link arm proves consent via a `SignIn` +
    `custom_meta` instruction only, not a signed proof.
+   **The `agent` provider** (agent users spec §1): a third signing provider
+   for a bot holding its own key, ambient-dispatched the same way — sign-in
+   sets `provider: "agent"` on a `sign_requests` row (gated on
+   `AGENT_SIGNIN_ENABLED`, default off) instead of `walletconnect`, and every
+   transaction the resulting session causes is labelled `platform=agent` in
+   its memos. A proof signed right after a `SetRegularKey` is refused
+   `bad_proof` until that `SetRegularKey` validates on-ledger (the
+   validated-ledger lookup still returns the old key) — wait for validation,
+   don't retry blindly.
    >
    > **#212 push hardening:** tokens are now (re)captured from EVERY signed
    > payload a flow polls (`_capture_issued_token` in mint/market flows,

@@ -10084,8 +10084,9 @@ async def _finish_web_signin(
 ) -> web.Response:
     """Link the proven wallet as a platform="web" identity and issue its token.
 
-    Shared by both web sign-in arms: the XUMM SignIn poll and the
-    WalletConnect signed-proof redemption (#447).
+    Shared by all three web sign-in arms: the XUMM SignIn poll, the
+    WalletConnect signed-proof redemption (#447), and the agent signed-proof
+    redemption (agent users spec §1).
     `signer` is the proof's signing key; a RegularKey marks the token (spec §2).
     `checked_at` is when the proof's key lookup started: it orders the cache seed
     against any fresher answer that landed meanwhile.
