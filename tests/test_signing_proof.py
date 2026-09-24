@@ -16,6 +16,7 @@ from xrpl.wallet import Wallet
 
 from lfg_core import config, memos
 from lfg_core.signing import proof
+from lfg_core.signing.key_authority import LOOKUP_FAILED, KeyAuthority
 
 NONCE = "a" * 64
 
@@ -149,7 +150,7 @@ def test_tampered_signature_rejects():
 
 
 def test_pubkey_must_derive_the_account():
-    """A RegularKey-signed proof (pubkey != Account) is rejected in v1."""
+    """Without a KeyAuthority (the master-key-only rule), a RegularKey-signed proof is refused."""
     other = Wallet.create()
     _, tx = _signed()
     tx["Account"] = other.classic_address
@@ -364,3 +365,72 @@ def test_deliver_max_only_with_wrong_value_rejects():
     with pytest.raises(proof.ProofError) as ei:
         proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
     assert ei.value.reason == "amount"
+
+
+ACCOUNT, REGULAR, FOREIGN = Wallet.create(), Wallet.create(), Wallet.create()
+FOUND = KeyAuthority(regular_key=REGULAR.classic_address, master_disabled=False, lookup_ok=True)
+
+
+def _signed_by(signer, account, nonce=NONCE):
+    """A proof for `account` signed with `signer`'s key (a RegularKey when they differ)."""
+    tx = _autofill(proof.build_proof_tx(account, nonce, memos.ACTION_SIGNIN))
+    tx["SigningPubKey"] = signer.public_key
+    tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), signer.private_key)
+    return tx
+
+
+def _verify(tx, authority):
+    return proof.verify_proof(
+        tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN, authority=authority
+    )
+
+
+def _refusal(tx, authority):
+    with pytest.raises(proof.ProofError) as ei:
+        _verify(tx, authority)
+    return ei.value.reason
+
+
+def test_master_key_is_accepted_when_the_ledger_allows_it():
+    tx = _signed_by(ACCOUNT, ACCOUNT.classic_address)
+    assert _verify(tx, FOUND) == ACCOUNT.classic_address
+
+
+def test_disabled_master_key_is_refused():
+    tx = _signed_by(ACCOUNT, ACCOUNT.classic_address)
+    disabled = KeyAuthority(REGULAR.classic_address, master_disabled=True, lookup_ok=True)
+    assert _refusal(tx, disabled) == "master_disabled"
+
+
+def test_master_key_is_accepted_when_the_lookup_fails():
+    tx = _signed_by(ACCOUNT, ACCOUNT.classic_address)
+    assert _verify(tx, LOOKUP_FAILED) == ACCOUNT.classic_address
+
+
+def test_regular_key_is_accepted():
+    tx = _signed_by(REGULAR, ACCOUNT.classic_address)
+    assert _verify(tx, FOUND) == ACCOUNT.classic_address
+
+
+def test_regular_key_is_refused_when_the_lookup_fails():
+    tx = _signed_by(REGULAR, ACCOUNT.classic_address)
+    assert _refusal(tx, LOOKUP_FAILED) == "regular_key_unverified"
+
+
+def test_foreign_key_is_refused():
+    tx = _signed_by(FOREIGN, ACCOUNT.classic_address)
+    assert _refusal(tx, FOUND) == "pubkey_account"
+
+
+def test_foreign_key_is_refused_as_unverified_when_the_lookup_fails():
+    """Without the lookup a RegularKey and a foreign key can't be told apart,
+    so a foreign signer gets the same retryable 503 a RegularKey would (the
+    deliberate spec deviation from a flat `pubkey_account`)."""
+    tx = _signed_by(FOREIGN, ACCOUNT.classic_address)
+    assert _refusal(tx, LOOKUP_FAILED) == "regular_key_unverified"
+
+
+def test_signing_key_address_names_the_key_that_signed():
+    assert proof.signing_key_address(_signed_by(REGULAR, ACCOUNT.classic_address)) == (
+        REGULAR.classic_address
+    )

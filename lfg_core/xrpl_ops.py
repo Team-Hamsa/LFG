@@ -60,6 +60,12 @@ from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
 from lfg_core import config, memos, owner_lock, payment_ledger, xrpl_rpc
+from lfg_core.signing.key_authority import (
+    LOOKUP_FAILED,
+    NOT_FOUND,
+    KeyAuthority,
+    from_account_info,
+)
 
 
 def rpc_client(urls: Sequence[str] | None = None) -> JsonRpcClient:
@@ -983,6 +989,29 @@ async def disallows_incoming_nft_offers(address: str) -> bool | None:
         return bool(raw & 0x04000000)
     logging.warning(f"disallows_incoming_nft_offers({address}) inconclusive: no flags in response")
     return None
+
+
+async def key_authority(address: str) -> KeyAuthority:
+    """The validated ledger's word on which keys may sign for `address` (agent
+    users spec §2).
+
+    Never raises: a failed or inconclusive read is `LOOKUP_FAILED`, and each
+    caller decides what that allows (a proof signed by the master key still
+    passes; one signed by a RegularKey doesn't). `actNotFound` is a definite
+    answer, not a failure: no RegularKey, master enabled.
+    """
+    try:
+        client = async_rpc_client()
+        response = await client.request(AccountInfo(account=address, ledger_index="validated"))
+    except Exception as e:
+        logging.warning(f"key_authority({address}) lookup failed: {e}")
+        return LOOKUP_FAILED
+    if response.is_successful():
+        return from_account_info(response.result)
+    if response.result.get("error") == "actNotFound":
+        return NOT_FOUND
+    logging.warning(f"key_authority({address}) inconclusive: {response.result.get('error')}")
+    return LOOKUP_FAILED
 
 
 @dataclass(frozen=True)

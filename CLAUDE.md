@@ -1749,12 +1749,28 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    provenance memos + `lfg/nonce`, closed field allowlist, Destination/Amount
    pinned) — Joey exposes no `signMessage` and its pipeline refuses zeroed
    pseudo-tx placeholders (the original `AccountSet`/`Fee:"0"` shape errored
-   inside Joey, verified live 2026-09-09). **RegularKey is
-   NOT accepted**: `verify_proof` derives the address from `SigningPubKey`
-   and requires it to equal `Account`, so only the master key can prove
-   ownership. A proved link is an append-only `wallet_proof_links` edge
-   (`identity.link_proof`, undirected, sorted-pair PK — repeats are a no-op;
-   undo is an admin `DELETE`, there is no unlink endpoint). **Ops:**
+   inside Joey, verified live 2026-09-09).
+   **RegularKey proofs** (agent users spec §2): `_redeem_proof` reads the
+   account's keys from the validated ledger (`xrpl_ops.key_authority`) before
+   `verify_proof`. The master key proves ownership unless `lsfDisableMaster` is
+   set; the AccountRoot's current RegularKey proves it too. On a failed
+   lookup the master key is still accepted; any non-master key — a RegularKey
+   or a foreign key, indistinguishable without the lookup — gets a retryable
+   503 `regular_key_unverified` instead of `bad_proof`. The rule runs before
+   `on_verified`, so a refused link proof writes no edge. A RegularKey
+   session's token carries `key: "regular"` and `signer`; `require_auth` (and
+   `/api/events/me`, checked only when the socket connects — an open stream
+   keeps receiving that wallet's events, as after logout) re-check at most
+   once a minute per wallet that the RegularKey is still that signer,
+   denylist the token with a 401 `key_revoked` when it isn't, keep the last
+   answer on a lookup error (a failed recheck backs off 15 s per wallet
+   before retrying), and fail closed with a 503 `key_unverified` when there
+   is none (a restart since sign-in). Revocation does not undo
+   `wallet_proof_links` edges written with a key later removed (same as
+   master-key behaviour). A proved link is an append-only
+   `wallet_proof_links` edge (`identity.link_proof`, undirected, sorted-pair
+   PK — repeats are a no-op; undo is an admin `DELETE`, there is no unlink
+   endpoint). **Ops:**
    `REOWN_PROJECT_ID` unset (default) = feature off everywhere ("Connect with
    Joey" hidden); `WC_SURFACES` (default `web,telegram`) gates which surfaces
    show the button — `discord-activity` needs URL Mappings configured in the

@@ -23,6 +23,7 @@ from xrpl.wallet import Wallet
 import lfg_service.app as app
 from lfg_core import memos
 from lfg_core.signing import proof, store
+from lfg_core.signing.key_authority import LOOKUP_FAILED, NOT_FOUND, KeyAuthority
 from lfg_service import identity as identity_store
 
 
@@ -80,12 +81,35 @@ def _stub_proof_creation_ledger(monkeypatch):
     monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger)
 
 
+@pytest.fixture(autouse=True)
+def ledger_keys(monkeypatch):
+    """No network from the proof endpoints: the account's keys as the ledger
+    reports them. Default: found, no RegularKey, master enabled."""
+    state = {"authority": NOT_FOUND, "addresses": []}
+
+    async def _lookup(address):
+        state["addresses"].append(address)
+        return state["authority"]
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    return state
+
+
 def _sign(wallet, nonce, action=memos.ACTION_SIGNIN):
     tx = proof.build_proof_tx(wallet.classic_address, nonce, action)
     # What Joey does before signing (autofill: true).
     tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
     tx["SigningPubKey"] = wallet.public_key
     tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), wallet.private_key)
+    return tx
+
+
+def _sign_as(account, signer, nonce, action):
+    """A proof for `account` signed with `signer`'s key (a RegularKey when they differ)."""
+    tx = proof.build_proof_tx(account, nonce, action)
+    tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
+    tx["SigningPubKey"] = signer.public_key
+    tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), signer.private_key)
     return tx
 
 
@@ -320,3 +344,83 @@ def test_unreadable_ledger_degrades_open(monkeypatch):
     tx = _sign(w, b["nonce"], memos.ACTION_SIGNIN)
     r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
     assert r.status == 200
+
+
+def _redeem(b, tx):
+    r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    return r.status, json.loads(r.text)
+
+
+def test_regular_key_proof_signs_in_and_the_token_names_the_key(monkeypatch, ledger_keys):
+    b = _start(monkeypatch)
+    account, regular = Wallet.create(), Wallet.create()
+    ledger_keys["authority"] = KeyAuthority(regular.classic_address, False, True)
+    status, body = _redeem(
+        b, _sign_as(account.classic_address, regular, b["nonce"], memos.ACTION_SIGNIN)
+    )
+    assert status == 200 and body["wallet"] == account.classic_address
+    decoded = app.verify_session_token(body["session_token"])
+    assert decoded["id"] == account.classic_address
+    assert decoded["key"] == "regular" and decoded["signer"] == regular.classic_address
+    assert ledger_keys["addresses"] == [account.classic_address]  # the proof's Account
+
+
+def test_master_key_token_carries_no_key_claims(monkeypatch):
+    b = _start(monkeypatch)
+    w = Wallet.create()
+    status, body = _redeem(b, _sign(w, b["nonce"]))
+    decoded = app.verify_session_token(body["session_token"])
+    assert status == 200 and "key" not in decoded and "signer" not in decoded
+
+
+def test_foreign_key_proof_is_refused(monkeypatch):
+    b = _start(monkeypatch)
+    account, foreign = Wallet.create(), Wallet.create()
+    status, body = _redeem(
+        b, _sign_as(account.classic_address, foreign, b["nonce"], memos.ACTION_SIGNIN)
+    )
+    assert status == 400 and body["code"] == "bad_proof"
+    assert store.get(b["sign_id"])["state"] == "pending"
+
+
+def test_disabled_master_key_is_refused(monkeypatch, ledger_keys):
+    b = _start(monkeypatch)
+    ledger_keys["authority"] = KeyAuthority(None, True, True)
+    status, body = _redeem(b, _sign(Wallet.create(), b["nonce"]))
+    assert status == 400 and body["code"] == "bad_proof"
+
+
+def test_unverifiable_regular_key_is_a_retryable_503(monkeypatch, ledger_keys):
+    b = _start(monkeypatch)
+    account, regular = Wallet.create(), Wallet.create()
+    ledger_keys["authority"] = LOOKUP_FAILED
+    status, body = _redeem(
+        b, _sign_as(account.classic_address, regular, b["nonce"], memos.ACTION_SIGNIN)
+    )
+    assert status == 503 and body["code"] == "regular_key_unverified"
+    assert store.get(b["sign_id"])["state"] == "pending"  # the agent can retry
+
+
+def test_master_key_is_accepted_when_the_lookup_fails(monkeypatch, ledger_keys):
+    b = _start(monkeypatch)
+    ledger_keys["authority"] = LOOKUP_FAILED
+    status, _ = _redeem(b, _sign(Wallet.create(), b["nonce"]))
+    assert status == 200
+
+
+def test_a_sign_in_racing_a_rotation_cannot_overwrite_the_newer_key(monkeypatch):
+    b = _start(monkeypatch)
+    account, old, new = Wallet.create(), Wallet.create(), Wallet.create()
+
+    async def _lookup(address):
+        # While this sign-in's (stale) read is in flight, a recheck caches the
+        # rotated key: a newer answer than the one this read returns.
+        app._note_regular_key(account.classic_address, new.classic_address)
+        return KeyAuthority(old.classic_address, False, True)
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    status, _ = _redeem(b, _sign_as(account.classic_address, old, b["nonce"], memos.ACTION_SIGNIN))
+    assert status == 200  # the proof was valid by its own read
+    # ...but its seed must not overwrite the newer answer, or the old key's
+    # token would pass rechecks and the new key's sessions would be revoked
+    assert app._regular_keys[account.classic_address][1] == new.classic_address

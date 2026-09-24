@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 import uuid as uuid_lib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
@@ -96,6 +96,7 @@ from lfg_core.log_hygiene import quiet_http_client_loggers
 from lfg_core.signing import context as signing_context
 from lfg_core.signing import proof as signing_proof
 from lfg_core.signing import store as sign_request_store
+from lfg_core.signing.key_authority import LOOKUP_FAILED
 from lfg_core.user_db import create_users_table, delete_user, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
@@ -519,6 +520,9 @@ async def handle_events_me(request: Any) -> Any:
     payload = verify_session_token(request.query.get("token", ""))
     if not payload:
         return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
+    refusal = await _regular_key_refusal(request.query.get("token", ""), payload)
+    if refusal is not None:
+        return refusal
     wallet = await _resolve_wallet(_platform(payload), payload["id"])
     if wallet is None:
         return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
@@ -735,6 +739,9 @@ def make_session_token(user: dict[str, Any]) -> str:
         # sibling token minted for the same user in the same second.
         "jti": secrets.token_hex(8),
     }
+    # A RegularKey session (agent users spec §2) carries the key that signed, so
+    # require_auth can end it when the owner removes or rotates that key.
+    payload.update({k: user[k] for k in ("key", "signer") if k in user})
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
@@ -750,8 +757,13 @@ _revoked_sessions: dict[str, float] = {}
 
 
 def _prune_revoked_sessions(now: float) -> None:
-    for sig in [k for k, exp in _revoked_sessions.items() if exp < now]:
-        del _revoked_sessions[sig]
+    # Revocations now also run off the event loop (asyncio.to_thread), so a
+    # concurrent write can land mid-iteration; iterate a snapshot rather than
+    # the live dict (F3) to avoid "dictionary changed size during iteration".
+    # pop, not del: two concurrent prunes can snapshot the same expired sig, and
+    # the second must not raise KeyError before its own token is denylisted.
+    for sig in [k for k, exp in list(_revoked_sessions.items()) if exp < now]:
+        _revoked_sessions.pop(sig, None)
 
 
 def load_revoked_sessions() -> None:
@@ -846,7 +858,148 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
         )
 
 
+# --- RegularKey sessions (agent users spec §2, Amendment 1) -----------------
+# A token minted from a RegularKey proof carries key="regular" and the signing
+# key's address. Every authenticated request re-checks, at most once a minute
+# per wallet, that the account's RegularKey is still that signer. If the owner
+# removed or rotated it, the token is denylisted and the request refused. On a
+# lookup error the last answer stands, whatever its age; with no answer at all
+# (a restart since sign-in) the request fails closed with a retryable 503.
+# A FAILED lookup backs off REGULAR_KEY_RETRY_SECONDS per wallet, so an RPC
+# outage doesn't make every request from that session pay for a fresh
+# failover walk once the 60 s cache goes stale.
+REGULAR_KEY_RECHECK_SECONDS = 60.0
+REGULAR_KEY_RETRY_SECONDS = 15.0
+# An answer is stamped when its lookup STARTED, a moment before the token it
+# seeds is minted, so the sweep waits this much past SESSION_TTL before dropping
+# it: an answer a still-valid token may depend on is never swept.
+REGULAR_KEY_SWEEP_GRACE_SECONDS = 300.0
+_regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
+_regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
+
+
+@dataclass
+class _RecheckLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0  # holders + waiters; the entry is dropped when this reaches 0
+
+
+_regular_key_locks: dict[str, _RecheckLock] = {}  # wallet -> its in-flight recheck
+
+
+@contextlib.asynccontextmanager
+async def _recheck_lock(wallet: str) -> AsyncIterator[None]:
+    """Serialize one wallet's rechecks. The entry exists only while a recheck is in
+    flight or waiting (everything here runs on the event loop, so the count is
+    exact), so the registry never outgrows the wallets being rechecked right now."""
+    entry = _regular_key_locks.get(wallet)
+    if entry is None:
+        entry = _regular_key_locks[wallet] = _RecheckLock()
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _regular_key_locks.get(wallet) is entry:
+            del _regular_key_locks[wallet]
+
+
+def _note_regular_key(
+    wallet: str, regular_key: str | None, checked_at: float | None = None
+) -> None:
+    """Record `wallet`'s RegularKey as the ledger reported it to a lookup that
+    STARTED at `checked_at` (monotonic; default now). Never overwrites a newer
+    answer: a stale read that finishes late must not replace a fresher one."""
+    at = time.monotonic() if checked_at is None else checked_at
+    current = _regular_keys.get(wallet)
+    if current is None or at >= current[0]:
+        _regular_keys[wallet] = (at, regular_key)
+    _sweep_regular_keys(time.monotonic())
+
+
+def _sweep_regular_keys(now: float) -> None:
+    """Drop answers older than a session's lifetime plus a grace (every token that
+    could still need one was minted after it, and re-seeded it) and lapsed failure
+    back-offs."""
+    for w, (checked, _) in list(_regular_keys.items()):
+        if now - checked > SESSION_TTL + REGULAR_KEY_SWEEP_GRACE_SECONDS:
+            del _regular_keys[w]
+    for w, failed in list(_regular_key_failed_at.items()):
+        if now - failed >= REGULAR_KEY_RETRY_SECONDS:
+            del _regular_key_failed_at[w]
+
+
+async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
+    """Is `signer` still `wallet`'s RegularKey? None: no answer to go on."""
+    cached = _regular_keys.get(wallet)
+    if cached is not None and time.monotonic() - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
+        return cached[1] == signer
+    # One ledger read per wallet at a time: concurrent stale rechecks wait for
+    # it and then judge their own signer against what it recorded (#603 review).
+    async with _recheck_lock(wallet):
+        now = time.monotonic()
+        cached = _regular_keys.get(wallet)
+        if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
+            return cached[1] == signer
+        failed_at = _regular_key_failed_at.get(wallet)
+        if failed_at is not None and now - failed_at < REGULAR_KEY_RETRY_SECONDS:
+            # Still backing off a recent failure: ride the last answer (whatever
+            # its age) rather than repeat the RPC failover walk.
+            return None if cached is None else cached[1] == signer
+        authority = await xrpl_ops.key_authority(wallet)
+        # Re-read after the await: a fresher answer (e.g. a sign-in seed) may
+        # have landed while this lookup was in flight, and it must decide this
+        # request as well as the cache (#603 review).
+        current = _regular_keys.get(wallet)
+        if authority.lookup_ok:
+            _regular_key_failed_at.pop(wallet, None)
+            if current is not None and current[0] > now:
+                return current[1] == signer
+            # Stamped with when THIS lookup started, so a slower lookup that
+            # started earlier can never clobber it.
+            _note_regular_key(wallet, authority.regular_key, now)
+            return authority.regular_key == signer
+        _regular_key_failed_at[wallet] = now
+        return None if current is None else current[1] == signer
+
+
+async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Response | None:
+    """None if this session may proceed, else the refusal. Master-key tokens (no
+    "key" claim) pass untouched."""
+    if payload.get("key") != "regular":
+        return None
+    still = await _regular_key_still_set(str(payload["id"]), str(payload.get("signer", "")))
+    if still is None:
+        return web.json_response(
+            {
+                "error": "could not check your signing key on-ledger; try again",
+                "code": "key_unverified",
+            },
+            status=503,
+        )
+    if not still:
+        await asyncio.to_thread(revoke_session_token, token)
+        return web.json_response(
+            {"error": "signing key revoked", "code": "key_revoked"}, status=401
+        )
+    return None
+
+
+def _revocation_exempt(handler):
+    """Apply beneath `@require_auth` (i.e. closer to the handler) to skip the
+    RegularKey revocation check (F2, agent users spec §2 Amendment 1).
+    Revocation only ever narrows access, so logout and wallet disconnect must
+    keep working even when the ledger is unreachable — otherwise a session
+    whose key was pulled specifically to end it can outlive the restart that
+    should have killed it."""
+    handler._regular_key_exempt = True
+    return handler
+
+
 def require_auth(handler):
+    exempt = getattr(handler, "_regular_key_exempt", False)
+
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
             request["user"] = {"id": "dev", "name": "dev"}
@@ -857,6 +1010,10 @@ def require_auth(handler):
         user = verify_session_token(auth[7:])
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
+        if not exempt:
+            refusal = await _regular_key_refusal(auth[7:], user)
+            if refusal is not None:
+                return refusal
         request["user"] = user
         # #447: the provider a user signed in with is ambient for the request
         # (and for tasks the handler spawns). Web sessions use the wallet as
@@ -1698,11 +1855,16 @@ async def handle_me(request):
 
 
 @require_auth
+@_revocation_exempt
 async def handle_logout(request):
     """Log out: revoke the bearer session token server-side. The web surface
     calls this before dropping its localStorage copy; Discord/Telegram
     re-authenticate through their host handshake, so for them the meaningful
-    action is /api/wallet/disconnect."""
+    action is /api/wallet/disconnect.
+
+    Exempt from the RegularKey revocation check (F2): revoking only narrows
+    access, so a stale or unverifiable key must never block a session from
+    denylisting its own token."""
     token = request.headers.get("Authorization", "")[7:]
     if not await asyncio.to_thread(revoke_session_token, token):
         return web.json_response({"error": "could not persist logout"}, status=500)
@@ -1710,13 +1872,17 @@ async def handle_logout(request):
 
 
 @require_auth
+@_revocation_exempt
 async def handle_wallet_disconnect(request):
     """Disconnect the caller's wallet. Discord/Telegram: unlink the wallet
     from the platform identity (plus the legacy Users row for Discord, which
     _resolve_wallet would otherwise fall back to) — the next /api/me shows no
     wallet and the client re-offers the Xaman sign-in. Web: the wallet IS the
     identity, so this is a logout (the identities row and its push token are
-    kept for the wallet's next sign-in)."""
+    kept for the wallet's next sign-in).
+
+    Exempt from the RegularKey revocation check (F2): revoking only narrows
+    access, so a stale or unverifiable key must never block a disconnect."""
     user = request["user"]
     platform = _platform(user)
     if platform == "web":
@@ -9888,11 +10054,16 @@ async def handle_web_signin_start(request):
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
-async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
+async def _finish_web_signin(
+    wallet: str, provider: str, signer: str | None = None, checked_at: float | None = None
+) -> web.Response:
     """Link the proven wallet as a platform="web" identity and issue its token.
 
     Shared by both web sign-in arms: the XUMM SignIn poll and the
     WalletConnect signed-proof redemption (#447).
+    `signer` is the proof's signing key; a RegularKey marks the token (spec §2).
+    `checked_at` is when the proof's key lookup started: it orders the cache seed
+    against any fresher answer that landed meanwhile.
     """
     # A wallet already known from another surface keeps its display handle;
     # a brand-new one gets a readable shortened address.
@@ -9901,9 +10072,12 @@ async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
     if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
         return web.json_response({"error": "identity link failed"}, status=500)
     _warm_funder_cache(wallet)
-    token = make_session_token(
-        {"id": wallet, "name": name, "platform": "web", "provider": provider}
-    )
+    user = {"id": wallet, "name": name, "platform": "web", "provider": provider}
+    if signer is not None and signer != wallet:
+        user.update(key="regular", signer=signer)
+        # the proof just verified it on-ledger, as of when its lookup started
+        _note_regular_key(wallet, signer, checked_at)
+    token = make_session_token(user)
     return web.json_response(
         {
             "state": "signed",
@@ -9954,6 +10128,15 @@ async def _proof_creation_ledger() -> int | None:
         return None
 
 
+@dataclass(frozen=True)
+class RedeemedProof:
+    """What a redeemed ownership proof established."""
+
+    wallet: str  # the account proven
+    signer: str  # the key that signed: == wallet for the master key, else its RegularKey
+    checked_at: float  # when the key lookup started (time.monotonic()); orders the seed
+
+
 async def _redeem_proof(
     sign_id: str,
     tx_json: Any,
@@ -9963,7 +10146,7 @@ async def _redeem_proof(
     wallet_hint: str | None = None,
     expect_wallet: str | None = None,
     on_verified: Callable[[str], Awaitable[web.Response | None]] | None = None,
-) -> tuple[str, None] | tuple[None, web.Response]:
+) -> tuple[RedeemedProof, None] | tuple[None, web.Response]:
     """Load → validate → verify → consume one signed-proof row (#447).
 
     The single implementation shared by web sign-in and wallet linking, so the
@@ -9982,7 +10165,7 @@ async def _redeem_proof(
     retryable, and if the consume then loses the CAS race the side effect is
     already durable (it must therefore be idempotent).
 
-    Returns `(wallet, None)` on success, `(None, response)` otherwise.
+    Returns `(RedeemedProof, None)` on success, `(None, response)` otherwise.
     """
     row = await asyncio.to_thread(sign_request_store.get, sign_id)
     if row is None or row.get("purpose") != purpose:
@@ -10007,6 +10190,15 @@ async def _redeem_proof(
     # Proof Memos are otherwise unbounded — cap the body before verifying.
     if not isinstance(tx_json, dict) or len(json.dumps(tx_json)) > WC_PROOF_MAX_BYTES:
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    # Spec §2: one validated-ledger read of the account's keys, BEFORE verify_proof
+    # and so before on_verified, so a proof the key rule refuses never writes an edge.
+    account = tx_json.get("Account")
+    checked_at = time.monotonic()  # before the await: a fresher answer may land during it
+    authority = (
+        await xrpl_ops.key_authority(account)
+        if isinstance(account, str) and is_valid_classic_address(account)
+        else LOOKUP_FAILED
+    )
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
         created_ledger = row.get("created_ledger")
@@ -10019,12 +10211,21 @@ async def _redeem_proof(
             max_last_ledger=(
                 created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
             ),
+            authority=authority,
         )
     except signing_proof.ProofError as e:
         # e.detail carries request-derived field names — repr() so control
         # characters cannot forge log lines.
         detail = f" ({e.detail!r})" if e.detail else ""
         logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}{detail}")
+        if e.reason == "regular_key_unverified":
+            return None, web.json_response(
+                {
+                    "error": "could not check the signing key on-ledger; try again",
+                    "code": "regular_key_unverified",
+                },
+                status=503,
+            )
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     if on_verified is not None:
         refusal = await on_verified(wallet)
@@ -10036,7 +10237,7 @@ async def _redeem_proof(
         return None, web.json_response(
             {"error": "already used", "code": "proof_replayed"}, status=409
         )
-    return wallet, None
+    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at), None
 
 
 async def handle_web_signin_proof(request):
@@ -10052,7 +10253,7 @@ async def handle_web_signin_proof(request):
         )
     _prune_web_signin_payloads()
     body = await _json_body(request)
-    wallet, refusal = await _redeem_proof(
+    redeemed, refusal = await _redeem_proof(
         str(body.get("sign_id") or ""),
         body.get("tx_json"),
         purpose="signin",
@@ -10060,7 +10261,10 @@ async def handle_web_signin_proof(request):
     )
     if refusal is not None:
         return refusal
-    return await _finish_web_signin(cast(str, wallet), "walletconnect")
+    proven = cast(RedeemedProof, redeemed)
+    return await _finish_web_signin(
+        proven.wallet, "walletconnect", signer=proven.signer, checked_at=proven.checked_at
+    )
 
 
 # --- Explicit wallet linking (#447) ------------------------------------------
@@ -10971,7 +11175,7 @@ async def handle_wallet_link_proof(request):
             return _link_failed_response()
         return None
 
-    wallet, refusal = await _redeem_proof(
+    redeemed, refusal = await _redeem_proof(
         str(body.get("sign_id") or ""),
         body.get("tx_json"),
         purpose="link",
@@ -10981,7 +11185,7 @@ async def handle_wallet_link_proof(request):
     )
     if refusal is not None:
         return refusal
-    return await _linked_response(session_wallet, cast(str, wallet))
+    return await _linked_response(session_wallet, cast(RedeemedProof, redeemed).wallet)
 
 
 @require_wallet

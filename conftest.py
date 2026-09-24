@@ -254,6 +254,11 @@ def _reset_xumm_status_cache() -> None:
     app_mod = sys.modules.get("lfg_service.app")
     if app_mod is not None:
         app_mod._signin_create_hits.clear()
+        # RegularKey session rechecks (agent users §2): per-wallet answers and
+        # failed-lookup back-offs are module state too.
+        app_mod._regular_keys.clear()
+        app_mod._regular_key_failed_at.clear()
+        app_mod._regular_key_locks.clear()
 
 
 @pytest.fixture(autouse=True)
