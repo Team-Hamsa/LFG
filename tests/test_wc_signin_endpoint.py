@@ -406,3 +406,21 @@ def test_master_key_is_accepted_when_the_lookup_fails(monkeypatch, ledger_keys):
     ledger_keys["authority"] = LOOKUP_FAILED
     status, _ = _redeem(b, _sign(Wallet.create(), b["nonce"]))
     assert status == 200
+
+
+def test_a_sign_in_racing_a_rotation_cannot_overwrite_the_newer_key(monkeypatch):
+    b = _start(monkeypatch)
+    account, old, new = Wallet.create(), Wallet.create(), Wallet.create()
+
+    async def _lookup(address):
+        # While this sign-in's (stale) read is in flight, a recheck caches the
+        # rotated key: a newer answer than the one this read returns.
+        app._note_regular_key(account.classic_address, new.classic_address)
+        return KeyAuthority(old.classic_address, False, True)
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    status, _ = _redeem(b, _sign_as(account.classic_address, old, b["nonce"], memos.ACTION_SIGNIN))
+    assert status == 200  # the proof was valid by its own read
+    # ...but its seed must not overwrite the newer answer, or the old key's
+    # token would pass rechecks and the new key's sessions would be revoked
+    assert app._regular_keys[account.classic_address][1] == new.classic_address

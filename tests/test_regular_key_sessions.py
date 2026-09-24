@@ -219,3 +219,12 @@ def test_logout_and_disconnect_are_exempt_from_the_revocation_check(ledger):
     # A normal require_auth handler is not exempt: it still fails closed.
     status, body = _call(_token(**REGULAR))
     assert status == 503 and body["code"] == "key_unverified"
+
+
+def test_noting_an_older_answer_never_overwrites_a_newer_one():
+    app._note_regular_key(ACCOUNT, SIGNER)
+    checked, _ = app._regular_keys[ACCOUNT]
+    app._note_regular_key(ACCOUNT, OTHER, checked - 1.0)  # read before the stored one
+    assert app._regular_keys[ACCOUNT] == (checked, SIGNER)
+    app._note_regular_key(ACCOUNT, OTHER, checked + 1.0)  # read after it
+    assert app._regular_keys[ACCOUNT] == (checked + 1.0, OTHER)

@@ -874,8 +874,16 @@ _regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, R
 _regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
 
 
-def _note_regular_key(wallet: str, regular_key: str | None) -> None:
-    _regular_keys[wallet] = (time.monotonic(), regular_key)
+def _note_regular_key(
+    wallet: str, regular_key: str | None, checked_at: float | None = None
+) -> None:
+    """Record `wallet`'s RegularKey as the ledger reported it to a lookup that
+    STARTED at `checked_at` (monotonic; default now). Never overwrites a newer
+    answer: a stale read that finishes late must not replace a fresher one."""
+    at = time.monotonic() if checked_at is None else checked_at
+    current = _regular_keys.get(wallet)
+    if current is None or at >= current[0]:
+        _regular_keys[wallet] = (at, regular_key)
 
 
 async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
@@ -900,7 +908,7 @@ async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
             return current[1] == signer
         # Stamped with when THIS lookup started, so a slower lookup that
         # started earlier can never clobber it.
-        _regular_keys[wallet] = (now, authority.regular_key)
+        _note_regular_key(wallet, authority.regular_key, now)
         return authority.regular_key == signer
     _regular_key_failed_at[wallet] = now
     return None if current is None else current[1] == signer
@@ -9937,12 +9945,16 @@ async def handle_web_signin_start(request):
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
-async def _finish_web_signin(wallet: str, provider: str, signer: str | None = None) -> web.Response:
+async def _finish_web_signin(
+    wallet: str, provider: str, signer: str | None = None, checked_at: float | None = None
+) -> web.Response:
     """Link the proven wallet as a platform="web" identity and issue its token.
 
     Shared by both web sign-in arms: the XUMM SignIn poll and the
     WalletConnect signed-proof redemption (#447).
     `signer` is the proof's signing key; a RegularKey marks the token (spec §2).
+    `checked_at` is when the proof's key lookup started: it orders the cache seed
+    against any fresher answer that landed meanwhile.
     """
     # A wallet already known from another surface keeps its display handle;
     # a brand-new one gets a readable shortened address.
@@ -9954,7 +9966,8 @@ async def _finish_web_signin(wallet: str, provider: str, signer: str | None = No
     user = {"id": wallet, "name": name, "platform": "web", "provider": provider}
     if signer is not None and signer != wallet:
         user.update(key="regular", signer=signer)
-        _note_regular_key(wallet, signer)  # the proof just verified it on-ledger
+        # the proof just verified it on-ledger, as of when its lookup started
+        _note_regular_key(wallet, signer, checked_at)
     token = make_session_token(user)
     return web.json_response(
         {
@@ -10012,6 +10025,7 @@ class RedeemedProof:
 
     wallet: str  # the account proven
     signer: str  # the key that signed: == wallet for the master key, else its RegularKey
+    checked_at: float  # when the key lookup started (time.monotonic()); orders the seed
 
 
 async def _redeem_proof(
@@ -10070,6 +10084,7 @@ async def _redeem_proof(
     # Spec §2: one validated-ledger read of the account's keys, BEFORE verify_proof
     # and so before on_verified, so a proof the key rule refuses never writes an edge.
     account = tx_json.get("Account")
+    checked_at = time.monotonic()  # before the await: a fresher answer may land during it
     authority = (
         await xrpl_ops.key_authority(account)
         if isinstance(account, str) and is_valid_classic_address(account)
@@ -10113,7 +10128,7 @@ async def _redeem_proof(
         return None, web.json_response(
             {"error": "already used", "code": "proof_replayed"}, status=409
         )
-    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json)), None
+    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at), None
 
 
 async def handle_web_signin_proof(request):
@@ -10138,7 +10153,9 @@ async def handle_web_signin_proof(request):
     if refusal is not None:
         return refusal
     proven = cast(RedeemedProof, redeemed)
-    return await _finish_web_signin(proven.wallet, "walletconnect", signer=proven.signer)
+    return await _finish_web_signin(
+        proven.wallet, "walletconnect", signer=proven.signer, checked_at=proven.checked_at
+    )
 
 
 # --- Explicit wallet linking (#447) ------------------------------------------
