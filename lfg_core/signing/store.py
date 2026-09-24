@@ -58,6 +58,14 @@ def ensure_table() -> None:
             # here would otherwise surface later as a confusing INSERT failure.
             if "duplicate column name" not in str(exc).lower():
                 raise
+        # Self-migrating (agent users spec §1): which client-signed provider a
+        # sign-in row belongs to. NULL = walletconnect (rows pending across the
+        # deploy, and every wallet-link row).
+        try:
+            conn.execute("ALTER TABLE sign_requests ADD COLUMN provider TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
         # One transaction hash settles exactly one request. txid_in_use() is the
         # cheap pre-check; this index is what makes the claim actually atomic,
         # so two concurrent posts of the same validated hash cannot both win.
@@ -88,14 +96,15 @@ def create(
     ttl_seconds: int,
     ip: str | None = None,
     created_ledger: int | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     rid = "wc-" + uuid.uuid4().hex
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO sign_requests (id, wallet, purpose, txjson, nonce, state, ip, created_at, expires_at, created_ledger)"
-            " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+            "INSERT INTO sign_requests (id, wallet, purpose, txjson, nonce, state, ip, created_at, expires_at, created_ledger, provider)"
+            " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
             (
                 rid,
                 wallet,
@@ -106,6 +115,7 @@ def create(
                 now,
                 now + ttl_seconds,
                 created_ledger,
+                provider,
             ),
         )
         conn.commit()
