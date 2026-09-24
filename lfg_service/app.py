@@ -757,7 +757,10 @@ _revoked_sessions: dict[str, float] = {}
 
 
 def _prune_revoked_sessions(now: float) -> None:
-    for sig in [k for k, exp in _revoked_sessions.items() if exp < now]:
+    # Revocations now also run off the event loop (asyncio.to_thread), so a
+    # concurrent write can land mid-iteration; iterate a snapshot rather than
+    # the live dict (F3) to avoid "dictionary changed size during iteration".
+    for sig in [k for k, exp in list(_revoked_sessions.items()) if exp < now]:
         del _revoked_sessions[sig]
 
 
