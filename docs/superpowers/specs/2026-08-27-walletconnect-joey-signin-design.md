@@ -191,10 +191,11 @@ to a different wallet inherits this rule automatically.
 **Known gaps (documented, not solved):** #58 pre-simulate does not run on the Joey path
 (Joey autofills; the final tx is never seen before submit). RegularKey-signed accounts
 work for transactions (verified by `Account` on-ledger) but not for the pseudo-tx proof.
-  > **Superseded 2026-09-23:** RegularKey-signed proofs are accepted, and
-  > RegularKey sessions end when the key is removed. See
-  > `2026-09-22-agent-users-design.md` §2.
 `xrpl_signTransactionBatch` unused.
+
+> **Superseded 2026-09-23:** RegularKey-signed proofs are accepted, and
+> RegularKey sessions end when the key is removed. See
+> `2026-09-22-agent-users-design.md` §2.
 
 ## 4. Client integration, error handling, surfaces
 

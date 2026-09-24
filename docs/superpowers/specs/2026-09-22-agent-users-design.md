@@ -350,6 +350,16 @@ this section wherever it and the text above disagree.
   Failing closed here matches sign-in's own `regular_key_unverified` rule.
 - Revoking uses the existing `revoke_session_token(token)`, which needs the
   raw token; `require_auth` has it from the `Authorization` header.
+- **Final-review corrections (2026-09-23):** (a) while the lookup is failing,
+  ANY non-master signer — a RegularKey or a foreign key, indistinguishable
+  without the lookup — is refused as the retryable 503
+  `regular_key_unverified`, not `pubkey_account`; (b) the `_finish_web_signin`
+  parameter above is named `signer`, not `key_info` as drafted; (c) a failed
+  recheck backs off 15 s per wallet before retrying, so an RPC outage doesn't
+  make every request from a session repeat the full failover walk; (d)
+  `/api/logout` and `/api/wallet/disconnect` skip the revocation check —
+  revocation only ever narrows access, so a lookup failure must never block a
+  session from denylisting its own token.
 
 ### C (`agent` provider, dispatch, memos)
 - The start response already carries `expires_at` and `provider`; the agent
