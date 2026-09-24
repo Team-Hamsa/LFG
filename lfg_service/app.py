@@ -7968,7 +7968,7 @@ async def handle_bulk_mint_start(request):
         bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
         bulk_mint_flow.delete_record(job.id)
         return web.json_response({"error": "payment_setup_failed"}, status=500)
-    job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    _launch_bulk_task(job)
     return web.json_response(job.to_dict())
 
 
@@ -10227,6 +10227,13 @@ async def _redeem_proof(
         else LOOKUP_FAILED
     )
     provider = row.get("provider") or "walletconnect"
+    proof_platform = signing_proof.PROVIDER_PLATFORM.get(provider)
+    if proof_platform is None:
+        # An unexpected stored provider (neither start path should ever write
+        # one) must refuse cleanly, the same way a memo mismatch does below —
+        # not KeyError its way into a 500.
+        logging.warning(f"bad {purpose} proof {sign_id}: unknown provider {provider!r}")
+        return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
         created_ledger = row.get("created_ledger")
@@ -10240,7 +10247,7 @@ async def _redeem_proof(
                 created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
             ),
             authority=authority,
-            platform=signing_proof.PROVIDER_PLATFORM[provider],
+            platform=proof_platform,
         )
     except signing_proof.ProofError as e:
         # e.detail carries request-derived field names — repr() so control

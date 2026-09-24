@@ -113,6 +113,14 @@ def test_agent_arm_is_off_by_default(monkeypatch):
     assert app._web_signin_hits == {}  # a disabled arm doesn't burn the sign-in budget
 
 
+def test_agent_signin_enabled_shipped_default_is_off(monkeypatch):
+    # The test above sets the flag False by hand; this pins the SHIPPED
+    # default itself — with the env var unset, env_flag reads off, so a
+    # deploy that forgets to set AGENT_SIGNIN_ENABLED still ships disabled.
+    monkeypatch.delenv("AGENT_SIGNIN_ENABLED", raising=False)
+    assert app.config.env_flag("AGENT_SIGNIN_ENABLED", "0") is False
+
+
 def test_agent_start_issues_an_agent_row_with_agent_memos(monkeypatch):
     status, b = _start_agent(monkeypatch)
     assert status == 200 and b["provider"] == "agent" and b["sign_id"].startswith("wc-")
@@ -159,6 +167,23 @@ def test_a_null_provider_row_redeems_as_walletconnect(monkeypatch):
     )
     assert status == 200
     assert app.verify_session_token(body["session_token"])["provider"] == "walletconnect"
+
+
+def test_a_bogus_provider_row_refuses_bad_proof_not_500(monkeypatch):
+    row = store.create(
+        wallet="",
+        purpose="signin",
+        txjson=None,
+        nonce="n" * 64,
+        ttl_seconds=300,
+        created_ledger=1000,
+        provider="bogus",
+    )  # an unexpected stored provider must refuse cleanly, never KeyError -> 500
+    w = Wallet.create()
+    status, body = _redeem(
+        {"sign_id": row["id"]}, _sign(w, "n" * 64, platform=memos.PLATFORM_WEBAPP)
+    )
+    assert status == 400 and body["code"] == "bad_proof"
 
 
 def test_agent_proof_is_single_use(monkeypatch):

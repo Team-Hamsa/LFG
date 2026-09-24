@@ -9,7 +9,8 @@
 # (BulkMintJob.sign_provider/sign_wallet, Burn2MintSession likewise) and
 # restores it with `use()` when its task is (re)launched, so a startup
 # resume dispatches the way the job originally did rather than with these
-# defaults (agent users §1, task 7).
+# defaults (agent users §1: a resumed job keeps the signing mode it started
+# with).
 from __future__ import annotations
 
 import contextvars

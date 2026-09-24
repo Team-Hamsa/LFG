@@ -3,21 +3,11 @@
 # signing mode it started with (agent users §1, Amendment 1) — a
 # client-signed session's payloads stay client-signed across a restart.
 #
-# Env-guard preamble: importing lfg_service.app freezes lfg_core.config
-# constants at import time; set the same defaults test_bulk_mint_flow.py /
-# test_bulk_mint_service.py use so collection order can't strand them.
+# The root conftest.py pins every default this module's imports need (#323)
+# before any test module loads, so only the sys.path setup for the direct
+# `lfg_service.app` / `lfg_core` imports below is needed here.
 import os
 import sys
-
-os.environ.setdefault("XUMM_API_KEY", "test")
-os.environ.setdefault("XUMM_API_SECRET", "test")
-os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")  # throwaway test seed
-os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
-os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
-os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
-os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
-os.environ.setdefault("LAYER_SOURCE", "local")
-os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,5 +54,9 @@ def test_a_resumed_bulk_job_runs_inside_its_signing_context(monkeypatch):
         app._launch_bulk_task(job)
         await job.task
 
-    asyncio.new_event_loop().run_until_complete(main())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
     assert seen["ctx"] == ("agent", W)

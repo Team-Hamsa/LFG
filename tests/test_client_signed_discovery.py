@@ -2,8 +2,9 @@
 # The client-signed discovery contract (agent-users spec, "Client-signed
 # dispatch" -> "Discovery contract").
 #
-# A session signed in with a client-signed provider (today "walletconnect",
-# i.e. Joey Wallet) signs its own transactions: when a flow needs the user's
+# A session signed in with a client-signed provider ("walletconnect", i.e.
+# Joey Wallet, or "agent", a bot holding its own key — agent users spec §1)
+# signs its own transactions: when a flow needs the user's
 # signature, xumm_ops._create_xumm_payload creates a `sign_requests` row
 # instead of a XUMM payload, and the flow's link field carries
 # `lfg-wc://<sign_requests.id>`. A bot finds its sign request by stripping
@@ -19,8 +20,8 @@
 # task and read back from its status route, so a context that failed to
 # propagate would fail the test rather than hide behind a stub.
 #
-# PROVIDERS is the list of client-signed providers. The agent sign-in provider
-# ("agent", a later PR) appends itself here and inherits every test.
+# PROVIDERS is the list of client-signed providers; every test below is
+# parametrized over both, so "agent" inherits every flow's discovery contract.
 import asyncio
 import dataclasses
 import json
@@ -50,8 +51,8 @@ from lfg_service import app
 from scripts import _economy_deps
 from webapp import economy_api
 
-# "agent" (the agent sign-in provider, Task 4) inherits every test below: Tasks
-# 4-5 made every client-signed flow's payload carry platform=agent end to end.
+# "agent" (the agent sign-in provider) inherits every test below: every
+# client-signed flow's payload carries platform=agent end to end for it.
 PROVIDERS = ["walletconnect", "agent"]
 
 W = "rnmQUgXYCKpFSF6aaUmPf4LGvhKg3RxxNd"  # the session wallet
@@ -144,14 +145,9 @@ def _discover(
 
     # The provenance memos are the typed (initiator/platform/action[/campaign])
     # entries build_memos_json wrote. decode_memos rejects the whole array on
-    # any malformed entry, so a flow whose txjson also carries an untyped tag
-    # memo needs it sliced off before decoding — same pattern as
-    # tests/test_brix_claim_flow.py's test_send_brix_claim_labels_the_payment_
-    # with_its_platform.
+    # any malformed entry.
     raw_memos = row["txjson"]["Memos"]
     decoded = memos.decode_memos(raw_memos)
-    if decoded is None:
-        decoded = memos.decode_memos(raw_memos[:-1])
     assert decoded is not None, f"undecodable provenance Memos: {raw_memos}"
     assert decoded["platform"] == _expected_platform(provider, economy_accept=economy_accept), (
         f"{tx_type} platform memo: {decoded['platform']!r}"
