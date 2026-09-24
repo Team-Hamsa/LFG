@@ -730,3 +730,9 @@ WC_CHAIN = "xrpl:0" if XRPL_NETWORK == "mainnet" else "xrpl:1"
 
 def wc_enabled() -> bool:
     return bool(REOWN_PROJECT_ID)
+
+
+# Agent users (spec §1): the `agent` web sign-in provider — a bot holding its own
+# key signs a proof like Joey does, and its transactions are labelled
+# platform=agent. Ships dark; turned on per stack. Read at import.
+AGENT_SIGNIN_ENABLED = env_flag("AGENT_SIGNIN_ENABLED", "0")

@@ -54,6 +54,10 @@ _TF_FULLY_CANONICAL = 0x80000000
 # has no business being signed as a never-submitted proof transaction.
 _PROOF_ACTIONS = (memos.ACTION_SIGNIN, memos.ACTION_LINK)
 
+#: The proof memo platform for each client-signed sign-in provider. A row with
+#: no provider (pre-deploy, and every wallet-link row) is walletconnect.
+PROVIDER_PLATFORM = {"walletconnect": memos.PLATFORM_WEBAPP, "agent": memos.PLATFORM_AGENT}
+
 _HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 
 # CLOSED allowlist. Destination and Amount are pinned by value below;
@@ -113,7 +117,9 @@ class ProofError(Exception):
         self.detail = detail
 
 
-def build_proof_tx(wallet: str, nonce: str, action: str) -> dict[str, Any]:
+def build_proof_tx(
+    wallet: str, nonce: str, action: str, platform: str = memos.PLATFORM_WEBAPP
+) -> dict[str, Any]:
     """The canonical unsigned proof transaction the wallet is asked to sign.
 
     Deliberately WITHOUT Fee/Sequence/LastLedgerSequence: Joey autofills those
@@ -130,7 +136,7 @@ def build_proof_tx(wallet: str, nonce: str, action: str) -> dict[str, Any]:
     }
     provenance.stamp_and_validate(
         tx,
-        memos.build_memos_json(memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, action),
+        memos.build_memos_json(memos.INITIATOR_USER, platform, action),
         require_memos=True,
     )
     tx["Memos"].append(
@@ -186,6 +192,7 @@ def verify_proof(
     action: str,
     max_last_ledger: int | None = None,
     authority: KeyAuthority | None = None,
+    platform: str = memos.PLATFORM_WEBAPP,
 ) -> str:
     """Return the classic address proven by `tx_json`, or raise `ProofError`.
 
@@ -252,10 +259,7 @@ def verify_proof(
     # extra memos, no re-pointed initiator/platform. Derived from the canonical
     # builder so a schema change can't silently loosen this.
     expected = dict(
-        memos.decode_memos(
-            memos.build_memos_json(memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, action)
-        )
-        or {}
+        memos.decode_memos(memos.build_memos_json(memos.INITIATOR_USER, platform, action)) or {}
     )
     expected[NONCE_MEMO_TYPE] = nonce
     if decoded != expected:

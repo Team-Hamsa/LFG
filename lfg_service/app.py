@@ -10004,7 +10004,9 @@ async def handle_web_signin_start(request):
     session required, this IS how a web session begins. With
     `provider="walletconnect"` (#447) there is no XUMM payload at all: we issue
     a durable server-side nonce the wallet signs into a never-submitted proof
-    transaction, redeemed at POST /api/web/signin/proof.
+    transaction, redeemed at POST /api/web/signin/proof. With provider="agent"
+    (agent users spec §1) the same flow runs for a bot, gated on
+    AGENT_SIGNIN_ENABLED, with platform=agent proof memos.
     """
     body = await _json_body(request)
     provider = str(body.get("provider") or "xaman")
@@ -10014,11 +10016,15 @@ async def handle_web_signin_start(request):
         return web.json_response(
             {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
         )
+    if provider == "agent" and not config.AGENT_SIGNIN_ENABLED:
+        return web.json_response(
+            {"error": "agent sign-in is not enabled", "code": "agent_disabled"}, status=503
+        )
     if _web_rate_limited(_client_ip(request)):
         return web.json_response(
             {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
         )
-    if provider == "walletconnect":
+    if provider in ("walletconnect", "agent"):
         nonce = secrets.token_hex(32)
         row = await asyncio.to_thread(
             sign_request_store.create,
@@ -10029,6 +10035,7 @@ async def handle_web_signin_start(request):
             ttl_seconds=signing_proof.SIGNIN_TTL,
             ip=_client_ip(request),
             created_ledger=await _proof_creation_ledger(),
+            provider=provider,
         )
         return web.json_response(
             {
@@ -10036,10 +10043,13 @@ async def handle_web_signin_start(request):
                 "nonce": nonce,
                 "source_tag": config.SOURCE_TAG,
                 "memos": signing_proof.build_proof_tx(
-                    _MEMO_TEMPLATE_ACCOUNT, nonce, memos.ACTION_SIGNIN
+                    _MEMO_TEMPLATE_ACCOUNT,
+                    nonce,
+                    memos.ACTION_SIGNIN,
+                    platform=signing_proof.PROVIDER_PLATFORM[provider],
                 )["Memos"],
                 "expires_at": row["expires_at"],
-                "provider": "walletconnect",
+                "provider": provider,
             }
         )
     _prune_web_signin_payloads()
@@ -10135,6 +10145,7 @@ class RedeemedProof:
     wallet: str  # the account proven
     signer: str  # the key that signed: == wallet for the master key, else its RegularKey
     checked_at: float  # when the key lookup started (time.monotonic()); orders the seed
+    provider: str  # the row's client-signed provider ("walletconnect" for NULL rows)
 
 
 async def _redeem_proof(
@@ -10199,6 +10210,7 @@ async def _redeem_proof(
         if isinstance(account, str) and is_valid_classic_address(account)
         else LOOKUP_FAILED
     )
+    provider = row.get("provider") or "walletconnect"
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
         created_ledger = row.get("created_ledger")
@@ -10212,6 +10224,7 @@ async def _redeem_proof(
                 created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
             ),
             authority=authority,
+            platform=signing_proof.PROVIDER_PLATFORM[provider],
         )
     except signing_proof.ProofError as e:
         # e.detail carries request-derived field names — repr() so control
@@ -10237,7 +10250,10 @@ async def _redeem_proof(
         return None, web.json_response(
             {"error": "already used", "code": "proof_replayed"}, status=409
         )
-    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at), None
+    return (
+        RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at, provider),
+        None,
+    )
 
 
 async def handle_web_signin_proof(request):
@@ -10263,7 +10279,7 @@ async def handle_web_signin_proof(request):
         return refusal
     proven = cast(RedeemedProof, redeemed)
     return await _finish_web_signin(
-        proven.wallet, "walletconnect", signer=proven.signer, checked_at=proven.checked_at
+        proven.wallet, proven.provider, signer=proven.signer, checked_at=proven.checked_at
     )
 
 
