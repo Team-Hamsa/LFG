@@ -260,10 +260,17 @@ def test_a_wallets_recheck_lock_is_dropped_once_nothing_is_in_flight(ledger):
 
 
 def test_answers_older_than_a_session_are_swept_on_the_next_write():
-    long_ago = time.monotonic() - app.SESSION_TTL - 1
-    app._note_regular_key("rGONE", SIGNER, long_ago)  # no token can still refer to it
-    app._regular_key_failed_at["rGONE"] = long_ago
+    now = time.monotonic()
+    # past a session's lifetime plus the grace: no token can still need it
+    gone = now - app.SESSION_TTL - app.REGULAR_KEY_SWEEP_GRACE_SECONDS - 1
+    # just past SESSION_TTL: its token was minted a moment after this lookup started,
+    # so it may still be valid, and this may be its only answer
+    edge = now - app.SESSION_TTL - 1
+    app._note_regular_key("rGONE", SIGNER, gone)
+    app._note_regular_key("rEDGE", SIGNER, edge)
+    app._regular_key_failed_at["rGONE"] = gone
     app._note_regular_key(ACCOUNT, SIGNER)
     assert "rGONE" not in app._regular_keys
     assert "rGONE" not in app._regular_key_failed_at
+    assert app._regular_keys["rEDGE"][1] == SIGNER
     assert app._regular_keys[ACCOUNT][1] == SIGNER

@@ -870,6 +870,10 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
 # failover walk once the 60 s cache goes stale.
 REGULAR_KEY_RECHECK_SECONDS = 60.0
 REGULAR_KEY_RETRY_SECONDS = 15.0
+# An answer is stamped when its lookup STARTED, a moment before the token it
+# seeds is minted, so the sweep waits this much past SESSION_TTL before dropping
+# it: an answer a still-valid token may depend on is never swept.
+REGULAR_KEY_SWEEP_GRACE_SECONDS = 300.0
 _regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
 _regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
 
@@ -915,10 +919,11 @@ def _note_regular_key(
 
 
 def _sweep_regular_keys(now: float) -> None:
-    """Drop answers older than a session's lifetime (every token that could still
-    need one was minted after it, and re-seeded it) and lapsed failure back-offs."""
+    """Drop answers older than a session's lifetime plus a grace (every token that
+    could still need one was minted after it, and re-seeded it) and lapsed failure
+    back-offs."""
     for w, (checked, _) in list(_regular_keys.items()):
-        if now - checked > SESSION_TTL:
+        if now - checked > SESSION_TTL + REGULAR_KEY_SWEEP_GRACE_SECONDS:
             del _regular_keys[w]
     for w, failed in list(_regular_key_failed_at.items()):
         if now - failed >= REGULAR_KEY_RETRY_SECONDS:
