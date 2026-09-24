@@ -2617,6 +2617,65 @@ async def handle_rarity_odds(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+# --- GET /api/rarity/supply (agent users spec §3: live trait supply) -------
+# Public: how many live collection tokens carry each (trait_type, value),
+# computed by leaderboard.live_trait_table, the same single read and parsing the
+# nft_rarity board scores from. Values are as the index stores them. Cached 60s
+# per network; the board keeps its own 60s cache, so right after a mint, burn
+# or swap the two can disagree for up to a minute. A cold or expired cache is
+# refilled by ONE scan per network: concurrent misses wait for it (this is a
+# public endpoint, and each scan parses every live token).
+
+_SUPPLY_CACHE_TTL = 60.0
+_SUPPLY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SUPPLY_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _compute_trait_supply(network: str) -> dict[str, Any]:
+    """Sync work for GET /api/rarity/supply, run on an executor thread with its
+    own short-lived index connection (sqlite3 connections never cross threads)."""
+    oconn = nft_index.init_db(nft_index.index_db_path(network))
+    oconn.row_factory = sqlite3.Row  # init_db doesn't set it; the helper reads r["..."]
+    try:
+        table, freq = leaderboard.live_trait_table(oconn)
+    finally:
+        oconn.close()
+    counts: dict[str, dict[str, int]] = {}
+    for (trait_type, value), n in sorted(freq.items()):
+        counts.setdefault(trait_type, {})[value] = n
+    return {
+        "network": network,
+        "as_of": int(time.time()),
+        "n_live": len(table),
+        "counts": counts,
+    }
+
+
+async def handle_rarity_supply(request: web.Request) -> web.Response:
+    """Public: GET /api/rarity/supply. See the note above."""
+    network = config.XRPL_NETWORK
+    cached = _SUPPLY_CACHE.get(network)
+    if cached is not None and time.monotonic() - cached[0] < _SUPPLY_CACHE_TTL:
+        return web.json_response(cached[1])
+    async with _SUPPLY_LOCKS.setdefault(network, asyncio.Lock()):
+        # Re-check under the lock: a request that waited here while another
+        # refilled the cache must not scan again.
+        now_mono = time.monotonic()
+        cached = _SUPPLY_CACHE.get(network)
+        if cached is not None and now_mono - cached[0] < _SUPPLY_CACHE_TTL:
+            return web.json_response(cached[1])
+        payload = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_trait_supply, network
+        )
+        # Stamp when the scan FINISHED: a slow scan must not store an entry that
+        # is already partly (or, past the TTL, wholly) expired.
+        now_mono = time.monotonic()
+        for k in [k for k, (ts, _) in _SUPPLY_CACHE.items() if now_mono - ts >= _SUPPLY_CACHE_TTL]:
+            del _SUPPLY_CACHE[k]
+        _SUPPLY_CACHE[network] = (now_mono, payload)
+    return web.json_response(payload)
+
+
 _SHARE_CONVERSIONS_TTL_SECONDS = 60
 _share_conversions_cache: dict[str, tuple[float, list[dict[str, int | str]]]] = {}
 
@@ -12064,6 +12123,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/rarity", handle_rarity_odds)
+    app.router.add_get("/api/rarity/supply", handle_rarity_supply)
     app.router.add_get("/api/brix", handle_brix_status)
     app.router.add_post("/api/brix/claim", handle_brix_claim)
     # /claim/all must register before the /claim/{claim_id} wildcard, or a

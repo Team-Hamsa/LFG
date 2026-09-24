@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 
 import pytest
@@ -763,3 +764,77 @@ def test_users_nfts_windowed_still_mints_when_the_buyer_flips_in_the_same_ledger
         "users_nfts", h, o, start_ts=40, end_ts=60, network="testnet", system_accounts=SYS
     )
     assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]
+
+
+def _live(o, rows):
+    o.executemany(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, attributes_json)"
+        " VALUES (?,?,?,?,?)",
+        rows,
+    )
+
+
+def test_live_trait_table_reads_live_tokens_and_counts_pairs():
+    _, o = _dbs()
+    _live(
+        o,
+        [
+            (
+                "N1",
+                1,
+                "rA",
+                0,
+                '[{"trait_type": "Hat", "value": "Cap"}, {"trait_type": "Eyes", "value": null}]',
+            ),
+            ("N2", 2, "rB", 0, '[{"trait_type": "Hat", "value": "Cap"}]'),
+            ("N3", 3, "rC", 1, '[{"trait_type": "Hat", "value": "Crown"}]'),  # burned
+            ("N4", 4, "rD", 0, "[]"),  # live, no pairs: still counted in the table
+        ],
+    )
+    table, freq = leaderboard.live_trait_table(o)
+    assert table == {
+        "N1": (1, [("Hat", "Cap"), ("Eyes", "None")]),
+        "N2": (2, [("Hat", "Cap")]),
+        "N4": (4, []),
+    }
+    assert freq == Counter({("Hat", "Cap"): 2, ("Eyes", "None"): 1})
+
+
+def test_live_trait_table_skips_unreadable_and_non_list_attributes():
+    h, o = _dbs()
+    _live(
+        o,
+        [
+            ("N1", 1, "rA", 0, "null"),  # json.loads -> None: used to raise TypeError
+            ("N2", 2, "rB", 0, '{"trait_type": "Hat"}'),  # an object, not a list
+            ("N3", 3, "rC", 0, "not json"),
+            ("N4", 4, "rD", 0, '[{"trait_type": "Hat", "value": "Cap"}]'),
+        ],
+    )
+    table, _ = leaderboard.live_trait_table(o)
+    assert list(table) == ["N4"]
+    rows = leaderboard.compute(
+        "nft_rarity", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert [r["nft_id"] for r in rows] == ["N4"]
+
+
+def test_live_trait_table_counts_each_pair_once_per_token():
+    _, o = _dbs()
+    _live(
+        o,
+        [
+            # the same pair listed twice in one token's metadata
+            (
+                "N1",
+                1,
+                "rA",
+                0,
+                '[{"trait_type": "Hat", "value": "Cap"}, {"trait_type": "Hat", "value": "Cap"}]',
+            ),
+            ("N2", 2, "rB", 0, '[{"trait_type": "Hat", "value": "Cap"}]'),
+        ],
+    )
+    table, freq = leaderboard.live_trait_table(o)
+    assert table["N1"] == (1, [("Hat", "Cap")])
+    assert freq == Counter({("Hat", "Cap"): 2})  # two tokens carry it, not three entries
