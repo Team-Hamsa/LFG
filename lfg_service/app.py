@@ -6025,13 +6025,17 @@ def _closet_market_disabled_response():
 
 def _wallet_unsupported_response():
     """(#516 D4) Closet Market signing — a TokenEscrow (bid) or a pinned-LLS
-    Payment (ask buy) — isn't available on WalletConnect (Joey) yet: refuse
-    rather than build a payload the wallet can't sign. Xaman sessions are
-    unaffected; the provider is read from lfg_core.signing.context, ambient
-    for the request since require_auth (option-A guard for #516; the issue
-    stays open for the LastLedgerSequence follow-up)."""
+    Payment (ask buy) — isn't available to client-signed sessions (Joey,
+    agents) yet: refuse rather than build a payload the wallet can't sign.
+    Xaman sessions are unaffected; the provider is read from
+    lfg_core.signing.context, ambient for the request since require_auth
+    (option-A guard for #516; the issue stays open for the
+    LastLedgerSequence follow-up)."""
     return web.json_response(
-        {"error": "Closet Market orders need Xaman for now.", "code": "wallet_unsupported"},
+        {
+            "error": "Closet Market orders need a Xaman sign-in for now.",
+            "code": "wallet_unsupported",
+        },
         status=409,
     )
 
@@ -6584,7 +6588,7 @@ async def handle_closet_bid_create(request):
     generated here and stored sealed; the bid opens once the escrow is
     verified on-ledger (GET /api/closet/bid/{id})."""
     wallet, user = request["wallet"], request["user"]
-    if signing_context.current_provider() == "walletconnect":
+    if signing_context.current_provider() in xumm_ops.CLIENT_SIGNED_PROVIDERS:
         return _wallet_unsupported_response()
     body = await _json_body(request)
     slot, value = body.get("slot"), body.get("value")
@@ -6743,7 +6747,7 @@ async def handle_closet_ask_buy(request):
     (a refund is paid in BRIX); buyers with a line but too little BRIX pay XRP
     via SendMax on the same Payment."""
     wallet, user = request["wallet"], request["user"]
-    if signing_context.current_provider() == "walletconnect":
+    if signing_context.current_provider() in xumm_ops.CLIENT_SIGNED_PROVIDERS:
         return _wallet_unsupported_response()
     order_id = request.match_info["order_id"]
     ask = await _closet_db(closet_market_store.get_order, order_id)

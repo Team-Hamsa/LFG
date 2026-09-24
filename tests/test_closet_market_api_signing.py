@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from lfg_core import closet_market_store as cms
 from lfg_core import crypto_condition
 from lfg_core.signing import context as signing_context
@@ -412,31 +414,31 @@ def test_ask_buy_payload_failure_leaves_the_fill_funds_pending(closet_env, monke
 
 
 # --- #516 D4: Closet Market signing (TokenEscrow / a pinned-LLS Payment)
-# isn't available on WalletConnect (Joey) yet — refuse both signature-needing
-# actions rather than build a payload the wallet can't sign. The provider is
-# read from lfg_core.signing.context, which require_auth sets for the
-# request in production; WEBAPP_DEV_MODE skips that, so these tests set the
-# ambient context directly, the same way test_signing_context.py does.
+# isn't available to client-signed sessions (Joey, agents) yet — refuse both
+# signature-needing actions rather than build a payload the wallet can't
+# sign. The provider is read from lfg_core.signing.context, which
+# require_auth sets for the request in production; WEBAPP_DEV_MODE skips
+# that, so these tests set the ambient context directly, the same way
+# test_signing_context.py does.
+
+REFUSAL = {
+    "code": "wallet_unsupported",
+    "error": "Closet Market orders need a Xaman sign-in for now.",
+}
 
 
-def test_closet_bid_refused_for_walletconnect_session(closet_env):
+@pytest.mark.parametrize("provider", ["walletconnect", "agent"])
+def test_closet_bid_refused_for_client_signed_sessions(closet_env, provider):
     body = {"slot": "Head", "value": "Tiara", "price_brix": "10"}
-    with signing_context.use("walletconnect", ME):
+    with signing_context.use(provider, ME):
         resp = _run(server.handle_closet_bid_create(_req("POST", "/", body)))
-    assert resp.status == 409
-    assert _json(resp) == {
-        "code": "wallet_unsupported",
-        "error": "Closet Market orders need Xaman for now.",
-    }
+    assert resp.status == 409 and _json(resp) == REFUSAL
 
 
-def test_closet_buy_refused_for_walletconnect_session(closet_env):
-    with signing_context.use("walletconnect", BIDDER):
+@pytest.mark.parametrize("provider", ["walletconnect", "agent"])
+def test_closet_buy_refused_for_client_signed_sessions(closet_env, provider):
+    with signing_context.use(provider, BIDDER):
         resp = _run(
             server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": "bogus"}))
         )
-    assert resp.status == 409
-    assert _json(resp) == {
-        "code": "wallet_unsupported",
-        "error": "Closet Market orders need Xaman for now.",
-    }
+    assert resp.status == 409 and _json(resp) == REFUSAL

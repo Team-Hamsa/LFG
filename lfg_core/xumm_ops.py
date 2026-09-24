@@ -226,13 +226,19 @@ async def _post_xumm_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def should_use_walletconnect(txjson: dict[str, Any]) -> bool:
-    """#447: ambient dispatch. WalletConnect only when the session is a WC one
-    AND the tx is signable by the connected account (spec §3 cross-wallet
-    rule) AND it is a real transaction (SignIn is Xaman's pseudo-tx)."""
+#: Providers whose sessions sign their own transactions (#447, agent users §1):
+#: a payload for the session's own account becomes a sign request, not XUMM.
+CLIENT_SIGNED_PROVIDERS = frozenset({"walletconnect", "agent"})
+
+
+def should_use_client_signing(txjson: dict[str, Any]) -> bool:
+    """Ambient dispatch (#447, agent users §1): client-signed only when the
+    session's provider signs for itself AND the tx is signable by the session's
+    account (the cross-wallet rule) AND it is a real transaction (SignIn is
+    Xaman's pseudo-tx)."""
     from lfg_core.signing import context
 
-    if context.current_provider() != "walletconnect":
+    if context.current_provider() not in CLIENT_SIGNED_PROVIDERS:
         return False
     if txjson.get("TransactionType") == "SignIn":
         return False
@@ -263,7 +269,7 @@ async def _create_xumm_payload(
     QR/deep-link sign). If payload creation itself fails WITH a token (e.g. a
     token XUMM rejects outright after an app-key rotation), it is retried once
     without the token so a bad stored token can never block signing."""
-    if should_use_walletconnect(txjson):
+    if should_use_client_signing(txjson):
         # Before any XUMM network call, and before stamping: the provider
         # template (BaseSigningProvider.create) stamps and validates, so
         # doing it here too would be a second, divergable copy.
