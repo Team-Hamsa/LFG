@@ -51,10 +51,11 @@ def _hermetic(monkeypatch, tmp_path):
 
 @pytest.fixture
 def ledger(monkeypatch):
-    state = {"authority": KeyAuthority(SIGNER, False, True), "calls": 0}
+    state = {"authority": KeyAuthority(SIGNER, False, True), "calls": 0, "addresses": []}
 
     async def _lookup(address):
         state["calls"] += 1
+        state["addresses"].append(address)
         return state["authority"]
 
     monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
@@ -86,6 +87,7 @@ def test_regular_key_session_is_rechecked_at_most_once_a_minute(ledger):
     tok = _token(**REGULAR)
     assert _call(tok)[0] == 200 and _call(tok)[0] == 200
     assert ledger["calls"] == 1
+    assert ledger["addresses"] == [ACCOUNT]  # revocation looks up the session wallet
     checked, key = app._regular_keys[ACCOUNT]
     app._regular_keys[ACCOUNT] = (checked - app.REGULAR_KEY_RECHECK_SECONDS - 1, key)
     assert _call(tok)[0] == 200 and ledger["calls"] == 2

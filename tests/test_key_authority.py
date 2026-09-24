@@ -2,6 +2,8 @@
 
 import asyncio
 
+from xrpl.models.requests import AccountInfo
+
 from lfg_core import xrpl_ops
 from lfg_core.signing.key_authority import (
     LOOKUP_FAILED,
@@ -42,13 +44,19 @@ class _Resp:
 
 
 def _stub_client(monkeypatch, response=None, raises=None):
+    """Returns the list `request()` appends every request it received to, so
+    a test can assert what was actually asked for."""
+    requests: list = []
+
     class _Client:
-        async def request(self, _req):
+        async def request(self, req):
+            requests.append(req)
             if raises is not None:
                 raise raises
             return response
 
     monkeypatch.setattr(xrpl_ops, "async_rpc_client", _Client)
+    return requests
 
 
 def _lookup(address="rAccount"):
@@ -73,3 +81,15 @@ def test_other_errors_and_exceptions_are_lookup_failures(monkeypatch):
     assert _lookup() == LOOKUP_FAILED
     _stub_client(monkeypatch, raises=OSError("down"))
     assert _lookup() == LOOKUP_FAILED
+
+
+def test_looks_up_the_validated_ledger(monkeypatch):
+    requests = _stub_client(
+        monkeypatch, _Resp(True, {"account_data": {"Flags": 0, "RegularKey": "rReg"}})
+    )
+    _lookup("rSomeAccount")
+    assert len(requests) == 1
+    req = requests[0]
+    assert isinstance(req, AccountInfo)
+    assert req.account == "rSomeAccount"
+    assert req.ledger_index == "validated"

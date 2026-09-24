@@ -85,9 +85,10 @@ def _stub_proof_creation_ledger(monkeypatch):
 def ledger_keys(monkeypatch):
     """No network from the proof endpoints: the account's keys as the ledger
     reports them. Default: found, no RegularKey, master enabled."""
-    state = {"authority": NOT_FOUND}
+    state = {"authority": NOT_FOUND, "addresses": []}
 
     async def _lookup(address):
+        state["addresses"].append(address)
         return state["authority"]
 
     monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
@@ -536,3 +537,5 @@ def test_regular_key_link_proof_links_the_account(monkeypatch, ledger_keys):
     r = _run(app.handle_wallet_link_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
     assert r.status == 200 and _body(r)["wallet"] == other.classic_address
     assert _proof_links() == 1
+    # The proven (linked) wallet is looked up, not the authed session wallet.
+    assert ledger_keys["addresses"] == [other.classic_address] != [DEV_OWNER]

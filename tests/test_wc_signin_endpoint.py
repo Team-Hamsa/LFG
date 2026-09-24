@@ -85,9 +85,10 @@ def _stub_proof_creation_ledger(monkeypatch):
 def ledger_keys(monkeypatch):
     """No network from the proof endpoints: the account's keys as the ledger
     reports them. Default: found, no RegularKey, master enabled."""
-    state = {"authority": NOT_FOUND}
+    state = {"authority": NOT_FOUND, "addresses": []}
 
     async def _lookup(address):
+        state["addresses"].append(address)
         return state["authority"]
 
     monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
@@ -361,6 +362,7 @@ def test_regular_key_proof_signs_in_and_the_token_names_the_key(monkeypatch, led
     decoded = app.verify_session_token(body["session_token"])
     assert decoded["id"] == account.classic_address
     assert decoded["key"] == "regular" and decoded["signer"] == regular.classic_address
+    assert ledger_keys["addresses"] == [account.classic_address]  # the proof's Account
 
 
 def test_master_key_token_carries_no_key_claims(monkeypatch):

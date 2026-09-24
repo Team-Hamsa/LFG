@@ -422,6 +422,14 @@ def test_foreign_key_is_refused():
     assert _refusal(tx, FOUND) == "pubkey_account"
 
 
+def test_foreign_key_is_refused_as_unverified_when_the_lookup_fails():
+    """Without the lookup a RegularKey and a foreign key can't be told apart,
+    so a foreign signer gets the same retryable 503 a RegularKey would (the
+    deliberate spec deviation from a flat `pubkey_account`)."""
+    tx = _signed_by(FOREIGN, ACCOUNT.classic_address)
+    assert _refusal(tx, LOOKUP_FAILED) == "regular_key_unverified"
+
+
 def test_signing_key_address_names_the_key_that_signed():
     assert proof.signing_key_address(_signed_by(REGULAR, ACCOUNT.classic_address)) == (
         REGULAR.classic_address
