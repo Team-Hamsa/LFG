@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -532,8 +533,69 @@ def _no_checkout_store_access() -> Iterator[None]:
         )
 
 
+# --- Git config guard: fail the run if a test rewrites the enclosing repo's config ---
+# Git exports GIT_DIR to its hooks and the pre-push gate runs this suite from
+# one, so a temp-repo git command that inherits the environment acts on the
+# OUTER repo. #373's first draft ran `git config user.name t` that way and left
+# user.name=t / user.email=t@t in ~/LFG/.git/config — the one file every
+# worktree shares — so each commit made from that clone was authored `t <t@t>`
+# from 2026-08-16 until it was noticed on 2026-09-24. Tests scrub GIT_* and take
+# their identity from GIT_AUTHOR_* / GIT_COMMITTER_*, never `git config`; this
+# guard turns a regression into a failed run. The file is resolved with the
+# inherited environment, so it is exactly the one a leaking `git config` would
+# write. branch.* and remote.* are skipped: other git processes (worktree add
+# with tracking, push -u, gh) rewrite those while a run is in flight.
+_CONCURRENT_GIT_SECTIONS = ("branch.", "remote.")
+
+
+def _enclosing_git_config(start: str) -> str | None:
+    """The config file shared by every worktree of the repo at `start`, or None."""
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=start,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None  # not a checkout (or no git): nothing to guard
+    return os.path.realpath(os.path.join(start, common, "config"))
+
+
+class _GitConfigGuard:
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.entries_at_start: set[str] = set()
+        self.session_report: list[str] = []
+
+    def entries(self) -> set[str]:
+        """The config's `key=value` entries, minus the sections other git processes churn."""
+        if self.path is None:
+            return set()
+        listing = subprocess.run(
+            ["git", "config", "--file", self.path, "--list", "--null"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        entries = (entry.replace("\n", "=", 1) for entry in listing.split("\0") if entry)
+        return {entry for entry in entries if not entry.startswith(_CONCURRENT_GIT_SECTIONS)}
+
+    def changes(self) -> list[str]:
+        entries = self.entries()
+        return [f"added {e}" for e in sorted(entries - self.entries_at_start)] + [
+            f"removed {e}" for e in sorted(self.entries_at_start - entries)
+        ]
+
+
+_GIT_CONFIG_GUARD = _GitConfigGuard(
+    _enclosing_git_config(os.path.dirname(os.path.abspath(__file__)))
+)
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     _CHECKOUT_STORE_GUARD.entries_at_start = _CHECKOUT_STORE_GUARD.store_entries()
+    _GIT_CONFIG_GUARD.entries_at_start = _GIT_CONFIG_GUARD.entries()
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -543,16 +605,31 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     report += [f"created during the run: {p}" for p in sorted(entries - guard.entries_at_start)]
     report += [f"removed during the run: {p}" for p in sorted(guard.entries_at_start - entries)]
     guard.session_report = report
-    if report and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+    git_changes = _GIT_CONFIG_GUARD.changes()
+    if git_changes:
+        _GIT_CONFIG_GUARD.session_report = [
+            f"{_GIT_CONFIG_GUARD.path} changed during the run — a test ran git with an "
+            "inherited GIT_DIR, or outside its temp repo (scrub GIT_* and pass identity "
+            "via GIT_AUTHOR_*/GIT_COMMITTER_*, never `git config`):",
+            *(f"  {change}" for change in git_changes),
+        ]
+    if (report or git_changes) and session.exitstatus in (
+        pytest.ExitCode.OK,
+        pytest.ExitCode.NO_TESTS_COLLECTED,
+    ):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    if not _CHECKOUT_STORE_GUARD.session_report:
-        return
-    terminalreporter.section("checkout store leak", sep="=", red=True, bold=True)
-    for line in _CHECKOUT_STORE_GUARD.session_report:
-        terminalreporter.line(line)
+    for title, report in (
+        ("checkout store leak", _CHECKOUT_STORE_GUARD.session_report),
+        ("git config leak", _GIT_CONFIG_GUARD.session_report),
+    ):
+        if not report:
+            continue
+        terminalreporter.section(title, sep="=", red=True, bold=True)
+        for line in report:
+            terminalreporter.line(line)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
