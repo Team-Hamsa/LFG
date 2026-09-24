@@ -215,7 +215,7 @@ In `create`, add `provider: str | None = None` after `created_ledger`, add `prov
 - Test: create `tests/test_agent_signin_endpoint.py`; append to `tests/test_signing_proof.py`
 
 **Interfaces:**
-- Consumes (from PR B): `RedeemedProof(wallet, signer)`, `_redeem_proof -> tuple[RedeemedProof, None] | tuple[None, web.Response]`, `_finish_web_signin(wallet, provider, signer=None)`, and the autouse `ledger_keys` stub pattern.
+- Consumes (from PR B, #603): `RedeemedProof(wallet, signer, checked_at)`, `_redeem_proof -> tuple[RedeemedProof, None] | tuple[None, web.Response]`, `_finish_web_signin(wallet, provider, signer=None, checked_at=None)`, and the autouse `ledger_keys` stub pattern.
 - Consumes (from Tasks 1–2): `memos.PLATFORM_AGENT`, `store.create(provider=)`.
 - Produces:
   - `config.AGENT_SIGNIN_ENABLED: bool`
@@ -357,15 +357,15 @@ PROVIDER_PLATFORM = {"walletconnect": memos.PLATFORM_WEBAPP, "agent": memos.PLAT
 - In that arm, pass `provider=provider` to `sign_request_store.create`, pass `platform=signing_proof.PROVIDER_PLATFORM[provider]` as `build_proof_tx`'s fourth argument, and return `"provider": provider` instead of the literal.
 - Add to the docstring: `With provider="agent" (agent users spec §1) the same flow runs for a bot, gated on AGENT_SIGNIN_ENABLED, with platform=agent proof memos.`
 
-(d) `RedeemedProof` gains a third field, `provider: str  # the row's client-signed provider ("walletconnect" for NULL rows)`. In `_redeem_proof`, before the `verify_proof` call:
+(d) `RedeemedProof` gains a fourth field, `provider: str  # the row's client-signed provider ("walletconnect" for NULL rows)`. In `_redeem_proof`, before the `verify_proof` call:
 
 ```python
     provider = row.get("provider") or "walletconnect"
 ```
 
-Pass `platform=signing_proof.PROVIDER_PLATFORM[provider]` to `verify_proof`, and return `RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), provider)`.
+Pass `platform=signing_proof.PROVIDER_PLATFORM[provider]` to `verify_proof`, and return `RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at, provider)`.
 
-(e) `handle_web_signin_proof`: `return await _finish_web_signin(proven.wallet, proven.provider, signer=proven.signer)`.
+(e) `handle_web_signin_proof`: `return await _finish_web_signin(proven.wallet, proven.provider, signer=proven.signer, checked_at=proven.checked_at)`.
 
 - [ ] **Step 4:** Run `.venv/bin/python -m pytest tests/test_agent_signin_endpoint.py tests/test_wc_signin_endpoint.py tests/test_wallet_link_endpoint.py tests/test_signing_proof.py tests/test_regular_key_sessions.py -q`. Expected: PASS.
 
