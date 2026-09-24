@@ -921,7 +921,20 @@ async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Respo
     return None
 
 
+def _revocation_exempt(handler):
+    """Apply beneath `@require_auth` (i.e. closer to the handler) to skip the
+    RegularKey revocation check (F2, agent users spec §2 Amendment 1).
+    Revocation only ever narrows access, so logout and wallet disconnect must
+    keep working even when the ledger is unreachable — otherwise a session
+    whose key was pulled specifically to end it can outlive the restart that
+    should have killed it."""
+    handler._regular_key_exempt = True
+    return handler
+
+
 def require_auth(handler):
+    exempt = getattr(handler, "_regular_key_exempt", False)
+
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
             request["user"] = {"id": "dev", "name": "dev"}
@@ -932,9 +945,10 @@ def require_auth(handler):
         user = verify_session_token(auth[7:])
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
-        refusal = await _regular_key_refusal(auth[7:], user)
-        if refusal is not None:
-            return refusal
+        if not exempt:
+            refusal = await _regular_key_refusal(auth[7:], user)
+            if refusal is not None:
+                return refusal
         request["user"] = user
         # #447: the provider a user signed in with is ambient for the request
         # (and for tasks the handler spawns). Web sessions use the wallet as
@@ -1776,11 +1790,16 @@ async def handle_me(request):
 
 
 @require_auth
+@_revocation_exempt
 async def handle_logout(request):
     """Log out: revoke the bearer session token server-side. The web surface
     calls this before dropping its localStorage copy; Discord/Telegram
     re-authenticate through their host handshake, so for them the meaningful
-    action is /api/wallet/disconnect."""
+    action is /api/wallet/disconnect.
+
+    Exempt from the RegularKey revocation check (F2): revoking only narrows
+    access, so a stale or unverifiable key must never block a session from
+    denylisting its own token."""
     token = request.headers.get("Authorization", "")[7:]
     if not await asyncio.to_thread(revoke_session_token, token):
         return web.json_response({"error": "could not persist logout"}, status=500)
@@ -1788,13 +1807,17 @@ async def handle_logout(request):
 
 
 @require_auth
+@_revocation_exempt
 async def handle_wallet_disconnect(request):
     """Disconnect the caller's wallet. Discord/Telegram: unlink the wallet
     from the platform identity (plus the legacy Users row for Discord, which
     _resolve_wallet would otherwise fall back to) — the next /api/me shows no
     wallet and the client re-offers the Xaman sign-in. Web: the wallet IS the
     identity, so this is a logout (the identities row and its push token are
-    kept for the wallet's next sign-in)."""
+    kept for the wallet's next sign-in).
+
+    Exempt from the RegularKey revocation check (F2): revoking only narrows
+    access, so a stale or unverifiable key must never block a disconnect."""
     user = request["user"]
     platform = _platform(user)
     if platform == "web":

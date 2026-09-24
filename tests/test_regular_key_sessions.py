@@ -165,3 +165,22 @@ def test_the_event_stream_refuses_a_revoked_session(ledger):
     ledger["authority"] = KeyAuthority(None, False, True)
     resp = _run(app.handle_events_me(_Req(query={"token": _token(**REGULAR)})))
     assert resp.status == 401 and json.loads(resp.text)["code"] == "key_revoked"
+
+
+def test_logout_and_disconnect_are_exempt_from_the_revocation_check(ledger):
+    """Revocation only ever narrows access: logout and wallet disconnect must
+    keep working even with no cached answer and an unreachable ledger (F2)."""
+    ledger["authority"] = LOOKUP_FAILED
+    tok = _token(**REGULAR)
+    resp = _run(app.handle_logout(_Req({"Authorization": f"Bearer {tok}"})))
+    assert resp.status == 200
+    assert app.verify_session_token(tok) is None  # denylisted despite the lookup failure
+
+    tok2 = _token(**REGULAR)
+    resp2 = _run(app.handle_wallet_disconnect(_Req({"Authorization": f"Bearer {tok2}"})))
+    assert resp2.status == 200 and json.loads(resp2.text)["wallet"] is None
+    assert ledger["calls"] == 0  # neither handler touched the ledger
+
+    # A normal require_auth handler is not exempt: it still fails closed.
+    status, body = _call(_token(**REGULAR))
+    assert status == 503 and body["code"] == "key_unverified"
