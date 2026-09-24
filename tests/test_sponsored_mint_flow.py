@@ -516,7 +516,9 @@ def test_successful_startup_recovery_enables_sponsorship_gate(monkeypatch):
 
 
 def test_offer_recovery_failure_still_reattaches_resumable_paid_jobs(_service_env, monkeypatch):
-    job = SimpleNamespace(id="paid-job", network="mainnet", task=None)
+    job = SimpleNamespace(
+        id="paid-job", network="mainnet", task=None, sign_provider="xaman", sign_wallet=None
+    )
     events = []
 
     def recovery(*args, **kwargs):
@@ -548,7 +550,13 @@ def test_offer_recovery_failure_still_reattaches_resumable_paid_jobs(_service_en
 
 
 def test_paid_rebuild_and_attachment_precede_network_sponsored_recovery(_service_env, monkeypatch):
-    job = SimpleNamespace(id="paid-before-sponsored", network="mainnet", task=None)
+    job = SimpleNamespace(
+        id="paid-before-sponsored",
+        network="mainnet",
+        task=None,
+        sign_provider="xaman",
+        sign_wallet=None,
+    )
     events = []
 
     def paid_snapshot(resumed):

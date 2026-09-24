@@ -4,8 +4,12 @@
 # threading that through every session dataclass and the ~60 builder/poll
 # call sites in lfg_service/app.py, require_auth sets it here for the
 # request; asyncio.create_task copies the context, so the background flow
-# tasks a handler launches inherit it. Startup-resumed jobs and the sweeps
-# run with the defaults (xaman, no wallet).
+# tasks a handler launches inherit it. A bulk-mint job or burn2mint session
+# instead captures the provider/wallet into its own record at creation
+# (BulkMintJob.sign_provider/sign_wallet, Burn2MintSession likewise) and
+# restores it with `use()` when its task is (re)launched, so a startup
+# resume dispatches the way the job originally did rather than with these
+# defaults (agent users §1, task 7).
 from __future__ import annotations
 
 import contextvars

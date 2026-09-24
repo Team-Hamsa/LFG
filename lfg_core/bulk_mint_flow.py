@@ -179,6 +179,8 @@ class BulkMintJob:
         push_user_token: str | None = None,
         return_url: dict[str, str] | None = None,
         referrer: str | None = None,
+        sign_provider: str | None = None,
+        sign_wallet: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
@@ -189,6 +191,13 @@ class BulkMintJob:
         # #273: validated sharer wallet (?ref= attribution) or None — stamped
         # on every unit's LFG row, metrics-only.
         self.referrer = referrer
+        # Agent users §1: the signing mode the session started in, so a resumed
+        # job keeps dispatching the way it did (a client-signed session's
+        # payloads stay client-signed). Captured from the request's context.
+        from lfg_core.signing import context as signing_context
+
+        self.sign_provider = sign_provider or signing_context.current_provider()
+        self.sign_wallet = sign_wallet if sign_provider else signing_context.current_wallet()
         self.requested_qty = requested_qty
         self.quantity = requested_qty
         self.network = config.XRPL_NETWORK
@@ -375,6 +384,8 @@ class BulkMintJob:
             "push_user_token": self.push_user_token,
             "return_url": self.return_url,
             "referrer": self.referrer,
+            "sign_provider": self.sign_provider,
+            "sign_wallet": self.sign_wallet,
             "requested_qty": self.requested_qty,
             "quantity": self.quantity,
             "network": self.network,
@@ -401,6 +412,8 @@ class BulkMintJob:
             push_user_token=d.get("push_user_token"),
             return_url=d.get("return_url"),
             referrer=d.get("referrer"),
+            sign_provider=d.get("sign_provider", "xaman"),
+            sign_wallet=d.get("sign_wallet"),
         )
         j.id = d["id"]
         j.quantity = d["quantity"]

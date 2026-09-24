@@ -90,6 +90,8 @@ class Burn2MintSession:
         platform: str = "discord",
         push_user_token: str | None = None,
         return_url: dict[str, str] | None = None,
+        sign_provider: str | None = None,
+        sign_wallet: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
@@ -97,6 +99,13 @@ class Burn2MintSession:
         self.platform = platform
         self.push_user_token = push_user_token
         self.return_url = return_url
+        # Agent users §1: the signing mode the session started in, so a resumed
+        # job keeps dispatching the way it did (a client-signed session's
+        # payloads stay client-signed). Captured from the request's context.
+        from lfg_core.signing import context as signing_context
+
+        self.sign_provider = sign_provider or signing_context.current_provider()
+        self.sign_wallet = sign_wallet if sign_provider else signing_context.current_wallet()
         self.network = config.XRPL_NETWORK
         self.created_at = time.time()
         self.state = AWAITING_BURNS
@@ -117,6 +126,8 @@ class Burn2MintSession:
             "platform": self.platform,
             "push_user_token": self.push_user_token,
             "return_url": self.return_url,
+            "sign_provider": self.sign_provider,
+            "sign_wallet": self.sign_wallet,
             "network": self.network,
             "created_at": self.created_at,
             "state": self.state,
@@ -135,6 +146,8 @@ class Burn2MintSession:
             platform=d.get("platform", "discord"),
             push_user_token=d.get("push_user_token"),
             return_url=d.get("return_url"),
+            sign_provider=d.get("sign_provider", "xaman"),
+            sign_wallet=d.get("sign_wallet"),
         )
         s.id = d["id"]
         s.network = d["network"]
@@ -485,6 +498,8 @@ def build_mint_job(session: Burn2MintSession) -> bulk_mint_flow.BulkMintJob:
         platform=session.platform,
         push_user_token=session.push_user_token,
         return_url=session.return_url,
+        sign_provider=session.sign_provider,
+        sign_wallet=session.sign_wallet,
     )
     job.id = bulk_job_id_for(session)
     job.entitlement = ent  # set BEFORE clamp so the clamp sees cap_exempt

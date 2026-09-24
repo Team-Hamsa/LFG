@@ -8103,6 +8103,13 @@ async def handle_bulk_mint_unit_accept(request):
     )
 
 
+def _launch_bulk_task(job: Any) -> None:
+    """Start (or resume) a bulk job's run inside the signing context it was
+    created in (agent users §1): a task copies the context at creation."""
+    with signing_context.use(job.sign_provider, job.sign_wallet):
+        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+
+
 async def _launch_burn_mint_job(job: Any) -> Any:
     """Register + run a burn-to-mint bulk job. IDEMPOTENT by job id — the id
     is derived from the burn session (b2m<session_id>), so a crash-resumed
@@ -8114,7 +8121,7 @@ async def _launch_burn_mint_job(job: Any) -> Any:
     else:
         bulk_sessions[job.id] = job
     if job.task is None and job.state not in bulk_mint_flow.TERMINAL_STATES:
-        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+        _launch_bulk_task(job)
     return job
 
 
@@ -8966,7 +8973,7 @@ async def resume_bulk_jobs() -> None:
             headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
     for job in jobs:
         bulk_sessions[job.id] = job
-        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+        _launch_bulk_task(job)
     # #220: burn-to-mint recovery, AFTER bulk jobs re-attach so an already-
     # converted mint job (id b2m<session_id>) is adopted by _launch_burn_mint_
     # job instead of re-created. Validated burns are irreversible: any session
