@@ -69,7 +69,7 @@ def drip(monkeypatch, tmp_path):
 
     monkeypatch.setattr(xrpl_ops, "get_trustline_state", ok_trustline)
 
-    async def paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         return xrpl_ops.ClaimPayment("confirmed", "TXHASH", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", paid)
@@ -188,7 +188,7 @@ def test_post_claim_with_nothing_accrued_is_400(drip):
 
 
 def test_post_claim_while_one_is_in_flight_is_409(drip, monkeypatch):
-    async def unknown(destination, value, claim_id, max_last_ledger_seq=None):
+    async def unknown(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         return xrpl_ops.ClaimPayment("unknown", None, 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", unknown)
@@ -202,7 +202,7 @@ def test_post_claim_while_one_is_in_flight_is_409(drip, monkeypatch):
 
 
 def test_a_definitively_failed_payout_restores_the_balance(drip, monkeypatch):
-    async def failed(destination, value, claim_id, max_last_ledger_seq=None):
+    async def failed(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         return xrpl_ops.ClaimPayment("failed", None, 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", failed)
@@ -216,7 +216,7 @@ def test_an_unknown_payout_keeps_the_balance_bound(drip, monkeypatch):
     """The ambiguous window: the payment may have landed, so the BRIX must NOT
     come back — that would let it be claimed twice."""
 
-    async def unknown(destination, value, claim_id, max_last_ledger_seq=None):
+    async def unknown(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         return xrpl_ops.ClaimPayment("unknown", None, 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", unknown)
@@ -267,7 +267,7 @@ def test_a_pre_submission_failure_releases_the_balance(drip, monkeypatch):
     claims untouched, so the wallet would be blocked by claim_in_flight forever
     and its BRIX would be unreachable."""
 
-    async def cannot_submit(destination, value, claim_id, max_last_ledger_seq=None):
+    async def cannot_submit(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         raise xrpl_ops.ClaimNotSubmitted("could not read the validated ledger index")
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", cannot_submit)
@@ -283,7 +283,7 @@ def test_an_unexpected_payout_error_keeps_the_balance_bound(drip, monkeypatch):
     """An error we cannot prove happened BEFORE submission must fail closed:
     the payment may have landed, so the accruals stay bound for recovery."""
 
-    async def mystery(destination, value, claim_id, max_last_ledger_seq=None):
+    async def mystery(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         raise RuntimeError("something unexpected after submit")
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", mystery)
@@ -300,7 +300,7 @@ def test_an_unexpected_payout_error_still_records_a_ledger_deadline(drip, monkey
     A claim marked unknown with a NULL last_ledger_seq is one recover() skips
     forever, stranding the accruals — so a conservative deadline is persisted."""
 
-    async def mystery(destination, value, claim_id, max_last_ledger_seq=None):
+    async def mystery(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         raise RuntimeError("broke before the deadline existed")
 
     async def ledger():
@@ -326,7 +326,7 @@ def test_a_claim_row_never_exists_without_a_deadline(drip, monkeypatch):
     merely unlikely — no crash or cancellation can land between them."""
     seen = {}
 
-    async def cancelled(destination, value, claim_id, max_last_ledger_seq=None):
+    async def cancelled(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         row = drip.execute(
             "SELECT last_ledger_seq FROM brix_claims WHERE claim_id = ?", (claim_id,)
         ).fetchone()
@@ -357,7 +357,7 @@ def test_no_claim_is_opened_when_the_ledger_cannot_be_read(drip, monkeypatch):
     async def unreadable():
         return None
 
-    async def must_not_run(destination, value, claim_id, max_last_ledger_seq=None):
+    async def must_not_run(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         raise AssertionError("no payout may be attempted without a deadline")
 
     monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", unreadable)
@@ -847,3 +847,20 @@ def test_threaded_recovery_never_decides_a_claim_it_did_not_look_up(drip, monkey
     assert outcomes == {1: "confirmed", 2: "failed"}
     state = drip.execute("SELECT state FROM brix_claims WHERE claim_id = 3").fetchone()[0]
     assert state == "submitted"
+
+
+@pytest.mark.parametrize(("provider", "expected"), [("agent", "agent"), ("xaman", "backend")])
+def test_a_claim_payout_carries_the_session_platform(drip, monkeypatch, provider, expected):
+    from lfg_core.signing import context
+
+    seen = []
+
+    async def paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
+        seen.append(platform)
+        return xrpl_ops.ClaimPayment("confirmed", "TXHASH", 999)
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", paid)
+    _accrue(drip)
+    with context.use(provider, WALLET):
+        data = _body(_run(server.handle_brix_claim(_Req())))
+    assert data["state"] == "confirmed" and seen == [expected]

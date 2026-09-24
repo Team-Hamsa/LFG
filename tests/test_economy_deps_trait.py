@@ -4,6 +4,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 # Minimal env stubs (match test_economy_scripts_import.py pattern)
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
 os.environ.setdefault("XUMM_API_KEY", "x")
@@ -257,3 +259,82 @@ def test_blank_meta_head_success_uploads_and_caches(monkeypatch):
     assert _run(deps._blank_meta(2298)) is not None
     assert calls == ["https://cdn/blank.png"]
     assert len(uploaded) == 2
+
+
+def _record_platforms(monkeypatch):
+    """Fake every op build_economy_deps wires; return the list of `platform=` values they get."""
+    import types
+
+    from lfg_core import xrpl_ops, xumm_ops
+
+    seen: list = []
+
+    def recorder(result):
+        async def fake(*args, **kw):
+            seen.append(kw.get("platform"))
+            return result
+
+        return fake
+
+    monkeypatch.setattr(xrpl_ops, "mint_nft", recorder("NFTID"))
+    monkeypatch.setattr(xrpl_ops, "burn_nft", recorder("BURNHASH"))
+    monkeypatch.setattr(xrpl_ops, "create_nft_offer", recorder("OFFER"))
+    # _closet_modify reads tx_hash / ledger_index / transaction_index off the result
+    monkeypatch.setattr(
+        xrpl_ops,
+        "modify_nft",
+        recorder(types.SimpleNamespace(tx_hash="H", ledger_index=5, transaction_index=0)),
+    )
+    monkeypatch.setattr(xumm_ops, "create_accept_offer_payload", recorder({"uuid": "u"}))
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [("agent", "agent"), ("xaman", "backend"), ("walletconnect", "backend")],
+)
+def test_every_op_an_economy_session_builds_carries_its_platform(monkeypatch, provider, expected):
+    import sqlite3
+
+    import _economy_deps as deps
+
+    from lfg_core import economy_store
+    from lfg_core.signing import context
+
+    seen = _record_platforms(monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    economy_store.init_economy_schema(conn)
+    with context.use(provider, "rOWNER"):
+        d = deps.build_economy_deps(conn, owner="rOWNER")
+    # Called OUTSIDE the context: the platform is fixed when the deps are built.
+    for call in (
+        d.closet_mint_fn("u"),
+        d.char_mint_fn("u"),
+        d.trait_mint_fn("u"),
+        d.char_modify_fn("N", "rOWNER", "u"),
+        d.closet_modify_fn("N", "rOWNER", "u"),
+        d.char_burn_fn("N", "rOWNER"),
+        d.trait_burn_fn("N", "rOWNER"),
+        d.closet_offer_fn("N", "rOWNER"),
+        d.char_offer_fn("N", "rOWNER"),
+        d.closet_accept_fn("OFFER"),
+        d.char_accept_fn("OFFER"),
+    ):
+        _run(call)
+    assert seen == [expected] * 11
+
+
+def test_settlement_deps_stay_backend_inside_an_agent_request(monkeypatch):
+    import sqlite3
+
+    from lfg_core import economy_store
+    from lfg_core.signing import context
+    from webapp import economy_api
+
+    seen = _record_platforms(monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    economy_store.init_economy_schema(conn)
+    with context.use("agent", "rOWNER"):
+        d = economy_api.build_settlement_deps(conn)
+    _run(d.char_modify_fn("N", "rOWNER", "u"))
+    assert seen == ["backend"]

@@ -2333,7 +2333,11 @@ async def _claim_one_wallet(wallet, progress=None):
 
     try:
         payment = await xrpl_ops.send_brix_claim(
-            wallet, amount, claim_id, max_last_ledger_seq=provisional
+            wallet,
+            amount,
+            claim_id,
+            max_last_ledger_seq=provisional,
+            platform=memos.backend_platform(),
         )
     except xrpl_ops.ClaimNotSubmitted as exc:
         # Nothing reached the ledger, so releasing the claim is safe — and

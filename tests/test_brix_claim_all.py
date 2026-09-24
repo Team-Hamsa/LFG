@@ -75,7 +75,7 @@ def drip(monkeypatch, tmp_path):
 
     monkeypatch.setattr(xrpl_ops, "get_trustline_state", ok_trustline)
 
-    async def paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
     monkeypatch.setattr(xrpl_ops, "send_brix_claim", paid)
@@ -199,7 +199,7 @@ def test_claim_all_pays_each_wallet_to_its_own_address(drip, monkeypatch):
     the accrual owner's own wallet."""
     destinations = []
 
-    async def paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         destinations.append(destination)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
@@ -247,7 +247,7 @@ def test_claim_all_skips_a_wallet_without_a_trustline_and_continues(drip, monkey
 
 
 def test_claim_all_an_unexpected_per_wallet_error_does_not_kill_the_job(drip, monkeypatch):
-    async def b_explodes(destination, value, claim_id, max_last_ledger_seq=None):
+    async def b_explodes(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         if destination == W_B:
             raise RuntimeError("boom")
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
@@ -343,7 +343,7 @@ def test_claim_all_refuses_a_second_job_while_one_runs(drip, monkeypatch):
     the second up front."""
     gate = asyncio.Event()
 
-    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         await asyncio.wait_for(gate.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
@@ -442,7 +442,7 @@ def test_claim_all_two_overlapping_starts_cannot_both_mint_a_job(drip, monkeypat
 
     monkeypatch.setattr(identity_store, "bucket_for_wallet", slow_lookup)
 
-    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
@@ -473,7 +473,7 @@ def test_claim_all_a_bucket_sibling_cannot_start_an_overlapping_job(drip, monkey
     balances (Greptile P1 round 2 on #450)."""
     release = asyncio.Event()
 
-    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
 
@@ -504,7 +504,7 @@ def test_claim_all_cancellation_finalizes_every_row(drip, monkeypatch):
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def hanging_paid(destination, value, claim_id, max_last_ledger_seq=None):
+    async def hanging_paid(destination, value, claim_id, max_last_ledger_seq=None, platform=None):
         started.set()
         await asyncio.wait_for(release.wait(), timeout=15)
         return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)

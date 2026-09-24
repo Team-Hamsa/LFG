@@ -3103,7 +3103,11 @@ def claim_memo_tag(claim_id: int) -> str:
 
 
 async def send_brix_claim(
-    destination: str, value: int, claim_id: int, max_last_ledger_seq: int | None = None
+    destination: str,
+    value: int,
+    claim_id: int,
+    max_last_ledger_seq: int | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
 ) -> ClaimPayment:
     """Pay `value` whole BRIX from the DISTRIBUTOR wallet to `destination`.
 
@@ -3154,9 +3158,7 @@ async def send_brix_claim(
         source_tag=config.SOURCE_TAG,
         last_ledger_sequence=last_ledger_seq,
         memos=[
-            *memos.build_memo_models(
-                memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_BRIX_CLAIM
-            ),
+            *memos.build_memo_models(memos.INITIATOR_BACKEND, platform, memos.ACTION_BRIX_CLAIM),
             Memo(memo_data=claim_memo_tag(claim_id).encode().hex().upper()),
         ],
     )
