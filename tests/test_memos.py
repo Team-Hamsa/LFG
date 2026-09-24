@@ -8,6 +8,7 @@ from xrpl.models.transactions import Memo
 from xrpl.utils import hex_to_str
 
 from lfg_core import memos
+from lfg_core.signing import context
 
 
 def _decode_json_entry(entry: dict) -> tuple[str, str, str]:
@@ -119,3 +120,28 @@ def test_payload_stays_under_the_1kb_memo_limit():
         len(e["Memo"][k]) // 2 for e in arr for k in ("MemoType", "MemoData", "MemoFormat")
     )
     assert total_bytes < 1024
+
+
+def test_agent_is_a_memo_platform():
+    assert memos.PLATFORM_AGENT == "agent"
+    decoded = memos.decode_memos(
+        memos.build_memos_json(memos.INITIATOR_USER, memos.PLATFORM_AGENT, memos.ACTION_SIGNIN)
+    )
+    assert decoded["platform"] == "agent"
+
+
+def test_platform_for_labels_an_agent_session_on_every_surface():
+    for surface in ("web", "discord", "telegram", None):
+        assert memos.platform_for(surface) == memos.platform_for_surface(surface)
+        with context.use("walletconnect", "rW"):
+            assert memos.platform_for(surface) == memos.platform_for_surface(surface)
+        with context.use("agent", "rW"):
+            assert memos.platform_for(surface) == memos.PLATFORM_AGENT
+
+
+def test_backend_platform_is_agent_only_for_an_agent_session():
+    assert memos.backend_platform() == memos.PLATFORM_BACKEND
+    with context.use("walletconnect", "rW"):
+        assert memos.backend_platform() == memos.PLATFORM_BACKEND
+    with context.use("agent", "rW"):
+        assert memos.backend_platform() == memos.PLATFORM_AGENT
