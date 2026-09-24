@@ -860,8 +860,13 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
 # removed or rotated it, the token is denylisted and the request refused. On a
 # lookup error the last answer stands, whatever its age; with no answer at all
 # (a restart since sign-in) the request fails closed with a retryable 503.
+# A FAILED lookup backs off REGULAR_KEY_RETRY_SECONDS per wallet, so an RPC
+# outage doesn't make every request from that session pay for a fresh
+# failover walk once the 60 s cache goes stale.
 REGULAR_KEY_RECHECK_SECONDS = 60.0
+REGULAR_KEY_RETRY_SECONDS = 15.0
 _regular_keys: dict[str, tuple[float, str | None]] = {}  # wallet -> (checked, RegularKey)
+_regular_key_failed_at: dict[str, float] = {}  # wallet -> last FAILED lookup's start time
 
 
 def _note_regular_key(wallet: str, regular_key: str | None) -> None:
@@ -874,10 +879,23 @@ async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
     cached = _regular_keys.get(wallet)
     if cached is not None and now - cached[0] < REGULAR_KEY_RECHECK_SECONDS:
         return cached[1] == signer
+    failed_at = _regular_key_failed_at.get(wallet)
+    if failed_at is not None and now - failed_at < REGULAR_KEY_RETRY_SECONDS:
+        # Still backing off a recent failure: ride the last answer (whatever
+        # its age) rather than repeat the RPC failover walk.
+        return None if cached is None else cached[1] == signer
     authority = await xrpl_ops.key_authority(wallet)
     if authority.lookup_ok:
-        _regular_keys[wallet] = (now, authority.regular_key)
+        _regular_key_failed_at.pop(wallet, None)
+        # Stamped with when THIS lookup started, and only written if that is
+        # not older than what's already cached — a slow lookup that started
+        # before a fresher write (e.g. the sign-in seed) landed must not
+        # clobber it.
+        current = _regular_keys.get(wallet)
+        if current is None or now >= current[0]:
+            _regular_keys[wallet] = (now, authority.regular_key)
         return authority.regular_key == signer
+    _regular_key_failed_at[wallet] = now
     return None if cached is None else cached[1] == signer
 
 

@@ -42,9 +42,11 @@ def _hermetic(monkeypatch, tmp_path):
     identity_store.ensure_revoked_sessions_table()
     app._revoked_sessions.clear()
     app._regular_keys.clear()
+    app._regular_key_failed_at.clear()
     yield
     app._revoked_sessions.clear()
     app._regular_keys.clear()
+    app._regular_key_failed_at.clear()
 
 
 @pytest.fixture
@@ -113,6 +115,31 @@ def test_a_lookup_error_with_no_answer_fails_closed(ledger):
     ledger["authority"] = LOOKUP_FAILED
     status, body = _call(_token(**REGULAR))
     assert status == 503 and body["code"] == "key_unverified"
+
+
+def test_a_failed_lookup_is_not_retried_within_the_backoff_window(ledger):
+    ledger["authority"] = LOOKUP_FAILED
+    tok = _token(**REGULAR)
+    assert _call(tok)[0] == 503 and ledger["calls"] == 1
+    # Still inside REGULAR_KEY_RETRY_SECONDS: ride the (missing) answer, no
+    # new RPC failover walk.
+    assert _call(tok)[0] == 503 and ledger["calls"] == 1
+    failed_at = app._regular_key_failed_at[ACCOUNT]
+    app._regular_key_failed_at[ACCOUNT] = failed_at - app.REGULAR_KEY_RETRY_SECONDS - 1
+    assert _call(tok)[0] == 503 and ledger["calls"] == 2
+
+
+def test_an_out_of_order_write_cannot_clobber_a_fresher_entry(monkeypatch):
+    async def _lookup(address):
+        # A fresher write (e.g. the sign-in seed) lands, stamped with ITS OWN
+        # (later) start time, while this lookup is still in flight.
+        app._note_regular_key(ACCOUNT, "fresher-key")
+        return KeyAuthority("stale-key", False, True)
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    assert _run(app._regular_key_still_set(ACCOUNT, "stale-key")) is True
+    checked, key = app._regular_keys[ACCOUNT]
+    assert key == "fresher-key"  # this lookup's own (stale) answer did not clobber it
 
 
 def test_sign_in_seeds_the_answer(monkeypatch, ledger):
