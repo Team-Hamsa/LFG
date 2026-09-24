@@ -165,7 +165,7 @@ PRESUBMIT_SIMULATE=1                                        # optional (#58); pr
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
 WC_SURFACES=web,telegram                                    # optional (#447); surfaces that show "Connect with Joey" (discord-activity needs URL Mappings first)
-AGENT_SIGNIN_ENABLED=0                                      # optional (agent users §1); the "agent" web sign-in provider for bots holding their own key — 0 = off
+AGENT_SIGNIN_ENABLED=0                                      # optional (agent users §1); the "agent" web sign-in provider for bots holding their own key — fail-closed: on only for 1/true/yes/on
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**

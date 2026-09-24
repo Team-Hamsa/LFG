@@ -115,10 +115,24 @@ def test_agent_arm_is_off_by_default(monkeypatch):
 
 def test_agent_signin_enabled_shipped_default_is_off(monkeypatch):
     # The test above sets the flag False by hand; this pins the SHIPPED
-    # default itself — with the env var unset, env_flag reads off, so a
+    # default itself — with the env var unset, the gate reads off, so a
     # deploy that forgets to set AGENT_SIGNIN_ENABLED still ships disabled.
     monkeypatch.delenv("AGENT_SIGNIN_ENABLED", raising=False)
-    assert app.config.env_flag("AGENT_SIGNIN_ENABLED", "0") is False
+    assert app.config.env_enabled("AGENT_SIGNIN_ENABLED") is False
+
+
+@pytest.mark.parametrize("value", ["0", "", "false", "FALSE", "False", "off", "OFF", "no", " 0 "])
+def test_agent_signin_gate_fails_closed(monkeypatch, value):
+    # env_flag's denylist would read "FALSE"/"off"/"" as ON; the agent gate
+    # is an allowlist, so any value an operator means as off stays off.
+    monkeypatch.setenv("AGENT_SIGNIN_ENABLED", value)
+    assert app.config.env_enabled("AGENT_SIGNIN_ENABLED") is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", "yes", "on", " 1 "])
+def test_agent_signin_gate_turns_on_for_explicit_values(monkeypatch, value):
+    monkeypatch.setenv("AGENT_SIGNIN_ENABLED", value)
+    assert app.config.env_enabled("AGENT_SIGNIN_ENABLED") is True
 
 
 def test_agent_start_issues_an_agent_row_with_agent_memos(monkeypatch):

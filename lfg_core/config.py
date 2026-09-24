@@ -34,6 +34,14 @@ def env_flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default) not in ("0", "false", "False")
 
 
+def env_enabled(name: str) -> bool:
+    """Fail-closed twin of env_flag for security gates: ON only for an explicit
+    "1"/"true"/"yes"/"on" (any case, surrounding whitespace ignored). Unset,
+    empty, "off", "FALSE" or a typo all read OFF — env_flag's denylist would
+    read most of those as ON."""
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # XUMM
 XUMM_API_KEY = _require("XUMM_API_KEY")
 XUMM_API_SECRET = _require("XUMM_API_SECRET")
@@ -734,5 +742,6 @@ def wc_enabled() -> bool:
 
 # Agent users (spec §1): the `agent` web sign-in provider — a bot holding its own
 # key signs a proof like Joey does, and its transactions are labelled
-# platform=agent. Ships dark; turned on per stack. Read at import.
-AGENT_SIGNIN_ENABLED = env_flag("AGENT_SIGNIN_ENABLED", "0")
+# platform=agent. Ships dark; turned on per stack. Read at import. Fail-closed
+# (env_enabled): only an explicit 1/true/yes/on turns it on.
+AGENT_SIGNIN_ENABLED = env_enabled("AGENT_SIGNIN_ENABLED")
