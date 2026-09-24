@@ -41,12 +41,8 @@ def _hermetic(monkeypatch, tmp_path):
     identity_store.ensure_identities_table()
     identity_store.ensure_revoked_sessions_table()
     app._revoked_sessions.clear()
-    app._regular_keys.clear()
-    app._regular_key_failed_at.clear()
     yield
     app._revoked_sessions.clear()
-    app._regular_keys.clear()
-    app._regular_key_failed_at.clear()
 
 
 @pytest.fixture
@@ -139,9 +135,46 @@ def test_an_out_of_order_write_cannot_clobber_a_fresher_entry(monkeypatch):
         return KeyAuthority("stale-key", False, True)
 
     monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
-    assert _run(app._regular_key_still_set(ACCOUNT, "stale-key")) is True
+    # The fresher answer decides the request too, not only the cache (#603 review):
+    # the stale lookup's "stale-key" must neither be stored nor authorize.
+    assert _run(app._regular_key_still_set(ACCOUNT, "stale-key")) is False
     checked, key = app._regular_keys[ACCOUNT]
     assert key == "fresher-key"  # this lookup's own (stale) answer did not clobber it
+
+
+def test_a_stale_lookup_cannot_revoke_a_session_a_fresher_answer_allows(monkeypatch):
+    async def _lookup(address):
+        app._note_regular_key(ACCOUNT, SIGNER)  # the fresher answer: still SIGNER
+        return KeyAuthority(OTHER, False, True)  # the stale read: rotated away
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    assert _run(app._regular_key_still_set(ACCOUNT, SIGNER)) is True
+
+
+def test_a_failed_lookup_defers_to_an_answer_written_meanwhile(monkeypatch):
+    async def _lookup(address):
+        app._note_regular_key(ACCOUNT, SIGNER)
+        return LOOKUP_FAILED
+
+    monkeypatch.setattr(app.xrpl_ops, "key_authority", _lookup)
+    assert _run(app._regular_key_still_set(ACCOUNT, SIGNER)) is True  # not None → no 503
+
+
+def test_pruning_tolerates_a_signature_another_thread_already_removed():
+    class _Racing(dict):
+        """items() still lists a signature a concurrent prune already deleted."""
+
+        def items(self):
+            return [*super().items(), ("gone", 0.0)]
+
+    racing = _Racing({"live": 9e18})
+    original = app._revoked_sessions
+    app._revoked_sessions = racing
+    try:
+        app._prune_revoked_sessions(1.0)  # used to raise KeyError('gone')
+    finally:
+        app._revoked_sessions = original
+    assert dict(racing) == {"live": 9e18}
 
 
 def test_sign_in_seeds_the_answer(monkeypatch, ledger):

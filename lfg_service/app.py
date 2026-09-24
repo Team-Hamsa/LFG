@@ -760,8 +760,10 @@ def _prune_revoked_sessions(now: float) -> None:
     # Revocations now also run off the event loop (asyncio.to_thread), so a
     # concurrent write can land mid-iteration; iterate a snapshot rather than
     # the live dict (F3) to avoid "dictionary changed size during iteration".
+    # pop, not del: two concurrent prunes can snapshot the same expired sig, and
+    # the second must not raise KeyError before its own token is denylisted.
     for sig in [k for k, exp in list(_revoked_sessions.items()) if exp < now]:
-        del _revoked_sessions[sig]
+        _revoked_sessions.pop(sig, None)
 
 
 def load_revoked_sessions() -> None:
@@ -888,18 +890,20 @@ async def _regular_key_still_set(wallet: str, signer: str) -> bool | None:
         # its age) rather than repeat the RPC failover walk.
         return None if cached is None else cached[1] == signer
     authority = await xrpl_ops.key_authority(wallet)
+    # Re-read after the await: a fresher answer (e.g. the sign-in seed, or a
+    # concurrent recheck) may have landed while this lookup was in flight, and
+    # it must decide this request as well as the cache (#603 review).
+    current = _regular_keys.get(wallet)
     if authority.lookup_ok:
         _regular_key_failed_at.pop(wallet, None)
-        # Stamped with when THIS lookup started, and only written if that is
-        # not older than what's already cached — a slow lookup that started
-        # before a fresher write (e.g. the sign-in seed) landed must not
-        # clobber it.
-        current = _regular_keys.get(wallet)
-        if current is None or now >= current[0]:
-            _regular_keys[wallet] = (now, authority.regular_key)
+        if current is not None and current[0] > now:
+            return current[1] == signer
+        # Stamped with when THIS lookup started, so a slower lookup that
+        # started earlier can never clobber it.
+        _regular_keys[wallet] = (now, authority.regular_key)
         return authority.regular_key == signer
     _regular_key_failed_at[wallet] = now
-    return None if cached is None else cached[1] == signer
+    return None if current is None else current[1] == signer
 
 
 async def _regular_key_refusal(token: str, payload: dict[str, Any]) -> web.Response | None:
