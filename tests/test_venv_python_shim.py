@@ -26,16 +26,28 @@ def _clean_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
+# The temp repos' commit identity comes from the environment, never `git
+# config`: before _clean_env existed, this file's `git config user.name t` ran
+# with the hook's GIT_DIR and wrote the OUTER clone's shared config, so every
+# commit from ~/LFG and its worktrees was authored `t <t@t>` for five weeks.
+_IDENTITY = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
 def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=_clean_env())
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, env={**_clean_env(), **_IDENTITY}
+    )
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     repo = tmp_path / name
     repo.mkdir()
     _git("init", "-b", "main", cwd=repo)
-    _git("config", "user.email", "t@t", cwd=repo)
-    _git("config", "user.name", "t", cwd=repo)
     scripts = repo / "scripts"
     scripts.mkdir()
     shutil.copy(SHIM, scripts / "venv-python")

@@ -1,0 +1,180 @@
+# tests/test_git_config_guard.py
+# Git exports GIT_DIR to its hooks, and the pre-push gate runs the suite from
+# one, so a temp-repo `git config` that inherits the environment writes the
+# OUTER repo's config — the one file every worktree shares. #373's first draft
+# did exactly that on 2026-08-16, and every commit made from ~/LFG or any of
+# its worktrees was authored `t <t@t>` until 2026-09-24. The root conftest now
+# diffs that config across the session and fails the run on any change.
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+import conftest
+
+_IDENTITY = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _scrubbed_env() -> dict[str, str]:
+    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **_IDENTITY}
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=_scrubbed_env())
+
+
+def _repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "wt", str(wt))
+    return repo, wt
+
+
+def _armed(path: str | None) -> conftest._GitConfigGuard:
+    guard = conftest._GitConfigGuard(path)
+    guard.entries_at_start = guard.entries()
+    return guard
+
+
+def test_hook_env_git_config_lands_in_the_file_the_guard_watches(tmp_path, monkeypatch):
+    repo, wt = _repo_with_worktree(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    # What git exports to a pre-push hook run from a worktree.
+    monkeypatch.setenv("GIT_DIR", str(repo / ".git" / "worktrees" / "wt"))
+
+    watched = conftest._enclosing_git_config(str(wt))
+    assert watched == os.path.realpath(repo / ".git" / "config")
+    guard = _armed(watched)
+
+    # The 2026-08-16 bug: a "temp repo" `git config` that kept the hook's env.
+    subprocess.run(
+        ["git", "config", "user.name", "t"], cwd=scratch, check=True, env=dict(os.environ)
+    )
+    assert guard.changes() == ["added user.name=t"]
+
+
+def test_guard_reports_added_and_removed_entries(tmp_path):
+    repo, _ = _repo_with_worktree(tmp_path)
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "--unset", "core.bare")
+
+    assert guard.changes() == ["added user.email=t@t", "removed core.bare=false"]
+
+
+def test_guard_counts_a_repeated_value(tmp_path):
+    # Git reads the LAST value of a multi-valued key, so re-adding an earlier
+    # value changes the identity even though no new distinct entry appears.
+    repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "config", "--add", "user.email", "a@a")
+    _git(repo, "config", "--add", "user.email", "b@b")
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "--add", "user.email", "a@a")
+
+    assert guard.changes() == ["added user.email=a@a"]
+
+
+def test_guard_redacts_credentials_but_not_identities(tmp_path):
+    # The report reaches public CI logs; the identity it exists to name stays.
+    repo, _ = _repo_with_worktree(tmp_path)
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0")
+    _git(repo, "config", "http.https://u:s3cret@example.invalid/.extraheader", "X-Token: s3cret")
+    _git(repo, "remote", "add", "fork", "https://x-access-token:s3cret@github.com/o/r.git")
+    _git(repo, "config", "user.name", "t")
+
+    assert guard.changes() == [
+        "added http.https://github.com/.extraheader=<redacted>",
+        "added http.https://<redacted>@example.invalid/.extraheader=<redacted>",
+        "added remote.fork.fetch=+refs/heads/*:refs/remotes/fork/*",
+        "added remote.fork.url=https://<redacted>@github.com/o/r.git",
+        "added user.name=t",
+    ]
+
+
+def test_guard_refuses_to_arm_on_an_unreadable_config(tmp_path):
+    # git exits 128 with no output for a missing or malformed file; that must
+    # not read as an empty snapshot.
+    with pytest.raises(OSError, match="unable to read config file"):
+        _armed(str(tmp_path / "missing"))
+
+
+def test_guard_reports_a_config_it_can_no_longer_read(tmp_path):
+    repo, _ = _repo_with_worktree(tmp_path)
+    config = repo / ".git" / "config"
+    guard = _armed(str(config))
+
+    config.write_text("[core\n")
+
+    (change,) = guard.changes()
+    assert change.startswith("unreadable after the run: ")
+    assert "bad config line 1" in change
+
+
+def test_guard_ignores_branch_tracking_and_gh_default_repo(tmp_path):
+    # Other git processes rewrite these while a run is in flight (worktree add
+    # with tracking, push -u, gh repo set-default); they are not a test's leak.
+    repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/r.git")
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "branch.wt.remote", "origin")
+    _git(repo, "config", "branch.wt.merge", "refs/heads/main")
+    _git(repo, "config", "remote.origin.gh-resolved", "base")
+
+    assert guard.changes() == []
+
+
+def test_guard_reports_a_repointed_remote(tmp_path):
+    # The deployer/promote tests wire temp origins; one that leaked would
+    # repoint the shared checkout's push target.
+    repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/r.git")
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "remote", "set-url", "origin", "file:///elsewhere.git")
+    _git(repo, "config", "remote.origin.pushurl", "file:///elsewhere.git")
+
+    assert guard.changes() == [
+        "added remote.origin.pushurl=file:///elsewhere.git",
+        "added remote.origin.url=file:///elsewhere.git",
+        "removed remote.origin.url=https://example.invalid/r.git",
+    ]
+
+
+def test_guard_is_inert_outside_a_checkout(tmp_path, monkeypatch):
+    for var in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(var)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
+    assert conftest._enclosing_git_config(str(tmp_path)) is None
+    assert _armed(None).changes() == []
+
+
+def test_live_guard_watches_this_checkouts_shared_config():
+    root = Path(__file__).resolve().parents[1]
+    common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    guard = conftest._GIT_CONFIG_GUARD
+    assert guard.path == os.path.realpath(root / common / "config")
+    # Armed at session start: the snapshot is this file's content (no key is
+    # assumed present — git writes none of them compulsorily).
+    assert guard.entries_at_start == guard.entries()
