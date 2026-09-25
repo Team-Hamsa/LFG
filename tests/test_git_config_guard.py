@@ -86,6 +86,23 @@ def test_guard_counts_a_repeated_value(tmp_path):
     assert guard.changes() == ["added user.email=a@a"]
 
 
+def test_guard_redacts_credentials_but_not_identities(tmp_path):
+    # The report reaches public CI logs; the identity it exists to name stays.
+    repo, _ = _repo_with_worktree(tmp_path)
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0")
+    _git(repo, "remote", "add", "fork", "https://x-access-token:s3cret@github.com/o/r.git")
+    _git(repo, "config", "user.name", "t")
+
+    assert guard.changes() == [
+        "added http.https://github.com/.extraheader=<redacted>",
+        "added remote.fork.fetch=+refs/heads/*:refs/remotes/fork/*",
+        "added remote.fork.url=https://<redacted>@github.com/o/r.git",
+        "added user.name=t",
+    ]
+
+
 def test_guard_refuses_to_arm_on_an_unreadable_config(tmp_path):
     # git exits 128 with no output for a missing or malformed file; that must
     # not read as an empty snapshot.

@@ -555,6 +555,17 @@ def _churned_elsewhere(entry: str) -> bool:
     return key.startswith("branch.") or (key.startswith("remote.") and key.endswith(".gh-resolved"))
 
 
+_URL_USERINFO_RE = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redacted(entry: str) -> str:
+    """`entry` fit for a public CI log: header values and URL credentials hidden."""
+    key, sep, _ = entry.partition("=")
+    if sep and key.endswith(".extraheader"):
+        return f"{key}=<redacted>"
+    return _URL_USERINFO_RE.sub("<redacted>@", entry)
+
+
 def _enclosing_git_config(start: str) -> str | None:
     """The config file shared by every worktree of the repo at `start`, or None."""
     try:
@@ -601,8 +612,10 @@ class _GitConfigGuard:
             entries = self.entries()
         except OSError as exc:
             return [f"unreadable after the run: {exc}"]
-        return [f"added {e}" for e in sorted((entries - self.entries_at_start).elements())] + [
-            f"removed {e}" for e in sorted((self.entries_at_start - entries).elements())
+        added = sorted((entries - self.entries_at_start).elements())
+        removed = sorted((self.entries_at_start - entries).elements())
+        return [f"added {_redacted(e)}" for e in added] + [
+            f"removed {_redacted(e)}" for e in removed
         ]
 
 
