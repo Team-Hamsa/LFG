@@ -38,7 +38,10 @@ Install all dependencies with:
 
 ### Pre-push gate (BLOCKING)
 `.pre-commit-config.yaml` runs at the **pre-push** stage: ruff (--fix), ruff-format, mypy (from the
-project `.venv`, real dep types), gitleaks, pytest (whole suite, via
+project `.venv`, real dep types), gitleaks (`scripts/gitleaks-scan` +
+`.gitleaks.toml`: the pushed commit range at pre-push, HEAD's tracked tree in
+CI, default rules plus an XRPL family-seed rule; the upstream `--staged` entry
+scanned nothing at pre-push), pytest (whole suite, via
 `scripts/run-tests -n auto --dist loadfile` — the wrapper puts `TMPDIR` on a
 tmpfs when the box has one, because the suite's SQLite stores `fsync` on every
 commit and the deploy box shares its ext4 journal with the XRPL validator:

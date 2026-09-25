@@ -40,7 +40,10 @@ failure. The gate runs, in order:
 - **ruff-format** — formatting
 - **mypy** — type-checking from the project `.venv` (against the real installed
   dep types)
-- **gitleaks** — secret scanning
+- **gitleaks** — secret scanning via `scripts/gitleaks-scan`: the pushed commits
+  at pre-push, every tracked file at HEAD in CI. Rules are `.gitleaks.toml`: the
+  default set plus XRPL family seeds. Tests that need a seed generate one with
+  `xrpl.core.keypairs.generate_seed()`; a literal seed fails the gate.
 - **pytest** — the whole suite, via `scripts/run-tests -n auto --dist loadfile`
 - **validate-trait-config** — validates `trait_config.yaml` against `layers/`
 
