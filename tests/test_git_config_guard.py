@@ -92,11 +92,13 @@ def test_guard_redacts_credentials_but_not_identities(tmp_path):
     guard = _armed(str(repo / ".git" / "config"))
 
     _git(repo, "config", "http.https://github.com/.extraheader", "AUTHORIZATION: basic c2VjcmV0")
+    _git(repo, "config", "http.https://u:s3cret@example.invalid/.extraheader", "X-Token: s3cret")
     _git(repo, "remote", "add", "fork", "https://x-access-token:s3cret@github.com/o/r.git")
     _git(repo, "config", "user.name", "t")
 
     assert guard.changes() == [
         "added http.https://github.com/.extraheader=<redacted>",
+        "added http.https://<redacted>@example.invalid/.extraheader=<redacted>",
         "added remote.fork.fetch=+refs/heads/*:refs/remotes/fork/*",
         "added remote.fork.url=https://<redacted>@github.com/o/r.git",
         "added user.name=t",

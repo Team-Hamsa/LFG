@@ -562,7 +562,8 @@ def _redacted(entry: str) -> str:
     """`entry` fit for a public CI log: header values and URL credentials hidden."""
     key, sep, _ = entry.partition("=")
     if sep and key.endswith(".extraheader"):
-        return f"{key}=<redacted>"
+        entry = f"{key}=<redacted>"
+    # Keys too: http.<url>.* and url.<base>.insteadOf carry a URL subsection.
     return _URL_USERINFO_RE.sub("<redacted>@", entry)
 
 
