@@ -41,6 +41,10 @@ import * as brixPure from './brix_pure.js?v=8';
 // Mine tab (#583): the group partition, merge, sort and caps are pure and
 // Node-tested (tests/test_mine_pure_js.py); renderMine() below is the glue.
 import * as minePure from './mine_pure.js?v=1';
+// Trait Swapper before/after preview (what each result wears, the ape nose/
+// mask extras, the status note) is pure and Node-tested for parity with the
+// server's compose (tests/test_swap_pure_js.py); renderSwapPreview() is the glue.
+import * as swapPure from './swap_pure.js?v=1';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -3275,19 +3279,10 @@ let swapPollGen = 0;
 let swappableTraits = [];
 let swapFee = null; // {pay_with, amount, per_nft} quote from /api/nfts
 let swapMatrix = null; // {universal_layers, pairs} quote from /api/nfts
-
-// Mirrors trait_config.TraitConfig.swap_allowed() (lfg_core/trait_config.py)
-// so the trait checklist can be filtered client-side to what the server
-// will actually accept for the selected pair's bodies (#30 Task 15). The
-// server re-enforces this in handle_swap_start — this is UI-only.
-function swapAllowed(matrix, bodyA, bodyB, layer) {
-  if (bodyA === bodyB || matrix.universal_layers.includes(layer)) return true;
-  return matrix.pairs.some((p) => {
-    if (!p.bodies.includes(bodyA) || !p.bodies.includes(bodyB)) return false;
-    if (p.layers) return p.layers.includes(layer);
-    return !p.layers_except.includes(layer);
-  });
-}
+// {trait_order, z_order, face_traits, ape_face} from /api/nfts: the stacking
+// rules for the before/after preview. /api/economy serves Build the same
+// trait_order/z_order, but it is ECONOMY_ENABLED-gated and swaps are not.
+let swapPreviewCfg = null;
 
 function showGridSkeletons(grid, count = 6) {
   grid.replaceChildren(...Array.from({ length: count }, () => {
@@ -3316,6 +3311,7 @@ async function openSwapper() {
     swappableTraits = data.swappable_traits || [];
     swapFee = data.swap_fee || null;
     swapMatrix = data.swap_matrix || null;
+    swapPreviewCfg = data.swap_preview || null;
     status('');
     el('nft-grid').replaceChildren(); // drop the skeleton loaders
     if (!swapNfts.length) {
@@ -3371,7 +3367,7 @@ function toggleNftPick(nft, card) {
 
 // Cross-body pairs are allowed now (#30) — picking no longer locks to a
 // matching body type. Which traits are offered for the selected pair is
-// decided later, per layer, in showTraitChooser() via swapAllowed().
+// decided later, per layer, in showTraitChooser() via swapPure.offeredTraits().
 function renderPicks() {
   for (const { nft, card } of swapCards) {
     card.classList.remove('sel-1', 'sel-2');
@@ -3429,9 +3425,7 @@ function showTraitChooser() {
   // Only offer traits the server's swap matrix actually permits for this
   // pair's bodies (#30 Task 15) — swap_allowed() on the server is still the
   // real gate; this just keeps the checklist from showing dead ends.
-  const offeredTraits = swapMatrix
-    ? swappableTraits.filter((trait) => swapAllowed(swapMatrix, a.gender, b.gender, trait))
-    : swappableTraits;
+  const offeredTraits = swapPure.offeredTraits(swappableTraits, swapMatrix, a.gender, b.gender);
   for (const [i, trait] of offeredTraits.entries()) {
     const row = document.createElement('label');
     row.className = 'trait-row';
@@ -3446,6 +3440,152 @@ function showTraitChooser() {
     row.replaceChildren(input, label, values);
     list.appendChild(row);
   }
+  // Every tick redraws both results — the checkboxes are rebuilt above, so a
+  // property handler (not addEventListener) keeps exactly one listener.
+  list.onchange = renderSwapPreview;
+  renderSwapPreview();
+}
+
+function checkedSwapTraits() {
+  return [...el('trait-list').querySelectorAll('input:checked')].map((i) => i.value);
+}
+
+// --- Swap before/after preview ---
+// Both resulting characters, stacked from /api/layer art exactly like the
+// Build panel previews (buildPure.orderedLayers + z_order), plus the ape nose
+// and melt/xray face mask the server's compose injects. Drawn client-side, so
+// it is instant and free — the whole point: a paid swap should be as easy to
+// judge as the free Build. A resulting layer /api/layer 404s is one
+// swap_compose.missing_layers would fail the swap on, so the preview blocks
+// the Swap button rather than let the user start a swap that cannot compose.
+
+// Bumped per render: probe answers from an older selection are dropped.
+let swapPreviewGen = 0;
+// Whether the current selection is known to be unswappable (missing art or a
+// blank side). confirmSwap re-checks it: the button is only the visible half.
+let swapPreviewBlocked = false;
+// src -> Promise<'ok'|'missing'|'unknown'>, kept for the session: layer art
+// does not come and go while the Activity is open, and toggling a trait off
+// and on again should not re-ask.
+const layerProbes = new Map();
+
+// A layer <img> errors both for a missing file and for art the <img> cannot
+// decode (a WebM with no GIF thumb, which layerMediaEl retries as <video>), so
+// ask the server which one it was. Only 404 means missing; anything else
+// (network trouble) stays 'unknown' and is re-asked on the next render.
+function probeLayer(src) {
+  let probe = layerProbes.get(src);
+  if (!probe) {
+    probe = fetch(src, { method: 'HEAD' })
+      .then((r) => (r.status === 404 ? 'missing' : r.ok ? 'ok' : 'unknown'))
+      .catch(() => 'unknown');
+    layerProbes.set(src, probe);
+    probe.then((s) => { if (s === 'unknown') layerProbes.delete(src); });
+  }
+  return probe;
+}
+
+// The ape structural art (ape_face.NOSE_ASSET / MASK_ASSET). The nose rides the
+// 512px thumb tier like every other preview layer; the mask is a 1 KB file the
+// preview's clipping depends on, so it is always the exact full-size original.
+function apeAssetSrc(asset) {
+  const thumb = asset === 'mask' ? '' : '&thumb=1';
+  return `${API_BASE}/api/layer?body=ape&asset=${encodeURIComponent(asset)}${thumb}`;
+}
+
+function swapWho(nft) {
+  return nft.number != null ? `#${nft.number}` : nft.name;
+}
+
+function renderSwapPreview() {
+  const box = el('swap-preview');
+  if (!box) return; // stale cached index.html predating the preview
+  const gen = ++swapPreviewGen;
+  const pair = swapPick.map((p) => p.nft);
+  if (!swapPreviewCfg || pair.length !== 2) {
+    box.hidden = true;
+    setSwapBlocked(false);
+    return;
+  }
+  box.hidden = false;
+  const [a, b] = pair;
+  const picked = checkedSwapTraits();
+  const results = swapPure.swapResults(swapPreviewCfg.trait_order, a.attributes, b.attributes, picked);
+  const facts = { picked: picked.length, missing: [], blanks: [], unchecked: 0, rolls: [] };
+  const update = () => {
+    if (gen !== swapPreviewGen) return; // superseded by a newer selection
+    const verdict = swapPure.previewStatus(facts);
+    const note = el('swap-preview-note');
+    note.textContent = verdict.text;
+    note.dataset.tone = verdict.tone;
+    setSwapBlocked(verdict.blocked);
+  };
+  [a, b].forEach((nft, i) => {
+    const n = i + 1;
+    el(`swap-after-name${n}`).textContent = `${swapWho(nft)} after`;
+    drawSwapResult(el(`swap-after${n}`), nft, results[i], facts, (fact) => {
+      if (gen !== swapPreviewGen) return;
+      fact(facts);
+      update();
+    });
+  });
+  update();
+}
+
+// Stack one resulting character into `canvas`. `report(fn)` applies a late
+// fact (a probe answer) to the shared facts and refreshes the verdict.
+function drawSwapResult(canvas, nft, values, facts, report) {
+  canvas.replaceChildren();
+  canvas.classList.remove('broken');
+  const who = swapWho(nft);
+  if (nft.blank) {
+    // handle_swap_start refuses a blank side (#523); nothing to stack either.
+    facts.blanks.push(who);
+    canvas.classList.add('broken');
+    return;
+  }
+  const rolled = swapPure.rolledFaceSlots(nft.gender, values, swapPreviewCfg.face_traits);
+  if (rolled.length) facts.rolls.push({ who, slots: rolled });
+  const order = swapPreviewCfg.trait_order;
+  const layers = buildPure.orderedLayers(order, values, swapPreviewCfg.z_order);
+  const plan = swapPure.withApeExtras(swapPreviewCfg.ape_face, order, layers, nft.gender, values.Body);
+  const onProbe = (what) => (state) => report((f) => {
+    if (state === 'missing') {
+      f.missing.push({ who, what });
+      canvas.classList.add('broken');
+    } else if (state === 'unknown') {
+      f.unchecked += 1;
+    }
+  });
+  const maskSrc = apeAssetSrc('mask');
+  for (const layer of plan.layers) {
+    const src = layer.asset ? apeAssetSrc(layer.asset) : layerSrc(nft.gender, layer.slot, layer.value);
+    const what = layer.asset ? 'the ape nose' : `${layer.slot} “${layer.value}”`;
+    const media = layerMediaEl(src, '');
+    media.addEventListener('error', () => probeLayer(src).then(onProbe(what)), { once: true });
+    if (layer.masked) {
+      // ape_face.apply_alpha_mask clears the layer where the mask is opaque;
+      // CSS draws the same cut (style: .swap-masked). Wrapped, because
+      // layerMediaEl may swap its <img> for a <video> that would lose a style
+      // set on the <img> itself.
+      const clip = document.createElement('div');
+      clip.className = 'swap-masked';
+      clip.style.setProperty('--ape-mask', `url("${maskSrc}")`);
+      clip.appendChild(media);
+      canvas.appendChild(clip);
+    } else {
+      canvas.appendChild(media);
+    }
+  }
+  // The mask is never drawn as a layer, so nothing errors when it is missing:
+  // ask directly — missing_layers requires it for a melt/xray ape.
+  if (plan.mask) probeLayer(maskSrc).then(onProbe('the ape face mask'));
+}
+
+function setSwapBlocked(blocked) {
+  swapPreviewBlocked = blocked;
+  const btn = el('swap-confirm-btn');
+  if (btn) btn.disabled = blocked;
 }
 
 const SWAP_STAGE_TEXT = {
@@ -3458,8 +3598,8 @@ const SWAP_STAGE_TEXT = {
 };
 
 async function confirmSwap() {
-  const traits = [...el('trait-list').querySelectorAll('input:checked')]
-    .map((i) => i.value);
+  if (swapPreviewBlocked) return; // the preview says this swap cannot compose
+  const traits = checkedSwapTraits();
   if (!traits.length) { status('Select at least one trait to swap.'); return; }
   const [a, b] = swapPick.map((p) => p.nft);
   try {

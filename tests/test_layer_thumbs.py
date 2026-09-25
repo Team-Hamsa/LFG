@@ -2,7 +2,8 @@
 # The layer thumbnail tier: path mapping + scan logic (lfg_core/layer_thumbs.py)
 # and the /api/layer?thumb=1 serving path (thumb preferred, full-asset
 # fallback). No ffmpeg/gifski involved — conversion is exercised by
-# scripts/make_layer_thumbs.py in ops, not here.
+# scripts/make_layer_thumbs.py in ops (and tests/test_make_layer_thumbs.py),
+# not here.
 #
 # Env-guard preamble: importing lfg_core.config freezes its constants (e.g.
 # IMG_PROXY_ALLOWED_BASES, LAYER_SOURCE) at import time; set the same defaults
@@ -118,6 +119,43 @@ def test_scan_ignores_hidden_dirs_as_sources(tmp_path):
     assert stale == []
     # the .thumbs png has no source -> orphan; .git is never a source
     assert [os.path.relpath(t, base) for t in orphans] == [".thumbs/male/Body/X.png"]
+
+
+def _png(path, mode, mtime, transparency=None):
+    """A real 4x4 PNG in `mode` (P with a tRNS entry when `transparency` is set)."""
+    from PIL import Image
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    im = Image.new(mode, (4, 4))
+    if transparency is None:
+        im.save(path)
+    else:
+        im.save(path, transparency=transparency)
+    os.utime(path, (mtime, mtime))
+
+
+def test_scan_rebuilds_a_thumb_that_lost_its_source_transparency(tmp_path):
+    # Palette PNGs keep transparency in a tRNS chunk; the old ffmpeg scale
+    # dropped it and wrote an OPAQUE palette thumb (35 of prod's 36 palette
+    # layers: every preview drew the ape Eyebrows as a black square). Such a
+    # thumb is newer than its source, so mtime alone never rebuilds it.
+    base = str(tmp_path)
+    _png(os.path.join(base, "ape/Eyebrows/Curious.png"), "P", 100, transparency=0)
+    _png(os.path.join(base, ".thumbs/ape/Eyebrows/Curious.png"), "P", 200)
+    stale, _ = layer_thumbs.scan(base)
+    assert [os.path.relpath(s, base) for s, _ in stale] == ["ape/Eyebrows/Curious.png"]
+    # An RGBA thumb (what the fixed generator writes) is fresh again.
+    _png(os.path.join(base, ".thumbs/ape/Eyebrows/Curious.png"), "RGBA", 300)
+    assert layer_thumbs.scan(base)[0] == []
+
+
+def test_scan_leaves_opaque_sources_and_their_opaque_thumbs_alone(tmp_path):
+    base = str(tmp_path)
+    _png(os.path.join(base, "male/Background/Sunset.png"), "RGB", 100)
+    _png(os.path.join(base, ".thumbs/male/Background/Sunset.png"), "RGB", 200)
+    _png(os.path.join(base, "male/Eyes/Blue.png"), "RGBA", 100)
+    _png(os.path.join(base, ".thumbs/male/Eyes/Blue.png"), "RGBA", 200)
+    assert layer_thumbs.scan(base)[0] == []
 
 
 # --- /api/layer?thumb=1 serving ---

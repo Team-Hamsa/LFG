@@ -711,9 +711,18 @@ button.back:hover { color: var(--text); border: none; }
   margin: 16px 0 6px;
 }
 .swap-pair figure {
+  /* Fixed-basis columns so the before row and the after-preview row line up
+     whatever the captions' length; shrinks on narrow screens. */
+  flex: 0 1 140px;
+  align-self: flex-start;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   margin: 0;
   font-family: 'JetBrains Mono', monospace;
   font-size: .7rem;
+  text-align: center;
   color: var(--muted);
 }
 .swap-pair img,
@@ -725,6 +734,74 @@ button.back:hover { color: var(--text); border: none; }
   margin-bottom: 6px;
 }
 .swap-arrows { font-size: 1.5rem; color: var(--blue); }
+
+/* Before/after preview (swap_pure.js): each result stacked from layer art
+   like the Dressing Room canvas. Layer selectors carry .swap-pair so they
+   outrank `.swap-pair img` above and its small-screen width override below. */
+.swap-preview { margin: 4px 0 6px; }
+.swap-preview-head {
+  margin: 12px 0 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.swap-preview-tag {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.swap-preview .swap-pair { margin-top: 8px; }
+.swap-arrows-spacer { visibility: hidden; }
+.swap-after {
+  position: relative;
+  width: 124px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  margin-bottom: 6px;
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.swap-after.broken { border-color: var(--red); }
+.swap-pair .swap-after img,
+.swap-pair .swap-after video,
+.swap-pair .swap-after .swap-masked {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  object-fit: contain;
+}
+/* ape_face.apply_alpha_mask: clear the layer where the ape mask is opaque.
+   The solid first layer XOR the mask is the mask's inverse. */
+.swap-after .swap-masked {
+  -webkit-mask-image: linear-gradient(#000 0 0), var(--ape-mask);
+  -webkit-mask-composite: xor;
+  mask-image: linear-gradient(#000 0 0), var(--ape-mask);
+  mask-composite: exclude;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.swap-preview-note {
+  margin: 4px auto 0;
+  max-width: 36em;
+  font-size: .8rem;
+  color: var(--muted);
+}
+.swap-preview-note:empty { display: none; }
+.swap-preview-note[data-tone="warn"] { color: var(--orange); }
+.swap-preview-note[data-tone="error"] { color: var(--red); font-weight: 600; }
 
 .trait-list { text-align: left; margin: 6px 0 18px; }
 .trait-row {

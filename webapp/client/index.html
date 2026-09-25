@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v44.css">
+  <link rel="stylesheet" href="style.v45.css">
 </head>
 <body>
   <main id="app">
@@ -182,6 +182,18 @@
         <figure><img id="swap-img1" alt="First selected NFT"><figcaption id="swap-name1"></figcaption></figure>
         <div class="swap-arrows" aria-hidden="true">⇄</div>
         <figure><img id="swap-img2" alt="Second selected NFT"><figcaption id="swap-name2"></figcaption></figure>
+      </div>
+      <!-- Before/after: both resulting GOs, stacked client-side from the trait
+           art the way the Build panel previews (swap_pure.js). -->
+      <div id="swap-preview" class="swap-preview" hidden>
+        <p class="swap-preview-head">After the swap
+          <span class="swap-preview-tag" title="Drawn from the trait art in your browser. The swap composes the full-size image.">approximate preview</span></p>
+        <div class="swap-pair">
+          <figure><div id="swap-after1" class="swap-after" role="img" aria-label="First NFT after the swap"></div><figcaption id="swap-after-name1"></figcaption></figure>
+          <div class="swap-arrows swap-arrows-spacer" aria-hidden="true">⇄</div>
+          <figure><div id="swap-after2" class="swap-after" role="img" aria-label="Second NFT after the swap"></div><figcaption id="swap-after-name2"></figcaption></figure>
+        </div>
+        <p id="swap-preview-note" class="swap-preview-note" aria-live="polite"></p>
       </div>
       <div id="trait-list" class="trait-list"></div>
       <p id="swap-cost" class="cost" hidden></p>
@@ -549,6 +561,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=112"></script>
+  <script type="module" src="app.js?v=113"></script>
 </body>
 </html>

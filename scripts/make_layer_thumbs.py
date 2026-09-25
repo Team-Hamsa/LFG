@@ -96,7 +96,11 @@ def build_png_thumb(src: str, dest: str, size: int) -> None:
                 "-i",
                 src,
                 "-vf",
-                f"scale={size}:{size}:flags=lanczos",
+                # format=rgba first: a palette PNG keeps its transparency in a
+                # tRNS chunk, which scale alone drops — the thumb came out an
+                # opaque palette image, drawn as a black square over every
+                # preview it sat in (35 of 36 palette layers, 2026-09-22).
+                f"format=rgba,scale={size}:{size}:flags=lanczos",
                 "-frames:v",
                 "1",
                 tmp_dest,
