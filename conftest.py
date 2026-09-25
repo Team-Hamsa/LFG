@@ -544,9 +544,15 @@ def _no_checkout_store_access() -> Iterator[None]:
 # their identity from GIT_AUTHOR_* / GIT_COMMITTER_*, never `git config`; this
 # guard turns a regression into a failed run. The file is resolved with the
 # inherited environment, so it is exactly the one a leaking `git config` would
-# write. branch.* and remote.* are skipped: other git processes (worktree add
-# with tracking, push -u, gh) rewrite those while a run is in flight.
-_CONCURRENT_GIT_SECTIONS = ("branch.", "remote.")
+# write. Only keys other git processes rewrite while a run is in flight are
+# skipped: branch.* (worktree add with tracking, push -u) and gh's
+# remote.<name>.gh-resolved. A remote's url/pushurl/fetch stay watched — a
+# leaked temp origin would repoint the shared checkout.
+
+
+def _churned_elsewhere(entry: str) -> bool:
+    key = entry.partition("=")[0]
+    return key.startswith("branch.") or (key.startswith("remote.") and key.endswith(".gh-resolved"))
 
 
 def _enclosing_git_config(start: str) -> str | None:
@@ -571,7 +577,7 @@ class _GitConfigGuard:
         self.session_report: list[str] = []
 
     def entries(self) -> Counter[str]:
-        """The config's `key=value` entries, minus the sections other git processes churn.
+        """The config's `key=value` entries, minus the keys other git processes churn.
 
         A multiset: git reads the LAST value of a multi-valued key, so an
         `--add` repeating an earlier value is a change a set would not see.
@@ -588,7 +594,7 @@ class _GitConfigGuard:
         if listing.returncode != 0:
             raise OSError(listing.stderr.strip() or f"git config exited {listing.returncode}")
         entries = (entry.replace("\n", "=", 1) for entry in listing.stdout.split("\0") if entry)
-        return Counter(e for e in entries if not e.startswith(_CONCURRENT_GIT_SECTIONS))
+        return Counter(e for e in entries if not _churned_elsewhere(e))
 
     def changes(self) -> list[str]:
         try:

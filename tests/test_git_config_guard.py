@@ -105,17 +105,35 @@ def test_guard_reports_a_config_it_can_no_longer_read(tmp_path):
     assert "bad config line 1" in change
 
 
-def test_guard_ignores_branch_and_remote_churn(tmp_path):
+def test_guard_ignores_branch_tracking_and_gh_default_repo(tmp_path):
     # Other git processes rewrite these while a run is in flight (worktree add
-    # with tracking, push -u, gh pr checkout); they are not a test's leak.
+    # with tracking, push -u, gh repo set-default); they are not a test's leak.
     repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/r.git")
     guard = _armed(str(repo / ".git" / "config"))
 
-    _git(repo, "remote", "add", "origin", "https://example.invalid/r.git")
     _git(repo, "config", "branch.wt.remote", "origin")
     _git(repo, "config", "branch.wt.merge", "refs/heads/main")
+    _git(repo, "config", "remote.origin.gh-resolved", "base")
 
     assert guard.changes() == []
+
+
+def test_guard_reports_a_repointed_remote(tmp_path):
+    # The deployer/promote tests wire temp origins; one that leaked would
+    # repoint the shared checkout's push target.
+    repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/r.git")
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "remote", "set-url", "origin", "file:///elsewhere.git")
+    _git(repo, "config", "remote.origin.pushurl", "file:///elsewhere.git")
+
+    assert guard.changes() == [
+        "added remote.origin.pushurl=file:///elsewhere.git",
+        "added remote.origin.url=file:///elsewhere.git",
+        "removed remote.origin.url=https://example.invalid/r.git",
+    ]
 
 
 def test_guard_is_inert_outside_a_checkout(tmp_path, monkeypatch):
