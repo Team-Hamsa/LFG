@@ -570,19 +570,28 @@ class _GitConfigGuard:
         self.session_report: list[str] = []
 
     def entries(self) -> set[str]:
-        """The config's `key=value` entries, minus the sections other git processes churn."""
+        """The config's `key=value` entries, minus the sections other git processes churn.
+
+        Raises OSError when git cannot read the file: a missing or malformed
+        config lists nothing, which must not pass for an empty one.
+        """
         if self.path is None:
             return set()
         listing = subprocess.run(
             ["git", "config", "--file", self.path, "--list", "--null"],
             capture_output=True,
             text=True,
-        ).stdout
-        entries = (entry.replace("\n", "=", 1) for entry in listing.split("\0") if entry)
+        )
+        if listing.returncode != 0:
+            raise OSError(listing.stderr.strip() or f"git config exited {listing.returncode}")
+        entries = (entry.replace("\n", "=", 1) for entry in listing.stdout.split("\0") if entry)
         return {entry for entry in entries if not entry.startswith(_CONCURRENT_GIT_SECTIONS)}
 
     def changes(self) -> list[str]:
-        entries = self.entries()
+        try:
+            entries = self.entries()
+        except OSError as exc:
+            return [f"unreadable after the run: {exc}"]
         return [f"added {e}" for e in sorted(entries - self.entries_at_start)] + [
             f"removed {e}" for e in sorted(self.entries_at_start - entries)
         ]
@@ -595,7 +604,10 @@ _GIT_CONFIG_GUARD = _GitConfigGuard(
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     _CHECKOUT_STORE_GUARD.entries_at_start = _CHECKOUT_STORE_GUARD.store_entries()
-    _GIT_CONFIG_GUARD.entries_at_start = _GIT_CONFIG_GUARD.entries()
+    try:
+        _GIT_CONFIG_GUARD.entries_at_start = _GIT_CONFIG_GUARD.entries()
+    except OSError as exc:
+        pytest.exit(f"git config guard cannot read {_GIT_CONFIG_GUARD.path}: {exc}", returncode=1)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

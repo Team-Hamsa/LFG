@@ -9,6 +9,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import conftest
 
 _IDENTITY = {
@@ -69,6 +71,25 @@ def test_guard_reports_added_and_removed_entries(tmp_path):
     _git(repo, "config", "--unset", "core.bare")
 
     assert guard.changes() == ["added user.email=t@t", "removed core.bare=false"]
+
+
+def test_guard_refuses_to_arm_on_an_unreadable_config(tmp_path):
+    # git exits 128 with no output for a missing or malformed file; that must
+    # not read as an empty snapshot.
+    with pytest.raises(OSError, match="unable to read config file"):
+        _armed(str(tmp_path / "missing"))
+
+
+def test_guard_reports_a_config_it_can_no_longer_read(tmp_path):
+    repo, _ = _repo_with_worktree(tmp_path)
+    config = repo / ".git" / "config"
+    guard = _armed(str(config))
+
+    config.write_text("[core\n")
+
+    (change,) = guard.changes()
+    assert change.startswith("unreadable after the run: ")
+    assert "bad config line 1" in change
 
 
 def test_guard_ignores_branch_and_remote_churn(tmp_path):
