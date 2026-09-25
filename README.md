@@ -15,7 +15,7 @@
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
 <a href="https://github.com/Team-Hamsa/LFG/blob/main/assets/LFG-Hackathon-Deck.pdf"><img src="https://img.shields.io/badge/pitch%20deck-PDF-D84830?style=flat-square" alt="Hackathon pitch deck (PDF)"></a>
-<img src="https://img.shields.io/badge/tests-5%2C448-2ea043?style=flat-square" alt="5,448 tests">
+<img src="https://img.shields.io/badge/tests-5%2C485-2ea043?style=flat-square" alt="5,485 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
