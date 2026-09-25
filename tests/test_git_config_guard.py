@@ -104,4 +104,6 @@ def test_live_guard_watches_this_checkouts_shared_config():
     ).stdout.strip()
     guard = conftest._GIT_CONFIG_GUARD
     assert guard.path == os.path.realpath(root / common / "config")
-    assert "core.bare=false" in guard.entries_at_start  # armed at session start
+    # Armed at session start: the snapshot is this file's content (no key is
+    # assumed present — git writes none of them compulsorily).
+    assert guard.entries_at_start == guard.entries()
