@@ -21,6 +21,7 @@ from lfg_core import (
     economy_flow,
     economy_store,
     layer_store,
+    memos,
     nft_index,
     swap_compose,
     swap_meta,
@@ -211,7 +212,9 @@ def build_settlement_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
     there is no EconomyWebSession to hand back. Exists as its own function (a
     thin alias for `_economy_deps.build_economy_deps`) purely as a monkeypatch
     seam for tests."""
-    return _economy_deps.build_economy_deps(conn)
+    # settlement is service-triggered: always backend, even inside an agent's
+    # buy-status request
+    return _economy_deps.build_economy_deps(conn, platform=memos.PLATFORM_BACKEND)
 
 
 def _load_owned_character(

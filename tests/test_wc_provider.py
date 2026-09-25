@@ -150,3 +150,36 @@ def test_provider_status_object():
     row = store.create(wallet=W, purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
     st = _run(wc.WalletConnectProvider().status(row["id"]))
     assert st.signed is False and st.resolved is False and st.signer == W
+
+
+def test_an_agent_session_is_client_signed_too():
+    with context.use("agent", W):
+        h = _run(
+            xumm_ops._create_xumm_payload(
+                {
+                    "TransactionType": "TrustSet",
+                    "Account": W,
+                    "LimitAmount": {"currency": "USD", "issuer": OTHER, "value": "1"},
+                },
+                memos_json=_memos(),
+            )
+        )
+    assert h["uuid"].startswith("wc-") and h["xumm_url"] == f"lfg-wc://{h['uuid']}"
+    assert store.get(h["uuid"])["wallet"] == W
+
+
+def test_an_agent_sessions_foreign_account_payload_falls_back_to_xaman(monkeypatch):
+    calls = []
+
+    async def fake_post(payload):
+        calls.append(payload)
+        return {"qr_url": "q", "xumm_url": "x", "uuid": "2" * 36, "pushed": False}
+
+    monkeypatch.setattr(xumm_ops, "_post_xumm_payload", fake_post)
+    with context.use("agent", W):
+        h = _run(
+            xumm_ops._create_xumm_payload(
+                {"TransactionType": "TrustSet", "Account": OTHER}, memos_json=_memos()
+            )
+        )
+    assert calls and h["uuid"] == "2" * 36

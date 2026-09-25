@@ -165,6 +165,7 @@ PRESUBMIT_SIMULATE=1                                        # optional (#58); pr
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
 WC_SURFACES=web,telegram                                    # optional (#447); surfaces that show "Connect with Joey" (discord-activity needs URL Mappings first)
+AGENT_SIGNIN_ENABLED=0                                      # optional (agent users §1); the "agent" web sign-in provider for bots holding their own key — fail-closed: on only for 1/true/yes/on
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -623,7 +624,8 @@ from both).
 **closed enum** (constants, never free strings — an unknown value raises):
 - `initiator` — `user` (Xaman-signed) | `backend` (issuer-wallet-signed)
 - `platform` — `discord-bot` | `discord-activity` | `telegram` | `twitter` |
-  `webapp` | `backend` (backend-signed op with no user surface)
+  `webapp` | `agent` (a bot using the `agent` sign-in provider — agent users
+  spec §1) | `backend` (backend-signed op with no user surface)
 - `action` — `mint` / `create-offer` / `accept-offer` / `cancel-offer` / `burn`
   / `modify` / `trait-swap-fee` / `buy-and-burn` / `trustset` / `payment` /
   `list` / `buy` / economy `harvest`/`assemble`/`equip`/`extract`/`deposit`
@@ -635,9 +637,18 @@ Two builders emit the same schema in the two wire shapes the app needs:
 user-signed payloads (`xumm_ops`, merged in `_create_xumm_payload` next to the
 `SourceTag` setdefault). Backend builders default `platform=backend` so a memo
 is **always** present; the mint/swap/market flows thread the real originating
-surface via `memos.platform_for_surface(session.platform)` for accurate
-attribution. When adding a new tx path, pass a `platform`/`action` (or accept
-the backend default) — the memo, like the SourceTag, must never be omitted.
+surface through `memos.platform_for(session.platform)`, which returns `agent`
+for a session signed in with the `agent` provider (agent users spec §1) and
+otherwise the surface platform unchanged. A backend-signed op a session
+starts (an equip's modify, a claim payout) instead calls
+`memos.backend_platform()` — `agent` for an agent session, `backend`
+otherwise, so every human op keeps today's label. Settlement
+(`webapp.economy_api.build_settlement_deps`) stays pinned to `backend`
+regardless of session: it is service-triggered, never attributed to whoever's
+request happened to trigger it. `tests/test_memo_platform_sites.py` guards
+this — no code outside `memos.py` may call `platform_for_surface` directly.
+When adding a new tx path, pass a `platform`/`action` (or accept the backend
+default) — the memo, like the SourceTag, must never be omitted.
 
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
@@ -1728,12 +1739,12 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    field into `lfg_core/signing/context.py` (`current_provider`/
    `current_wallet`, contextvars, inherited by spawned tasks); every XUMM
    chokepoint (`_create_xumm_payload`/`get_payload_status`/
-   `cancel_xumm_payload`) calls `xumm_ops.should_use_walletconnect(txjson)` to
-   decide per-tx. **Cross-wallet rule:** WC fires only when `provider ==
-   walletconnect` AND `txjson.Account == session wallet` AND the tx isn't a
-   `SignIn` (Xaman's pseudo-tx) — anything else (e.g. the #446 linked-wallet
-   TrustSet, signed by a *different* wallet than the session's) downgrades to
-   Xaman. A WC request is a `sign_requests` row (`lfg_core/signing/store.py`,
+   `cancel_xumm_payload`) calls `xumm_ops.should_use_client_signing(txjson)` to
+   decide per-tx. **Cross-wallet rule:** client-signed dispatch fires only when
+   `provider in CLIENT_SIGNED_PROVIDERS` (`{"walletconnect", "agent"}`) AND
+   `txjson.Account == session wallet` AND the tx isn't a `SignIn` (Xaman's
+   pseudo-tx) — anything else (e.g. the #446 linked-wallet TrustSet, signed by
+   a *different* wallet than the session's) downgrades to Xaman. A WC request is a `sign_requests` row (`lfg_core/signing/store.py`,
    app DB); the create response is XUMM-shaped with `xumm_url:
    "lfg-wc://<id>"` and `qr_url: null` so surfaces need no branching — the
    client's `wc.js` intercepts the `lfg-wc://` scheme and drives Joey
@@ -1741,8 +1752,8 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    client-reported hash on-ledger (validated, Account, type, closed field
    allowlist, Flags masked for `tfFullyCanonicalSig`, hash not reused, tx
    postdates the row) before a row is trusted "signed"; `sweep_sign_requests`
-   runs in `_settlement_sweep_loop` (now started when `ECONOMY_ENABLED or
-   config.wc_enabled()`). Sign-in/linking prove ownership via
+   runs in `_settlement_sweep_loop` (always started; `sweep_sign_requests`
+   runs every pass). Sign-in/linking prove ownership via
    `lfg_core/signing/proof.py`: a SIGNED, NEVER-SUBMITTED 1-drop Payment to
    the NAME-reservation blackhole `rrrrrrrrrrrrrrrrrNAMEtxvNvQ`
    (Joey-autofilled Fee/Sequence/LastLedgerSequence — required, range-checked;
@@ -1786,6 +1797,50 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    pre-submit `simulate` pre-flight does not run on the Joey path (the client
    submits directly); the Xaman link arm proves consent via a `SignIn` +
    `custom_meta` instruction only, not a signed proof.
+   **The `agent` provider** (agent users spec §1): a third signing provider
+   for a bot holding its own key, ambient-dispatched the same way — sign-in
+   sets `provider: "agent"` on a `sign_requests` row (gated on
+   `AGENT_SIGNIN_ENABLED`, default off) instead of `walletconnect`, and every
+   transaction the resulting session causes is labelled `platform=agent` in
+   its memos — with five standing exceptions that keep today's label no
+   matter who started the session: settlement, including the shop and
+   trait-sale deposits (`webapp.economy_api.build_settlement_deps` pins
+   `backend`, service-triggered); Closet Market's own backend-signed
+   transactions (fill/forward/refund); the sponsored burn, buy-and-burn and
+   fee-cover refunds (each hard-codes `platform=backend` at the call site,
+   never session-derived); compensation burns and reverts (a shop mint's
+   revert burn, a swap's reverted modify — the compensating call omits
+   `platform` and falls back to the `backend` default instead of inheriting
+   the session's); and the Closet Market bid and ask-buy, which refuse a
+   client-signed session outright with 409 `wallet_unsupported` rather than
+   build a payload the wallet can't sign. A proof signed right after a
+   `SetRegularKey` is refused `bad_proof` until that `SetRegularKey`
+   validates on-ledger (the validated-ledger lookup still returns the old
+   key) — wait for validation, don't retry blindly.
+   >
+   > **The flag is not a kill switch.** `AGENT_SIGNIN_ENABLED` gates only the
+   > sign-in *start* (`POST /api/web/signin {provider: "agent"}`). Turning it
+   > off does not end any live agent session — its token was already issued
+   > and lasts the full `SESSION_TTL` (6 h) regardless — and a pending agent
+   > sign-in row (300 s TTL) created before the flip can still be redeemed at
+   > `POST /api/web/signin/proof` after the flag is off.
+   >
+   > **The public discovery contract, per flow.** A client-signed session
+   > (`walletconnect` or `agent`) gets a `sign_requests` row instead of a
+   > XUMM payload, and the flow's usual response field carries
+   > `lfg-wc://<sign_requests.id>` in place of the normal link/URL. A bot
+   > strips the `lfg-wc://` prefix (or reads `uuid` directly, where the flow
+   > also serves one bare), then drives `GET /api/sign/{id}` and
+   > `POST /api/sign/{id}/result` the same way `wc.js` does for Joey.
+   > `tests/test_client_signed_discovery.py` pins the field for all 8 flows:
+   >   - mint payment (`POST /api/mint/start`) → `payment_link`
+   >   - mint delivery accept (`GET /api/mint/{id}`) → `accept_deeplink`
+   >   - bulk-mint payment (`POST /api/mint/bulk`) → `payment_link`
+   >   - bulk unit accept (`POST /api/mint/bulk/{id}/units/{i}/accept`) → `link`
+   >   - pending-offer accept (`POST /api/pending-offers/accept`) → `link`
+   >   - Closet accept (`POST /api/closet`) → `accept`
+   >   - harvest delivery accept (`GET /api/harvest/{id}`) → `accept`
+   >   - BRIX trustline (`POST /api/brix/trustline`) → `xumm_url` (also served bare as `uuid`)
    >
    > **#212 push hardening:** tokens are now (re)captured from EVERY signed
    > payload a flow polls (`_capture_issued_token` in mint/market flows,

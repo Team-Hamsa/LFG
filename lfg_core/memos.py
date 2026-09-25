@@ -29,6 +29,9 @@ PLATFORM_DISCORD_ACTIVITY = "discord-activity"
 PLATFORM_TELEGRAM = "telegram"
 PLATFORM_TWITTER = "twitter"
 PLATFORM_WEBAPP = "webapp"
+# A bot using LFG as an ordinary user through the `agent` sign-in provider
+# (agent users spec §1): honest provenance, no privileges.
+PLATFORM_AGENT = "agent"
 # Backend-signed transactions with no user surface (listener/admin/service ops).
 PLATFORM_BACKEND = "backend"
 _PLATFORMS = frozenset(
@@ -38,6 +41,7 @@ _PLATFORMS = frozenset(
         PLATFORM_TELEGRAM,
         PLATFORM_TWITTER,
         PLATFORM_WEBAPP,
+        PLATFORM_AGENT,
         PLATFORM_BACKEND,
     }
 )
@@ -152,6 +156,28 @@ def platform_for_surface(surface: str | None) -> str:
     if not surface:
         return PLATFORM_BACKEND
     return _SURFACE_TO_PLATFORM.get(surface, PLATFORM_BACKEND)
+
+
+def platform_for(surface: str | None) -> str:
+    """`platform_for_surface`, except that a session signed in with the `agent`
+    provider is labelled PLATFORM_AGENT on every surface (agent users spec §1).
+
+    The provider is ambient: `signing.context`, set by require_auth for the
+    request and copied into every task the handler spawns."""
+    from lfg_core.signing import context  # lazy: the signing package imports memos
+
+    if context.current_provider() == "agent":
+        return PLATFORM_AGENT
+    return platform_for_surface(surface)
+
+
+def backend_platform() -> str:
+    """The platform for a backend-signed op a session starts (an equip's modify,
+    a claim payout): PLATFORM_AGENT for an agent session, else PLATFORM_BACKEND,
+    so every human op keeps today's label."""
+    from lfg_core.signing import context
+
+    return PLATFORM_AGENT if context.current_provider() == "agent" else PLATFORM_BACKEND
 
 
 def _entries(

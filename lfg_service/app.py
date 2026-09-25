@@ -2171,7 +2171,7 @@ async def _start_brix_trustline(wallet, user):
         config.BRIX_ISSUER,
         config.BRIX_TRUSTLINE_LIMIT,
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response(
@@ -2333,7 +2333,11 @@ async def _claim_one_wallet(wallet, progress=None):
 
     try:
         payment = await xrpl_ops.send_brix_claim(
-            wallet, amount, claim_id, max_last_ledger_seq=provisional
+            wallet,
+            amount,
+            claim_id,
+            max_last_ledger_seq=provisional,
+            platform=memos.backend_platform(),
         )
     except xrpl_ops.ClaimNotSubmitted as exc:
         # Nothing reached the ledger, so releasing the claim is safe — and
@@ -3933,7 +3937,7 @@ async def handle_market_list_start(request):
         offer_amount,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -4012,7 +4016,7 @@ async def handle_market_cancel_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -4187,14 +4191,14 @@ async def handle_market_buy_start(request):
             market_ops.xrp_to_drops_str(price_xrp_quote),
             return_url=return_url,
             user_token=push_user_token,
-            platform=memos.platform_for_surface(_platform(user)),
+            platform=memos.platform_for(_platform(user)),
         )
     else:
         payload = await xumm_ops.create_accept_offer_payload(
             offer_index,
             return_url=return_url,
             user_token=push_user_token,
-            platform=memos.platform_for_surface(_platform(user)),
+            platform=memos.platform_for(_platform(user)),
             action=memos.ACTION_BUY,
             # A marketplace sell offer has no Destination, so any account
             # could otherwise sign this and buy the NFT into itself. The
@@ -4428,7 +4432,7 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
         session.offer_index,
         return_url=session.return_url,
         user_token=session.push_user_token,
-        platform=memos.platform_for_surface(session.platform),
+        platform=memos.platform_for(session.platform),
         action=memos.ACTION_BUY,
         account=session.wallet_address,
     )
@@ -4983,7 +4987,7 @@ async def handle_market_bid_start(request):
         expiration,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -5100,7 +5104,7 @@ async def handle_market_bid_accept_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -5243,7 +5247,7 @@ def _build_shop_deps(
         payload = await xumm_ops.create_accept_offer_payload(
             offer_index,
             user_token=user_token,
-            platform=memos.platform_for_surface(platform),
+            platform=memos.platform_for(platform),
             action=memos.ACTION_SHOP_BUY,
             # The shop offer is Destination-locked to the buyer and priced in
             # their BRIX/XRP — pin the payload so only they can sign it.
@@ -6025,13 +6029,17 @@ def _closet_market_disabled_response():
 
 def _wallet_unsupported_response():
     """(#516 D4) Closet Market signing — a TokenEscrow (bid) or a pinned-LLS
-    Payment (ask buy) — isn't available on WalletConnect (Joey) yet: refuse
-    rather than build a payload the wallet can't sign. Xaman sessions are
-    unaffected; the provider is read from lfg_core.signing.context, ambient
-    for the request since require_auth (option-A guard for #516; the issue
-    stays open for the LastLedgerSequence follow-up)."""
+    Payment (ask buy) — isn't available to client-signed sessions (Joey,
+    agents) yet: refuse rather than build a payload the wallet can't sign.
+    Xaman sessions are unaffected; the provider is read from
+    lfg_core.signing.context, ambient for the request since require_auth
+    (option-A guard for #516; the issue stays open for the
+    LastLedgerSequence follow-up)."""
     return web.json_response(
-        {"error": "Closet Market orders need Xaman for now.", "code": "wallet_unsupported"},
+        {
+            "error": "Closet Market orders need a Xaman sign-in for now.",
+            "code": "wallet_unsupported",
+        },
         status=409,
     )
 
@@ -6584,7 +6592,7 @@ async def handle_closet_bid_create(request):
     generated here and stored sealed; the bid opens once the escrow is
     verified on-ledger (GET /api/closet/bid/{id})."""
     wallet, user = request["wallet"], request["user"]
-    if signing_context.current_provider() == "walletconnect":
+    if signing_context.current_provider() in xumm_ops.CLIENT_SIGNED_PROVIDERS:
         return _wallet_unsupported_response()
     body = await _json_body(request)
     slot, value = body.get("slot"), body.get("value")
@@ -6680,7 +6688,7 @@ async def handle_closet_bid_create(request):
         last_ledger_sequence=lls,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         # Ambiguous: the request may have reached the wallet. Keep the
@@ -6743,7 +6751,7 @@ async def handle_closet_ask_buy(request):
     (a refund is paid in BRIX); buyers with a line but too little BRIX pay XRP
     via SendMax on the same Payment."""
     wallet, user = request["wallet"], request["user"]
-    if signing_context.current_provider() == "walletconnect":
+    if signing_context.current_provider() in xumm_ops.CLIENT_SIGNED_PROVIDERS:
         return _wallet_unsupported_response()
     order_id = request.match_info["order_id"]
     ask = await _closet_db(closet_market_store.get_order, order_id)
@@ -6798,7 +6806,7 @@ async def handle_closet_ask_buy(request):
         send_max_drops=market_ops.xrp_to_drops_str(quote) if pay_with == "XRP" else None,
         return_url=xumm_ops.discord_return_url(None, None),
         user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
+        platform=memos.platform_for(_platform(user)),
     )
     if not payload:
         # Ambiguous: the payment may still land. Leave the fill funds_pending
@@ -7960,7 +7968,7 @@ async def handle_bulk_mint_start(request):
         bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
         bulk_mint_flow.delete_record(job.id)
         return web.json_response({"error": "payment_setup_failed"}, status=500)
-    job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    _launch_bulk_task(job)
     return web.json_response(job.to_dict())
 
 
@@ -8085,7 +8093,7 @@ async def handle_bulk_mint_unit_accept(request):
         unit.offer_id,
         return_url=return_url,
         user_token=job.push_user_token,
-        platform=memos.platform_for_surface(job.platform),
+        platform=memos.platform_for(job.platform),
         account=job.wallet_address,
     )
     if not payload:
@@ -8093,6 +8101,13 @@ async def handle_bulk_mint_unit_accept(request):
     return web.json_response(
         {"qr": payload["qr_url"], "link": payload["xumm_url"], "push": payload.get("push")}
     )
+
+
+def _launch_bulk_task(job: Any) -> None:
+    """Start (or resume) a bulk job's run inside the signing context it was
+    created in (agent users §1): a task copies the context at creation."""
+    with signing_context.use(job.sign_provider, job.sign_wallet):
+        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
 
 
 async def _launch_burn_mint_job(job: Any) -> Any:
@@ -8106,7 +8121,7 @@ async def _launch_burn_mint_job(job: Any) -> Any:
     else:
         bulk_sessions[job.id] = job
     if job.task is None and job.state not in bulk_mint_flow.TERMINAL_STATES:
-        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+        _launch_bulk_task(job)
     return job
 
 
@@ -8450,7 +8465,7 @@ async def handle_pending_offer_accept(request):
         offer_index,
         return_url=return_url,
         user_token=await _push_token(request["user"]),
-        platform=memos.platform_for_surface(_platform(request["user"])),
+        platform=memos.platform_for(_platform(request["user"])),
         account=wallet,
     )
     if not payload:
@@ -8958,7 +8973,7 @@ async def resume_bulk_jobs() -> None:
             headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
     for job in jobs:
         bulk_sessions[job.id] = job
-        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+        _launch_bulk_task(job)
     # #220: burn-to-mint recovery, AFTER bulk jobs re-attach so an already-
     # converted mint job (id b2m<session_id>) is adopted by _launch_burn_mint_
     # job instead of re-created. Validated burns are irreversible: any session
@@ -10004,7 +10019,9 @@ async def handle_web_signin_start(request):
     session required, this IS how a web session begins. With
     `provider="walletconnect"` (#447) there is no XUMM payload at all: we issue
     a durable server-side nonce the wallet signs into a never-submitted proof
-    transaction, redeemed at POST /api/web/signin/proof.
+    transaction, redeemed at POST /api/web/signin/proof. With provider="agent"
+    (agent users spec §1) the same flow runs for a bot, gated on
+    AGENT_SIGNIN_ENABLED, with platform=agent proof memos.
     """
     body = await _json_body(request)
     provider = str(body.get("provider") or "xaman")
@@ -10014,11 +10031,15 @@ async def handle_web_signin_start(request):
         return web.json_response(
             {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
         )
+    if provider == "agent" and not config.AGENT_SIGNIN_ENABLED:
+        return web.json_response(
+            {"error": "agent sign-in is not enabled", "code": "agent_disabled"}, status=503
+        )
     if _web_rate_limited(_client_ip(request)):
         return web.json_response(
             {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
         )
-    if provider == "walletconnect":
+    if provider in ("walletconnect", "agent"):
         nonce = secrets.token_hex(32)
         row = await asyncio.to_thread(
             sign_request_store.create,
@@ -10029,6 +10050,7 @@ async def handle_web_signin_start(request):
             ttl_seconds=signing_proof.SIGNIN_TTL,
             ip=_client_ip(request),
             created_ledger=await _proof_creation_ledger(),
+            provider=provider,
         )
         return web.json_response(
             {
@@ -10036,10 +10058,13 @@ async def handle_web_signin_start(request):
                 "nonce": nonce,
                 "source_tag": config.SOURCE_TAG,
                 "memos": signing_proof.build_proof_tx(
-                    _MEMO_TEMPLATE_ACCOUNT, nonce, memos.ACTION_SIGNIN
+                    _MEMO_TEMPLATE_ACCOUNT,
+                    nonce,
+                    memos.ACTION_SIGNIN,
+                    platform=signing_proof.PROVIDER_PLATFORM[provider],
                 )["Memos"],
                 "expires_at": row["expires_at"],
-                "provider": "walletconnect",
+                "provider": provider,
             }
         )
     _prune_web_signin_payloads()
@@ -10059,8 +10084,9 @@ async def _finish_web_signin(
 ) -> web.Response:
     """Link the proven wallet as a platform="web" identity and issue its token.
 
-    Shared by both web sign-in arms: the XUMM SignIn poll and the
-    WalletConnect signed-proof redemption (#447).
+    Shared by all three web sign-in arms: the XUMM SignIn poll, the
+    WalletConnect signed-proof redemption (#447), and the agent signed-proof
+    redemption (agent users spec §1).
     `signer` is the proof's signing key; a RegularKey marks the token (spec §2).
     `checked_at` is when the proof's key lookup started: it orders the cache seed
     against any fresher answer that landed meanwhile.
@@ -10135,6 +10161,7 @@ class RedeemedProof:
     wallet: str  # the account proven
     signer: str  # the key that signed: == wallet for the master key, else its RegularKey
     checked_at: float  # when the key lookup started (time.monotonic()); orders the seed
+    provider: str  # the row's client-signed provider ("walletconnect" for NULL rows)
 
 
 async def _redeem_proof(
@@ -10199,6 +10226,14 @@ async def _redeem_proof(
         if isinstance(account, str) and is_valid_classic_address(account)
         else LOOKUP_FAILED
     )
+    provider = row.get("provider") or "walletconnect"
+    proof_platform = signing_proof.PROVIDER_PLATFORM.get(provider)
+    if proof_platform is None:
+        # An unexpected stored provider (neither start path should ever write
+        # one) must refuse cleanly, the same way a memo mismatch does below —
+        # not KeyError its way into a 500.
+        logging.warning(f"bad {purpose} proof {sign_id}: unknown provider {provider!r}")
+        return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
         created_ledger = row.get("created_ledger")
@@ -10212,6 +10247,7 @@ async def _redeem_proof(
                 created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
             ),
             authority=authority,
+            platform=proof_platform,
         )
     except signing_proof.ProofError as e:
         # e.detail carries request-derived field names — repr() so control
@@ -10237,7 +10273,10 @@ async def _redeem_proof(
         return None, web.json_response(
             {"error": "already used", "code": "proof_replayed"}, status=409
         )
-    return RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at), None
+    return (
+        RedeemedProof(wallet, signing_proof.signing_key_address(tx_json), checked_at, provider),
+        None,
+    )
 
 
 async def handle_web_signin_proof(request):
@@ -10263,7 +10302,7 @@ async def handle_web_signin_proof(request):
         return refusal
     proven = cast(RedeemedProof, redeemed)
     return await _finish_web_signin(
-        proven.wallet, "walletconnect", signer=proven.signer, checked_at=proven.checked_at
+        proven.wallet, proven.provider, signer=proven.signer, checked_at=proven.checked_at
     )
 
 

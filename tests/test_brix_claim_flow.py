@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from lfg_core import brix_drip, config, xrpl_ops
+from lfg_core import brix_drip, config, memos, xrpl_ops
 
 # The distributor address MUST be the one this seed signs for; a mismatch is
 # now refused up front, and a fixture that faked it would test a configuration
@@ -505,3 +505,15 @@ def test_send_brix_claim_keeps_its_own_deadline_when_it_is_tighter(capture_payme
         xrpl_ops.send_brix_claim("rAlice", 5, claim_id=42, max_last_ledger_seq=10**9)
     )
     assert result.last_ledger_seq == 1000 + config.BRIX_CLAIM_LEDGER_MARGIN
+
+
+def test_send_brix_claim_labels_the_payment_with_its_platform(capture_payment):
+    # decode_memos rejects the array whole when any entry is malformed (by
+    # design, for exact-match reconciliation) — and the trailing claim-tag
+    # Memo is deliberately untyped (see test_send_brix_claim_memo_identifies_
+    # the_claim_on_chain above), so it is sliced off before decoding the
+    # three provenance memos build_memo_models actually built.
+    asyncio.run(xrpl_ops.send_brix_claim("rAlice", 5, claim_id=42, platform=memos.PLATFORM_AGENT))
+    assert memos.decode_memos(capture_payment.tx.to_xrpl()["Memos"][:-1])["platform"] == "agent"
+    asyncio.run(xrpl_ops.send_brix_claim("rAlice", 5, claim_id=43))
+    assert memos.decode_memos(capture_payment.tx.to_xrpl()["Memos"][:-1])["platform"] == "backend"

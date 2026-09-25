@@ -267,7 +267,7 @@ class MintSession:
             issuer=p["issuer"],
             return_url=self.return_url,
             user_token=self.push_user_token,
-            platform=memos.platform_for_surface(self.platform),
+            platform=memos.platform_for(self.platform),
             # The payment wait below is sender-verified against this wallet;
             # pin the payload to it so Xaman cannot sign from another account
             # (whose payment would land, unmatched, and be lost).
@@ -609,7 +609,7 @@ async def _finalize_minted_unit(
         )
     else:
         offer_result = await offer_delivery.ensure_offer(
-            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
+            nft_id, wallet_address, platform=memos.platform_for(platform)
         )
     if offer_result.status == "failed":
         # The mint is safely on-chain; only delivery is stuck after every
@@ -690,7 +690,7 @@ async def _finalize_minted_unit(
         offer_id,
         return_url=return_url,
         user_token=push_user_token,
-        platform=memos.platform_for_surface(platform),
+        platform=memos.platform_for(platform),
         # The offer is Destination-locked to this wallet; pin the payload
         # too so a wrong-account signature is refused in Xaman rather than
         # burning a fee on a tecNO_PERMISSION.
@@ -1035,7 +1035,7 @@ async def mint_one_unit(
                     metadata_cdn_url=metadata_cdn_url,
                     taxon=config.NFT_TAXON,
                     issuer=config.SWAP_ISSUER_ADDRESS,
-                    platform=memos.platform_for_surface(platform),
+                    platform=memos.platform_for(platform),
                     campaign=sponsored_claim_id,
                     coordinator_held=True,
                 )
@@ -1148,7 +1148,7 @@ async def mint_one_unit(
                 metadata_cdn_url=metadata_cdn_url,
                 taxon=config.NFT_TAXON,
                 issuer=config.SWAP_ISSUER_ADDRESS,
-                platform=memos.platform_for_surface(platform),
+                platform=memos.platform_for(platform),
                 destination=fold_to,
                 return_details=True,
             )

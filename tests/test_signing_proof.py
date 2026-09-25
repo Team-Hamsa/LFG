@@ -434,3 +434,22 @@ def test_signing_key_address_names_the_key_that_signed():
     assert proof.signing_key_address(_signed_by(REGULAR, ACCOUNT.classic_address)) == (
         REGULAR.classic_address
     )
+
+
+def test_agent_proof_memos_say_agent_and_are_matched_exactly():
+    w = Wallet.create()
+    tx = _autofill(
+        proof.build_proof_tx(
+            w.classic_address, NONCE, memos.ACTION_SIGNIN, platform=memos.PLATFORM_AGENT
+        )
+    )
+    assert memos.decode_memos(tx["Memos"])["platform"] == "agent"
+    tx["SigningPubKey"] = w.public_key
+    tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), w.private_key)
+    ok = proof.verify_proof(
+        tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN, platform=memos.PLATFORM_AGENT
+    )
+    assert ok == w.classic_address
+    with pytest.raises(proof.ProofError) as ei:  # an agent proof on a webapp row
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "memos"

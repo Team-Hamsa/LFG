@@ -187,7 +187,7 @@ class SwapSession:
             issuer=self.fee_issuer,
             return_url=self.return_url,
             user_token=self.push_user_token,
-            platform=memos.platform_for_surface(self.platform),
+            platform=memos.platform_for(self.platform),
             action=memos.ACTION_TRAIT_SWAP_FEE,
             # Sender-verified on-ledger: only this wallet may sign the fee.
             account=self.wallet_address,
@@ -598,7 +598,7 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         item["new_nft_id"],
         session.wallet_address,
         amount=_offer_amount(session),
-        platform=memos.platform_for_surface(session.platform),
+        platform=memos.platform_for(session.platform),
     )
     if not offer_id:
         # #211: the offer may have landed despite the falsy return — adopt it
@@ -616,7 +616,7 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         offer_id,
         return_url=session.return_url,
         user_token=session.push_user_token,
-        platform=memos.platform_for_surface(session.platform),
+        platform=memos.platform_for(session.platform),
         # Offer is Destination-locked to this wallet — pin the payload to it.
         account=session.wallet_address,
     )
@@ -884,7 +884,7 @@ async def run_swap_session(session: SwapSession) -> None:
                     metadata_cdn_url=item["metadata_url"],
                     taxon=config.SWAP_TAXON,
                     issuer=config.SWAP_ISSUER_ADDRESS,
-                    platform=memos.platform_for_surface(session.platform),
+                    platform=memos.platform_for(session.platform),
                 )
                 if not nft_id:
                     await _burn_replacements(burn_items)
@@ -911,7 +911,7 @@ async def run_swap_session(session: SwapSession) -> None:
                     item["nft"]["nft_id"],
                     session.wallet_address,
                     item["metadata_url"],
-                    platform=memos.platform_for_surface(session.platform),
+                    platform=memos.platform_for(session.platform),
                 )
                 if not modify_hash:
                     await _revert_modifies(modify_items, session.wallet_address)
@@ -946,7 +946,7 @@ async def run_swap_session(session: SwapSession) -> None:
                     burn_hash = await xrpl_ops.burn_nft(
                         item["nft"]["nft_id"],
                         session.wallet_address,
-                        platform=memos.platform_for_surface(session.platform),
+                        platform=memos.platform_for(session.platform),
                     )
                 if burn_hash:
                     item["burn_hash"] = burn_hash
