@@ -73,6 +73,19 @@ def test_guard_reports_added_and_removed_entries(tmp_path):
     assert guard.changes() == ["added user.email=t@t", "removed core.bare=false"]
 
 
+def test_guard_counts_a_repeated_value(tmp_path):
+    # Git reads the LAST value of a multi-valued key, so re-adding an earlier
+    # value changes the identity even though no new distinct entry appears.
+    repo, _ = _repo_with_worktree(tmp_path)
+    _git(repo, "config", "--add", "user.email", "a@a")
+    _git(repo, "config", "--add", "user.email", "b@b")
+    guard = _armed(str(repo / ".git" / "config"))
+
+    _git(repo, "config", "--add", "user.email", "a@a")
+
+    assert guard.changes() == ["added user.email=a@a"]
+
+
 def test_guard_refuses_to_arm_on_an_unreadable_config(tmp_path):
     # git exits 128 with no output for a missing or malformed file; that must
     # not read as an empty snapshot.

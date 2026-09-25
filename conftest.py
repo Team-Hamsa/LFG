@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -566,17 +567,19 @@ def _enclosing_git_config(start: str) -> str | None:
 class _GitConfigGuard:
     def __init__(self, path: str | None) -> None:
         self.path = path
-        self.entries_at_start: set[str] = set()
+        self.entries_at_start: Counter[str] = Counter()
         self.session_report: list[str] = []
 
-    def entries(self) -> set[str]:
+    def entries(self) -> Counter[str]:
         """The config's `key=value` entries, minus the sections other git processes churn.
 
+        A multiset: git reads the LAST value of a multi-valued key, so an
+        `--add` repeating an earlier value is a change a set would not see.
         Raises OSError when git cannot read the file: a missing or malformed
         config lists nothing, which must not pass for an empty one.
         """
         if self.path is None:
-            return set()
+            return Counter()
         listing = subprocess.run(
             ["git", "config", "--file", self.path, "--list", "--null"],
             capture_output=True,
@@ -585,15 +588,15 @@ class _GitConfigGuard:
         if listing.returncode != 0:
             raise OSError(listing.stderr.strip() or f"git config exited {listing.returncode}")
         entries = (entry.replace("\n", "=", 1) for entry in listing.stdout.split("\0") if entry)
-        return {entry for entry in entries if not entry.startswith(_CONCURRENT_GIT_SECTIONS)}
+        return Counter(e for e in entries if not e.startswith(_CONCURRENT_GIT_SECTIONS))
 
     def changes(self) -> list[str]:
         try:
             entries = self.entries()
         except OSError as exc:
             return [f"unreadable after the run: {exc}"]
-        return [f"added {e}" for e in sorted(entries - self.entries_at_start)] + [
-            f"removed {e}" for e in sorted(self.entries_at_start - entries)
+        return [f"added {e}" for e in sorted((entries - self.entries_at_start).elements())] + [
+            f"removed {e}" for e in sorted((self.entries_at_start - entries).elements())
         ]
 
 
