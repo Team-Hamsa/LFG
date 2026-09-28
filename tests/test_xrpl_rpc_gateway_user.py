@@ -6,6 +6,7 @@
 import asyncio
 import subprocess
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -78,6 +79,7 @@ def test_gateway_user_is_read_from_env_at_import():
         out = subprocess.run(
             [sys.executable, "-c", code],
             env={**_base_env(), "XRPL_RPC_X_USER": env_value},
+            cwd=Path(__file__).resolve().parents[1],  # repo root: lfg_core importable
             capture_output=True,
             text=True,
             check=True,
