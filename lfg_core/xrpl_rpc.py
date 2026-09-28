@@ -145,6 +145,7 @@ Scope: JSON-RPC only. ``XRPL_WS_URL`` / ``XRPL_CLIO_WS_URL`` are not covered.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -153,6 +154,7 @@ import time
 from collections.abc import Sequence
 from json import JSONDecodeError
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from xrpl.asyncio.clients import AsyncJsonRpcClient, XRPLRequestFailureException
@@ -215,6 +217,26 @@ TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
 
 # Test seam: an httpx transport (e.g. httpx.MockTransport); None = real network.
 _http_transport: httpx.AsyncBaseTransport | None = None
+
+# Rate-limit exemption on our own node: xrpld lists this host under
+# `secure_gateway`, and a request carrying a non-empty `X-User` header is then
+# exempt from resource charging (no admin rights). Sent only to private /
+# loopback IP endpoints, never to public fallbacks. Empty = never sent.
+GATEWAY_USER = os.getenv("XRPL_RPC_X_USER", "").strip()
+
+
+def _gateway_headers(url: str) -> dict[str, str]:
+    if not GATEWAY_USER:
+        return {}
+    try:
+        ip = ipaddress.ip_address(urlsplit(url).hostname or "")
+    except ValueError:
+        return {}
+    # is_private alone also admits link-local (169.254/16, fe80::/10) and
+    # unspecified (0.0.0.0, ::) addresses -- neither is a node we run.
+    ours = ip.is_loopback or (ip.is_private and not (ip.is_link_local or ip.is_unspecified))
+    return {"X-User": GATEWAY_USER} if ours else {}
+
 
 COOLDOWN_SECONDS = 45.0
 
@@ -328,7 +350,7 @@ async def _post_json_rpc(url: str, payload: dict[str, Any], timeout: float) -> R
     JsonRpcBase._request_impl exactly; a non-2xx is classified by status first
     (see the module docstring)."""
     async with httpx.AsyncClient(timeout=timeout, transport=_http_transport) as http_client:
-        response = await http_client.post(url, json=payload)
+        response = await http_client.post(url, json=payload, headers=_gateway_headers(url))
         status = response.status_code
         if 200 <= status < 300:
             try:
