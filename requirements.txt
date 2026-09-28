@@ -33,7 +33,7 @@ qrcode[pil]==8.2  # For generating QR codes locally
 
 # Environment variable management. Held at 0.21.1: xumm-sdk-py 1.0.4 pins
 # python-dotenv<=0.21.1, so 1.x is unresolvable until that SDK moves.
-python-dotenv==0.21.1
+python-dotenv==1.2.3
 
 # Async HTTP client
 aiohttp==3.14.3
