@@ -19,7 +19,7 @@ mypy==2.3.1
 
 # Linter/formatter (also run via pre-commit; pinned here for direct CLI use
 # during the Phase-B grind: `.venv/bin/ruff check --fix .`).
-ruff==0.16.8
+ruff==0.16.9
 
 # Parallel test execution for the pre-push/CI pytest gate (-n auto). The
 # suite is xdist-clean as of 2026-09-20: --dist loadfile keeps each module's
