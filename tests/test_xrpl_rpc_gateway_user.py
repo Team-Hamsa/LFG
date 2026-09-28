@@ -4,6 +4,8 @@
 # private/loopback endpoints -- never to public fallbacks.
 
 import asyncio
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -50,6 +52,9 @@ def test_x_user_sent_to_private_node_when_configured(monkeypatch, url):
         "https://s1.ripple.com:51234/",
         "http://44.244.177.231:51234/",
         "http://localhost.evil.example/",
+        "http://169.254.1.1:5005/",
+        "http://0.0.0.0:5005/",
+        "http://[fe80::1]:5005/",
     ],
 )
 def test_x_user_never_sent_to_public_endpoints(monkeypatch, url):
@@ -64,3 +69,23 @@ def test_no_x_user_when_unset(monkeypatch):
     seen = _capture(monkeypatch)
     _post("http://10.30.0.176:5005/")
     assert "X-User" not in seen[0].headers
+
+
+def test_gateway_user_is_read_from_env_at_import():
+    # Exercises the real import-time wiring (the tests above patch the constant).
+    code = "from lfg_core import xrpl_rpc; print(repr(xrpl_rpc.GATEWAY_USER))"
+    for env_value, expected in (("  lfg \n", "'lfg'"), ("", "''")):
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**_base_env(), "XRPL_RPC_X_USER": env_value},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert out.stdout.strip() == expected
+
+
+def _base_env() -> dict[str, str]:
+    import os
+
+    return {k: v for k, v in os.environ.items() if k != "XRPL_RPC_X_USER"}

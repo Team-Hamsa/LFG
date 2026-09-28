@@ -232,7 +232,10 @@ def _gateway_headers(url: str) -> dict[str, str]:
         ip = ipaddress.ip_address(urlsplit(url).hostname or "")
     except ValueError:
         return {}
-    return {"X-User": GATEWAY_USER} if ip.is_private or ip.is_loopback else {}
+    # is_private alone also admits link-local (169.254/16, fe80::/10) and
+    # unspecified (0.0.0.0, ::) addresses -- neither is a node we run.
+    ours = ip.is_loopback or (ip.is_private and not (ip.is_link_local or ip.is_unspecified))
+    return {"X-User": GATEWAY_USER} if ours else {}
 
 
 COOLDOWN_SECONDS = 45.0
