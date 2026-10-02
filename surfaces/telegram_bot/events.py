@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from lfg_service.events import Event
 from surfaces._client import LFGServiceClient
+from surfaces.telegram_bot import delivered
 
 # Every in-process NFT interaction the service publishes (#91). Burns are NOT
 # here (out-of-process / covered by swap.*); the X surface is deferred to #41.
@@ -26,6 +27,14 @@ _ANNOUNCE_EVENT_TYPES = [
 
 def _is_telegram(ev: Event) -> bool:
     return (ev.identity or {}).get("platform") == "telegram"
+
+
+def _shown_in_chat(ev: Event) -> bool:
+    """True when this surface's own /mint handler is delivering the minter their
+    artwork in chat, which makes the DM a duplicate of it (#591). A Mini App
+    (#89) mint is platform="telegram" too but claims no session, so its DM —
+    that user's only delivery — still goes out."""
+    return delivered.owns(str((ev.data or {}).get("id") or ""))
 
 
 def _minter_display(ev: Event) -> str:
@@ -98,7 +107,12 @@ async def run_event_loop(
                 message = make_announcement(ev)
                 image = announcement_image(ev)
                 await announce(message, image)
-                if dm_user is not None and ev.type == "mint.completed" and _is_telegram(ev):
+                if (
+                    dm_user is not None
+                    and ev.type == "mint.completed"
+                    and _is_telegram(ev)
+                    and not _shown_in_chat(ev)
+                ):
                     uid = (ev.identity or {}).get("platform_user_id")
                     if uid:
                         await dm_user(uid, message, image)
