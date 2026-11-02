@@ -15,11 +15,11 @@ pre-commit==4.6.2
 
 # Type checker (also pulled by the pre-commit mypy hook; pinned here so it can
 # be run directly during the Phase-B grind: `.venv/bin/mypy .`).
-mypy==2.3.1
+mypy==2.4.1
 
 # Linter/formatter (also run via pre-commit; pinned here for direct CLI use
 # during the Phase-B grind: `.venv/bin/ruff check --fix .`).
-ruff==0.16.8
+ruff==0.17.3
 
 # Parallel test execution for the pre-push/CI pytest gate (-n auto). The
 # suite is xdist-clean as of 2026-09-20: --dist loadfile keeps each module's
@@ -34,4 +34,4 @@ types-PyYAML==6.0.12.20260906
 # Type stubs for oauthlib (surfaces/x_bot/x_api.py signs requests with
 # oauthlib.oauth1.Client); mypy needs these installed or it fails with
 # "Library stubs not installed".
-types-oauthlib==3.3.0.20260724
+types-oauthlib==4.0.0.20261018
