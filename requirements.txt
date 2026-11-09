@@ -51,7 +51,7 @@ cryptography==50.0.1
 PyNaCl==1.6.2
 
 # Testing (webapp smoke tests)
-pytest==9.1.1
+pytest==9.2.0
 
 # Telegram bot framework
 python-telegram-bot==22.8
