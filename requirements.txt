@@ -26,26 +26,26 @@ bunnycdnpython==0.0.8
 numpy==2.2.6
 
 # Image processing
-opencv-python==5.0.0.93
+opencv-python==5.1.0.95
 Pillow==12.3.0
 ffmpeg-python==0.2.0  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
 qrcode[pil]==8.2  # For generating QR codes locally
 
 # Environment variable management. Held at 0.21.1: xumm-sdk-py 1.0.4 pins
 # python-dotenv<=0.21.1, so 1.x is unresolvable until that SDK moves.
-python-dotenv==0.21.1
+python-dotenv==1.2.4
 
 # Async HTTP client
-aiohttp==3.14.3
+aiohttp==3.14.5
 
 # OAuth 1.0a request signing (X/Twitter API — surfaces/x_bot/x_api.py).
 # Already present transitively via xumm-sdk-py → requests-oauthlib, but we
 # import it directly, so declare it directly.
-oauthlib==3.3.1
+oauthlib==4.0.1
 
 # Fernet at-rest encryption for per-user X OAuth2 tokens (#252,
 # lfg_service/x_oauth.py — a leaked DB file must not leak posting capability).
-cryptography==50.0.1
+cryptography==50.0.2
 
 # Voice support for Discord (optional)
 PyNaCl==1.6.2
